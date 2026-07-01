@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.0...v2.6.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* extensionId를 manifest.json key에서 자동 계산하도록 변경 ([33b7360](https://github.com/fantaXII/opencode_chrome_ext/commit/33b7360298abddbc1f671c15382b6b1318a1f47d))
+
 # [2.6.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.5.5...v2.6.0) (2026-06-30)
 
 
