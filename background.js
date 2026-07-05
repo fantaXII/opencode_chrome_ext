@@ -400,6 +400,12 @@ async function getDefaultDirectory() {
 // Windows 경로(C:\...) → WSL 경로(/mnt/c/...) 변환
 function toWSLPath(p) {
   if (!p) return '';
+  // \\wsl$\<distro>\... 또는 \\wsl.localhost\<distro>\... : WSL 파일시스템을 직접 가리키는 UNC 경로
+  const unc = p.match(/^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+(\\.*)?$/i);
+  if (unc) {
+    const rest = (unc[1] || '').replace(/\\/g, '/');
+    return rest || '/';
+  }
   const m = p.match(/^([A-Za-z]):[\\\/](.*)/);
   if (m) {
     const drive = m[1].toLowerCase();
@@ -1140,7 +1146,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (res?.directory) {
               const wslPath = toWSLPath(res.directory);
               debugLog('INFO', `browse-for-folder: selected=${res.directory}, wsl=${wslPath}`);
-              sendResponse({ directory: wslPath });
+              sendResponse({ directory: wslPath, warning: res.warning || null });
             } else {
               debugLog('INFO', 'browse-for-folder: cancelled or no directory returned');
               sendResponse({ directory: null });

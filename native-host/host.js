@@ -239,6 +239,17 @@ function stopOpenCodeServer() {
   }
 }
 
+// 드라이브 문자가 네트워크 드라이브면 매핑 대상 UNC 경로를 반환, 로컬 고정 디스크면 null
+function resolveNetworkDriveRoot(driveLetter) {
+  try {
+    const ps = `(Get-PSDrive -Name '${driveLetter}' -ErrorAction SilentlyContinue).DisplayRoot`;
+    const out = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8' }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
 // ============================================
 // 메시지 핸들러
 // ============================================
@@ -284,20 +295,42 @@ async function handleMessage(message) {
     case 'browse-for-folder': {
       fileLog('INFO', 'browse-for-folder: Opening FolderBrowserDialog...');
       try {
-        const { execSync } = require('child_process');
         const ps = [
           'Add-Type -AssemblyName System.Windows.Forms;',
           '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
           "$d.Description = 'Select working directory';",
           "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { '' }"
         ].join(' ');
-        const dir = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8' }).trim();
-        if (dir) {
-          fileLog('INFO', `browse-for-folder: Selected - ${dir}`);
-        } else {
+        let dir = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8' }).trim();
+        if (!dir) {
           fileLog('INFO', 'browse-for-folder: Cancelled by user');
+          return { status: 'success', directory: null };
         }
-        return { status: 'success', directory: dir || null };
+        fileLog('INFO', `browse-for-folder: Selected - ${dir}`);
+
+        let warning = null;
+        const driveMatch = dir.match(/^([A-Za-z]):[\\\/](.*)$/);
+        if (driveMatch) {
+          const driveLetter = driveMatch[1];
+          const rest = driveMatch[2];
+          const displayRoot = resolveNetworkDriveRoot(driveLetter);
+          if (displayRoot) {
+            // 네트워크 드라이브가 WSL 파일시스템(\\wsl$\<distro>\... 또는 \\wsl.localhost\<distro>\...)을
+            // 되돌아 가리키는 경우: 드라이브 문자 대신 실제 리눅스 절대경로로 치환
+            const wslRootMatch = displayRoot.match(/^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+(\\.*)?$/i);
+            if (wslRootMatch) {
+              const basePath = (wslRootMatch[1] || '').replace(/\\/g, '/');
+              const restPath = rest ? `/${rest.replace(/\\/g, '/')}` : '';
+              dir = (basePath + restPath) || '/';
+              fileLog('INFO', `browse-for-folder: ${driveLetter}: network drive -> WSL path - ${dir}`);
+            } else {
+              warning = `선택한 폴더(${driveLetter}:)는 네트워크 드라이브(${displayRoot})이며, opencode 서버(WSL)에서 접근하지 못할 수 있습니다.`;
+              fileLog('WARN', `browse-for-folder: ${driveLetter}: is a non-WSL network drive - ${displayRoot}`);
+            }
+          }
+        }
+
+        return { status: 'success', directory: dir, warning };
       } catch (e) {
         fileLog('ERROR', `browse-for-folder: Failed - ${e.message}`);
         return { status: 'error', error: e.message, directory: null };

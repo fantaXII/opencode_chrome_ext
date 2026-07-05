@@ -130,6 +130,9 @@
     if (res?.directory) {
       const result = await sendMessageToBackground('set-working-directory', { directory: res.directory });
       updateWorkingFolderDisplay(result.directory || res.directory);
+      if (res.warning) {
+        addErrorMessage(res.warning);
+      }
     }
   });
 
