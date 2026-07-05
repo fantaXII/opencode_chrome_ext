@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.2](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.1...v2.6.2) (2026-07-05)
+
+
+### Bug Fixes
+
+* 네트워크 드라이브로 매핑된 WSL 경로의 working directory 선택 오류 수정 ([48adf35](https://github.com/fantaXII/opencode_chrome_ext/commit/48adf35cd446fd74282996253d99e21351fc0504))
+
 ## [2.6.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.0...v2.6.1) (2026-07-01)
 
 
