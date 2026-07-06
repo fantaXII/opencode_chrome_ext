@@ -57,6 +57,7 @@ let serverState = {
 };
 
 let nativeHostMissingFlag = false;
+let _probedCwdPort = null; // 이 포트에 대해 이미 refreshServerCwd를 시도했는지 추적
 
 let sessions = new Map();
 let tabSessions = new Map(); // tabId → sessionId
@@ -211,8 +212,11 @@ async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
 
       console.log(`[startServerWithNativeMessaging] Native Messaging 응답:`, response);
       if (response.status === 'success') {
-        debugLog('INFO', `NativeMsg: success, port=${response.port}`);
+        debugLog('INFO', `NativeMsg: success, port=${response.port}, isWSL=${response.isWSL}`);
         console.log(`[startServerWithNativeMessaging] 성공 - port=${response.port}`);
+        if (typeof response.isWSL === 'boolean') {
+          chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
+        }
         return response.port;
       }
       // host.js가 반환한 에러 + 진단 정보 기록
@@ -319,6 +323,13 @@ async function ensureOpenCodeServer() {
       await syncModelFromServer(port);
     }
 
+    // working directory 설정이 실제 서버(WSL/Windows 네이티브) 경로 포맷과
+    // 어긋나지 않도록, 서버 연결 확인 즉시(첫 채팅 이전이라도) 실측 cwd를 한 번 조회한다.
+    if (port && port !== _probedCwdPort) {
+      _probedCwdPort = port;
+      refreshServerCwd(port).catch(() => {});
+    }
+
     if (port) {
       console.log(`[ensureOpenCodeServer] 성공 - 포트 ${port} 반환`);
       return port;
@@ -382,19 +393,23 @@ async function getWorkingDirectory() {
 }
 
 async function getDefaultDirectory() {
-  // 1. Native host (Windows)
-  try {
-    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-home-dir' });
-    if (response?.directory) return response.directory;
-  } catch {}
-
-  // 2. SSE 이벤트에서 캐시된 서버 cwd
+  // 1. 실측값 우선: SSE/probe로 확인된 실제 서버 cwd (형식이 확실함)
   try {
     const stored = await chrome.storage.local.get('serverCwd');
     if (stored.serverCwd) return stored.serverCwd;
   } catch {}
 
+  // 2. Native host 추정값 (서버가 WSL인지 Windows 네이티브인지 모르는 상태의 fallback)
+  try {
+    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-home-dir' });
+    if (response?.directory) return response.directory;
+  } catch {}
+
   return '';
+}
+
+function isWindowsDrivePath(p) {
+  return /^[A-Za-z]:[\\\/]/.test(p || '');
 }
 
 // Windows 경로(C:\...) → WSL 경로(/mnt/c/...) 변환
@@ -407,12 +422,116 @@ function toWSLPath(p) {
     return rest || '/';
   }
   const m = p.match(/^([A-Za-z]):[\\\/](.*)/);
-  if (m) {
-    const drive = m[1].toLowerCase();
-    const rest = m[2].replace(/\\/g, '/').replace(/\/$/, '');
-    return `/mnt/${drive}/${rest}`;
+  if (!m) return p.replace(/\\/g, '/');
+  const drive = m[1].toLowerCase();
+  const rest = m[2].replace(/\\/g, '/').replace(/\/$/, '');
+  return `/mnt/${drive}/${rest}`;
+}
+
+/**
+ * 사용자가 지정한 working directory를 "실제 실행 중인 opencode 서버"가 이해하는
+ * 경로 포맷으로 정규화한다.
+ *
+ * host.js는 Windows PATH를 1순위, WSL을 2순위 fallback으로 opencode를 찾아 기동한다
+ * (native-host/host.js findOpenCodePath). 따라서 서버가 항상 WSL이라고 가정하고
+ * C:\... 를 /mnt/c/... 로 강제 변환하면, Windows 네이티브로 뜬 서버에는 존재하지
+ * 않는 경로를 보내게 되어 working directory 설정이 조용히 무시된다.
+ *
+ * 판단 우선순위:
+ *   1. serverCwd (SSE/probe로 실측한 서버의 실제 cwd 포맷) — 가장 신뢰도 높음
+ *   2. serverIsWSL (이번 세션에 native host가 직접 서버를 띄우며 기록한 값)
+ *   3. 둘 다 모르면 변환하지 않음 (host.js의 Windows-우선 탐색과 일치하는 기본값)
+ */
+async function normalizeWorkingDirectory(rawPath) {
+  if (!rawPath) return '';
+  if (!isWindowsDrivePath(rawPath)) {
+    return rawPath.replace(/\\/g, '/').replace(/\/$/, '');
   }
-  return p.replace(/\\/g, '/');
+
+  let serverIsPosix = null;
+  let source = 'unknown';
+  try {
+    const { serverCwd } = await chrome.storage.local.get('serverCwd');
+    if (serverCwd) {
+      serverIsPosix = !isWindowsDrivePath(serverCwd);
+      source = `serverCwd=${serverCwd}`;
+    }
+  } catch {}
+
+  if (serverIsPosix === null) {
+    try {
+      const { serverIsWSL } = await chrome.storage.local.get('serverIsWSL');
+      if (typeof serverIsWSL === 'boolean') {
+        serverIsPosix = serverIsWSL;
+        source = `serverIsWSL=${serverIsWSL}`;
+      }
+    } catch {}
+  }
+
+  if (serverIsPosix === true) {
+    const converted = toWSLPath(rawPath);
+    debugLog('INFO', `normalizeWorkingDirectory: WSL server (${source}) - ${rawPath} -> ${converted}`);
+    return converted;
+  }
+
+  // false(Windows 네이티브 확인됨) 또는 null(알 수 없음) — 드라이브 경로 그대로 유지
+  const normalized = rawPath.replace(/\\/g, '/').replace(/\/$/, '');
+  const level = serverIsPosix === false ? 'INFO' : 'WARN';
+  debugLog(level, `normalizeWorkingDirectory: native/unknown server (${source}) - keep drive path, ${rawPath} -> ${normalized}`);
+  return normalized;
+}
+
+/**
+ * /global/event SSE의 첫 이벤트에서 서버의 실제 directory 값을 즉시 한 번 조회한다.
+ * 채팅 메시지를 보내기 전(=subscribeToEvents가 아직 안 붙기 전)에도 서버가 실제로
+ * 어떤 경로 포맷을 쓰는지 알 수 있도록, 서버 연결이 확인되는 즉시 호출한다.
+ */
+async function probeServerDirectory(port) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/global/event`, { signal: controller.signal });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const parts = pending.split('\n\n');
+      pending = parts.pop();
+      for (const part of parts) {
+        for (const line of part.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          try {
+            const raw = JSON.parse(line.slice(5).trim());
+            if (raw.directory) {
+              reader.cancel().catch(() => {});
+              return raw.directory;
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {
+    // 타임아웃/연결 실패 시 조용히 포기 (fallback은 normalizeWorkingDirectory 쪽에서 처리)
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  return null;
+}
+
+async function refreshServerCwd(port) {
+  const directory = await probeServerDirectory(port);
+  if (!directory) {
+    debugLog('WARN', `refreshServerCwd: probe failed or timed out - port=${port}`);
+    return;
+  }
+  const { serverCwd } = await chrome.storage.local.get('serverCwd');
+  if (serverCwd === directory) return;
+  await chrome.storage.local.set({ serverCwd: directory }).catch(() => {});
+  debugLog('INFO', `refreshServerCwd: server directory probed - ${directory}`);
+  chrome.runtime.sendMessage({ action: 'default-directory-updated', directory }).catch(() => {});
 }
 
 // ============================================
@@ -1139,7 +1258,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
 
         case 'set-working-directory': {
-          const normalized = toWSLPath(message.directory || '');
+          const normalized = await normalizeWorkingDirectory(message.directory || '');
           await chrome.storage.local.set({ workingDirectory: normalized });
           sendResponse({ success: true, directory: normalized });
           break;
@@ -1149,9 +1268,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           try {
             const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'browse-for-folder' });
             if (res?.directory) {
-              const wslPath = toWSLPath(res.directory);
-              debugLog('INFO', `browse-for-folder: selected=${res.directory}, wsl=${wslPath}`);
-              sendResponse({ directory: wslPath, warning: res.warning || null });
+              // 실제 변환은 sidepanel이 이어서 호출하는 set-working-directory 한 곳에서만 수행
+              debugLog('INFO', `browse-for-folder: selected=${res.directory}`);
+              sendResponse({ directory: res.directory, warning: res.warning || null });
             } else {
               debugLog('INFO', 'browse-for-folder: cancelled or no directory returned');
               sendResponse({ directory: null });

@@ -262,8 +262,8 @@ async function handleMessage(message) {
     case 'start':
       try {
         const port = await startOpenCodeServer(preferredPort || 4096);
-        fileLog('INFO', `handleMessage: start success, port=${port}`);
-        return { status: 'success', port };
+        fileLog('INFO', `handleMessage: start success, port=${port}, isWSL=${isWSL}`);
+        return { status: 'success', port, isWSL };
       } catch (error) {
         fileLog('ERROR', `handleMessage: start failed - ${error.message}`);
         return { status: 'error', error: error.message, diagnostic: error.diagnostic || null };
