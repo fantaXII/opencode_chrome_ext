@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.3](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.2...v2.6.3) (2026-07-06)
+
+
+### Bug Fixes
+
+* /config의 provider 필드를 모델 providerID로 잘못 해석하는 문제 수정 ([a201abe](https://github.com/fantaXII/opencode_chrome_ext/commit/a201abed71adb0e9436f52934c8e341bfc6e09b3))
+* working directory 설정이 네이티브 Windows opencode 서버에서 무시되는 문제 수정 ([c8e4eb1](https://github.com/fantaXII/opencode_chrome_ext/commit/c8e4eb1774175bbcbc5f2cb35e15e7436f72d2b5))
+
 ## [2.6.2](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.1...v2.6.2) (2026-07-05)
 
 
