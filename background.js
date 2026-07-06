@@ -979,8 +979,13 @@ async function syncModelFromServer(port) {
     const response = await fetch(`http://127.0.0.1:${port}/config`);
     if (response.ok) {
       const config = await response.json();
-      if (config.model && config.provider) {
-        selectedModel = { providerID: config.provider, modelID: config.model };
+      // config.model은 "providerID/modelID" 형식의 문자열. config.provider는 선택된
+      // provider가 아니라 opencode.json에 정의된 커스텀 provider 목록 객체이므로 사용하지 않는다.
+      if (typeof config.model === 'string' && config.model.includes('/')) {
+        const separatorIndex = config.model.indexOf('/');
+        const providerID = config.model.slice(0, separatorIndex);
+        const modelID = config.model.slice(separatorIndex + 1);
+        selectedModel = { providerID, modelID };
         chrome.storage.local.set({ selectedModel });
         console.log('서버 모델 동기화됨:', selectedModel);
       }
