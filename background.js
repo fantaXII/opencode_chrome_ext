@@ -609,10 +609,10 @@ async function deleteSession(sessionId) {
 
   sessions.delete(sessionId);
 
-  // SSE 연결 정리
-  const eventSource = eventSources.get(sessionId);
-  if (eventSource) {
-    eventSource.close();
+  // SSE 연결 정리 (eventSources는 fetch 기반 AbortController를 담는다)
+  const controller = eventSources.get(sessionId);
+  if (controller) {
+    controller.abort();
     eventSources.delete(sessionId);
   }
 }
@@ -1259,8 +1259,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'set-working-directory': {
           const normalized = await normalizeWorkingDirectory(message.directory || '');
+          const previous = await getWorkingDirectory();
           await chrome.storage.local.set({ workingDirectory: normalized });
-          sendResponse({ success: true, directory: normalized });
+
+          // opencode 세션은 첫 prompt 요청의 x-opencode-directory로 디렉토리가
+          // 한 번 고정되면 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 디렉토리가
+          // 실제로 바뀐 경우, 기존 세션을 버리고 새 세션을 만들어야 새 디렉토리가 적용된다.
+          let newSessionId = null;
+          if (normalized !== previous) {
+            const tabId = message.tabId;
+            const oldSessionId = tabId ? tabSessions.get(tabId) : null;
+            if (oldSessionId) {
+              try {
+                await deleteSession(oldSessionId);
+                newSessionId = await createSession('Chrome Extension Chat');
+                tabSessions.set(tabId, newSessionId);
+                persistState();
+                debugLog('INFO', `Working directory changed - session recreated (old=${oldSessionId}, new=${newSessionId}, dir=${normalized})`);
+              } catch (e) {
+                debugLog('ERROR', `Working directory changed but session recreate failed - ${e.message}`);
+              }
+            }
+          }
+
+          sendResponse({ success: true, directory: normalized, newSessionId });
           break;
         }
 

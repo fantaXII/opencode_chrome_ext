@@ -128,8 +128,9 @@
   folderIcon.addEventListener('click', async () => {
     const res = await sendMessageToBackground('browse-for-folder');
     if (res?.directory) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: res.directory });
+      const result = await sendMessageToBackground('set-working-directory', { directory: res.directory, tabId: currentTabId });
       updateWorkingFolderDisplay(result.directory || res.directory);
+      applyWorkingDirSessionReset(result);
       if (res.warning) {
         addErrorMessage(res.warning);
       }
@@ -140,9 +141,20 @@
     const newPath = workingFolderInput.value.trim();
     exitEditMode();
     if (newPath !== currentWorkingDir) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: newPath });
+      const result = await sendMessageToBackground('set-working-directory', { directory: newPath, tabId: currentTabId });
       updateWorkingFolderDisplay(result.directory || newPath);
+      applyWorkingDirSessionReset(result);
     }
+  }
+
+  // opencode 세션은 첫 prompt 요청 시의 디렉토리로 고정되므로, 작업 디렉토리를
+  // 바꾸면 background가 세션을 새로 만들어 준다. 새 세션 ID로 갈아끼우고
+  // 채팅 화면을 초기화해 사용자에게 알린다.
+  function applyWorkingDirSessionReset(result) {
+    if (!result?.newSessionId) return;
+    currentSessionId = result.newSessionId;
+    messagesContainer.innerHTML = '';
+    addBotMessage('작업 디렉토리가 변경되어 새 세션을 시작합니다.');
   }
 
   workingFolderInput.addEventListener('keydown', async (e) => {
@@ -630,8 +642,9 @@
     if (slash === '/wd') {
       if (!args) { addBotMessage('사용법: /wd <path>'); sendBtn.disabled = false; return; }
       try {
-        const result = await sendMessageToBackground('set-working-directory', { directory: args });
+        const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId });
         updateWorkingFolderDisplay(result.directory || args);
+        applyWorkingDirSessionReset(result);
         addBotMessage(`작업 디렉토리가 변경되었습니다: ${result.directory || args}`);
       } catch (e) {
         addErrorMessage(`디렉토리 변경 실패: ${e.message}`);
