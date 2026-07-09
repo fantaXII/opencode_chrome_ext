@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.4](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.3...v2.6.4) (2026-07-09)
+
+
+### Bug Fixes
+
+* 작업 디렉토리 변경이 기존 세션에 반영되지 않는 문제 수정 ([90148bd](https://github.com/fantaXII/opencode_chrome_ext/commit/90148bd738b1491e0f2ddd38a6677f8fd328b706))
+
 ## [2.6.3](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.2...v2.6.3) (2026-07-06)
 
 
