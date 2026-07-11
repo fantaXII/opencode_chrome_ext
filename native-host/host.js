@@ -250,6 +250,38 @@ function resolveNetworkDriveRoot(driveLetter) {
   }
 }
 
+// 드라이브 문자 경로를 필요 시 WSL 절대경로로 치환. 변환 안 되면 원본 경로 그대로 반환하고 warning을 채움
+// driveRootCache: 다중 파일 선택 시 같은 드라이브 문자에 대해 powershell을 반복 호출하지 않도록 호출자가 넘기는 캐시
+function resolveDrivePath(rawPath, driveRootCache) {
+  const driveMatch = rawPath.match(/^([A-Za-z]):[\\\/](.*)$/);
+  if (!driveMatch) return { path: rawPath, warning: null };
+
+  const driveLetter = driveMatch[1];
+  const rest = driveMatch[2];
+  let displayRoot;
+  if (driveRootCache && driveRootCache.has(driveLetter)) {
+    displayRoot = driveRootCache.get(driveLetter);
+  } else {
+    displayRoot = resolveNetworkDriveRoot(driveLetter);
+    if (driveRootCache) driveRootCache.set(driveLetter, displayRoot);
+  }
+  if (!displayRoot) return { path: rawPath, warning: null };
+
+  // 네트워크 드라이브가 WSL 파일시스템(\\wsl$\<distro>\... 또는 \\wsl.localhost\<distro>\...)을
+  // 되돌아 가리키는 경우: 드라이브 문자 대신 실제 리눅스 절대경로로 치환
+  const wslRootMatch = displayRoot.match(/^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+(\\.*)?$/i);
+  if (wslRootMatch) {
+    const basePath = (wslRootMatch[1] || '').replace(/\\/g, '/');
+    const restPath = rest ? `/${rest.replace(/\\/g, '/')}` : '';
+    return { path: (basePath + restPath) || '/', warning: null };
+  }
+
+  return {
+    path: rawPath,
+    warning: `선택한 항목(${driveLetter}:)은 네트워크 드라이브(${displayRoot})이며, opencode 서버(WSL)에서 접근하지 못할 수 있습니다.`
+  };
+}
+
 // ============================================
 // 메시지 핸들러
 // ============================================
@@ -308,32 +340,57 @@ async function handleMessage(message) {
         }
         fileLog('INFO', `browse-for-folder: Selected - ${dir}`);
 
-        let warning = null;
-        const driveMatch = dir.match(/^([A-Za-z]):[\\\/](.*)$/);
-        if (driveMatch) {
-          const driveLetter = driveMatch[1];
-          const rest = driveMatch[2];
-          const displayRoot = resolveNetworkDriveRoot(driveLetter);
-          if (displayRoot) {
-            // 네트워크 드라이브가 WSL 파일시스템(\\wsl$\<distro>\... 또는 \\wsl.localhost\<distro>\...)을
-            // 되돌아 가리키는 경우: 드라이브 문자 대신 실제 리눅스 절대경로로 치환
-            const wslRootMatch = displayRoot.match(/^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+(\\.*)?$/i);
-            if (wslRootMatch) {
-              const basePath = (wslRootMatch[1] || '').replace(/\\/g, '/');
-              const restPath = rest ? `/${rest.replace(/\\/g, '/')}` : '';
-              dir = (basePath + restPath) || '/';
-              fileLog('INFO', `browse-for-folder: ${driveLetter}: network drive -> WSL path - ${dir}`);
-            } else {
-              warning = `선택한 폴더(${driveLetter}:)는 네트워크 드라이브(${displayRoot})이며, opencode 서버(WSL)에서 접근하지 못할 수 있습니다.`;
-              fileLog('WARN', `browse-for-folder: ${driveLetter}: is a non-WSL network drive - ${displayRoot}`);
-            }
-          }
+        const resolved = resolveDrivePath(dir);
+        if (resolved.path !== dir) {
+          fileLog('INFO', `browse-for-folder: network drive -> WSL path - ${resolved.path}`);
+        } else if (resolved.warning) {
+          fileLog('WARN', `browse-for-folder: ${resolved.warning}`);
         }
 
-        return { status: 'success', directory: dir, warning };
+        return { status: 'success', directory: resolved.path, warning: resolved.warning };
       } catch (e) {
         fileLog('ERROR', `browse-for-folder: Failed - ${e.message}`);
         return { status: 'error', error: e.message, directory: null };
+      }
+    }
+
+    case 'browse-for-file': {
+      fileLog('INFO', 'browse-for-file: Opening OpenFileDialog...');
+      try {
+        const ps = [
+          'Add-Type -AssemblyName System.Windows.Forms;',
+          '$d = New-Object System.Windows.Forms.OpenFileDialog;',
+          "$d.Title = 'Select file(s) to attach';",
+          '$d.Multiselect = $true;',
+          "if ($d.ShowDialog() -eq 'OK') { $d.FileNames -join [char]10 } else { '' }"
+        ].join(' ');
+        const out = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8' }).trim();
+        if (!out) {
+          fileLog('INFO', 'browse-for-file: Cancelled by user');
+          return { status: 'success', files: [] };
+        }
+
+        const rawFiles = out.split('\n').map(l => l.trim()).filter(Boolean);
+        fileLog('INFO', `browse-for-file: Selected ${rawFiles.length} file(s)`);
+
+        const files = [];
+        const warnings = [];
+        const driveRootCache = new Map();
+        for (const rawPath of rawFiles) {
+          const resolved = resolveDrivePath(rawPath, driveRootCache);
+          if (resolved.path !== rawPath) {
+            fileLog('INFO', `browse-for-file: network drive -> WSL path - ${resolved.path}`);
+          } else if (resolved.warning) {
+            fileLog('WARN', `browse-for-file: ${resolved.warning}`);
+            warnings.push(resolved.warning);
+          }
+          files.push(resolved.path);
+        }
+
+        return { status: 'success', files, warnings };
+      } catch (e) {
+        fileLog('ERROR', `browse-for-file: Failed - ${e.message}`);
+        return { status: 'error', error: e.message, files: [] };
       }
     }
 

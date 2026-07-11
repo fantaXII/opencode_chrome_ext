@@ -47,6 +47,12 @@
   let selectedDropdownIndex = -1;
   let availableAgents = [];
   let currentAgentIndex = -1;
+  let attachedFiles = [];
+  const attachmentsBar = document.getElementById('attachments-bar');
+
+  function updateSendButtonState() {
+    sendBtn.disabled = !messageInput.value.trim() && attachedFiles.length === 0;
+  }
 
   async function init() {
     updateConnectionStatus('connecting');
@@ -187,7 +193,7 @@
     }
 
     // 세션 준비 완료 후 입력 내용이 있으면 전송 버튼 활성화
-    sendBtn.disabled = !messageInput.value.trim();
+    updateSendButtonState();
 
     try {
       const { pendingContextText } = await chrome.storage.local.get('pendingContextText');
@@ -684,7 +690,8 @@
 
   async function sendMessage() {
     const message = messageInput.value.trim();
-    if (!message || isLoading) return;
+    if (isLoading) return;
+    if (!message && attachedFiles.length === 0) return;
 
     if (message.startsWith('/')) {
       if (message.trim().toLowerCase() === '/debug') {
@@ -704,16 +711,23 @@
 
     if (!currentSessionId) return;
 
-    addUserMessage(message);
+    const attachmentsForMessage = attachedFiles.slice();
+    const attachmentBlock = attachmentsForMessage.length > 0
+      ? `[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요]\n${attachmentsForMessage.map((f) => `- ${f}`).join('\n')}\n\n`
+      : '';
+
+    addUserMessage(message, attachmentsForMessage);
     messageInput.value = '';
     messageInput.style.height = 'auto';
+    attachedFiles = [];
+    renderAttachments();
     setLoadingState(true);
     addTypingIndicator();
 
     try {
       await sendMessageToBackground('send-message', {
         sessionId: currentSessionId,
-        message: message
+        message: attachmentBlock + message
       });
     } catch (error) {
       console.error('메시지 전송 실패:', error);
@@ -723,13 +737,26 @@
     }
   }
 
-  function addUserMessage(content) {
+  function addUserMessage(content, attachments = []) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message user-message';
     messageDiv.innerHTML = `
       <div class="message-avatar">👤</div>
       <div class="message-content">${escapeHtml(content)}</div>
     `;
+    if (attachments.length > 0) {
+      const contentDiv = messageDiv.querySelector('.message-content');
+      const list = document.createElement('div');
+      list.className = 'message-attachments';
+      attachments.forEach((filePath) => {
+        const item = document.createElement('div');
+        item.className = 'message-attachment-item';
+        item.title = filePath;
+        item.textContent = '📎 ' + (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
+        list.appendChild(item);
+      });
+      contentDiv.appendChild(list);
+    }
     messagesContainer.appendChild(messageDiv);
     scrollToBottom();
   }
@@ -959,7 +986,7 @@
   messageInput.addEventListener('input', () => {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-    sendBtn.disabled = !messageInput.value.trim();
+    updateSendButtonState();
 
     const val = messageInput.value;
     if (val.startsWith('/') && !val.includes(' ')) {
@@ -1028,7 +1055,7 @@
     } else {
       sendBtn.textContent = '↑';
       sendBtn.classList.remove('cancel-mode');
-      sendBtn.disabled = !messageInput.value.trim();
+      updateSendButtonState();
       loadingIndicator.classList.add('hidden');
     }
   }
@@ -1192,8 +1219,59 @@
     showToast('🚧 준비 중입니다');
   });
 
-  attachBtn.addEventListener('click', () => {
-    showToast('🚧 준비 중입니다');
+  function renderAttachments() {
+    attachmentsBar.innerHTML = '';
+    if (attachedFiles.length === 0) {
+      attachmentsBar.classList.add('hidden');
+      updateSendButtonState();
+      return;
+    }
+    attachmentsBar.classList.remove('hidden');
+    attachedFiles.forEach((filePath) => {
+      const chip = document.createElement('div');
+      chip.className = 'attachment-chip';
+      chip.title = filePath;
+
+      const name = document.createElement('span');
+      name.className = 'attachment-chip-name';
+      name.textContent = '📎 ' + (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'attachment-chip-remove';
+      removeBtn.title = '제거';
+      removeBtn.textContent = '✕';
+      removeBtn.addEventListener('click', () => {
+        attachedFiles = attachedFiles.filter((f) => f !== filePath);
+        renderAttachments();
+      });
+
+      chip.appendChild(name);
+      chip.appendChild(removeBtn);
+      attachmentsBar.appendChild(chip);
+    });
+    updateSendButtonState();
+  }
+
+  function addAttachedFiles(paths) {
+    for (const raw of paths) {
+      const trimmed = (raw || '').trim();
+      if (trimmed && !attachedFiles.includes(trimmed)) {
+        attachedFiles.push(trimmed);
+      }
+    }
+    renderAttachments();
+  }
+
+  attachBtn.addEventListener('click', async () => {
+    try {
+      const res = await sendMessageToBackground('browse-for-file');
+      const files = res?.files || [];
+      if (files.length > 0) addAttachedFiles(files);
+      (res?.warnings || []).forEach((w) => showToast(w));
+    } catch (e) {
+      const input = window.prompt('첨부할 파일의 절대 경로를 입력하세요 (여러 개는 쉼표로 구분):');
+      if (input) addAttachedFiles(input.split(','));
+    }
   });
 
   init();

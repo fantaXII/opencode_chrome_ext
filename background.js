@@ -1320,6 +1320,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        case 'browse-for-file': {
+          try {
+            const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'browse-for-file' });
+            const files = res?.files || [];
+            debugLog('INFO', `browse-for-file: selected=${files.length} file(s)`);
+            sendResponse({ files, warnings: res?.warnings || [] });
+          } catch (e) {
+            debugLog('ERROR', `browse-for-file: ${e.message}`);
+            sendResponse({ files: [], error: e.message });
+          }
+          break;
+        }
+
         case 'get-models':
           const models = await getAvailableModels();
           sendResponse({ success: true, models });
