@@ -1323,6 +1323,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'browse-for-file': {
           try {
             const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'browse-for-file' });
+            if (res?.status === 'error') {
+              debugLog('ERROR', `browse-for-file: native host reported error - ${res.error}`);
+              sendResponse({ files: [], error: res.error || '파일 선택 실패' });
+              break;
+            }
             const files = res?.files || [];
             debugLog('INFO', `browse-for-file: selected=${files.length} file(s)`);
             sendResponse({ files, warnings: res?.warnings || [] });

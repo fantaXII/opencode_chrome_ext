@@ -1252,10 +1252,18 @@
     updateSendButtonState();
   }
 
+  // 백슬래시/슬래시 표기 차이만 흡수한다. opencode 서버가 WSL(대소문자 구분 파일시스템)일
+  // 수 있으므로 대소문자는 그대로 비교해야 서로 다른 파일을 같은 것으로 오인하지 않는다.
+  function normalizePathForDedup(p) {
+    return p.replace(/\\/g, '/');
+  }
+
   function addAttachedFiles(paths) {
     for (const raw of paths) {
       const trimmed = (raw || '').trim();
-      if (trimmed && !attachedFiles.includes(trimmed)) {
+      if (!trimmed) continue;
+      const key = normalizePathForDedup(trimmed);
+      if (!attachedFiles.some((f) => normalizePathForDedup(f) === key)) {
         attachedFiles.push(trimmed);
       }
     }
