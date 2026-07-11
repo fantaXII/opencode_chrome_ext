@@ -392,6 +392,16 @@ async function getWorkingDirectory() {
   }
 }
 
+/**
+ * x-opencode-directory 헤더 값 생성.
+ * HTTP 헤더는 ISO-8859-1만 허용하므로 비-Latin 경로는 URL-encode 필요.
+ */
+function buildDirectoryHeader(workingDir) {
+  if (!workingDir) return null;
+  const isLatin = /^[\x00-\xFF]*$/.test(workingDir);
+  return isLatin ? workingDir : encodeURIComponent(workingDir);
+}
+
 async function getDefaultDirectory() {
   // 1. 실측값 우선: SSE/probe로 확인된 실제 서버 cwd (형식이 확실함)
   try {
@@ -559,9 +569,17 @@ async function createSession(title = 'New Chat') {
   }
 
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    const workingDir = await getWorkingDirectory();
+    const dirHeader = buildDirectoryHeader(workingDir);
+    if (dirHeader) {
+      headers['x-opencode-directory'] = dirHeader;
+      debugLog('INFO', `createSession: x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}`);
+    }
+
     const response = await fetch(`http://127.0.0.1:${port}/session`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ title })
     });
 
@@ -692,12 +710,10 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete) {
   try {
     const workingDir = await getWorkingDirectory();
     const headers = { 'Content-Type': 'application/json' };
-    if (workingDir) {
-      // HTTP headers require ISO-8859-1. URL-encode non-Latin paths so fetch does not throw.
-      const isLatin = /^[\x00-\xFF]*$/.test(workingDir);
-      const dirHeader = isLatin ? workingDir : encodeURIComponent(workingDir);
+    const dirHeader = buildDirectoryHeader(workingDir);
+    if (dirHeader) {
       headers['x-opencode-directory'] = dirHeader;
-      debugLog('INFO', `x-opencode-directory set - dir=${workingDir}, encoded=${!isLatin}, sessionId=${sessionId}`);
+      debugLog('INFO', `x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}, sessionId=${sessionId}`);
     } else {
       debugLog('INFO', `x-opencode-directory not set (no saved working dir) - sessionId=${sessionId}`);
     }
@@ -1262,8 +1278,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const previous = await getWorkingDirectory();
           await chrome.storage.local.set({ workingDirectory: normalized });
 
-          // opencode 세션은 첫 prompt 요청의 x-opencode-directory로 디렉토리가
-          // 한 번 고정되면 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 디렉토리가
+          // opencode 세션은 생성 시점의 x-opencode-directory 헤더로 디렉토리가
+          // 고정되며, 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 디렉토리가
           // 실제로 바뀐 경우, 기존 세션을 버리고 새 세션을 만들어야 새 디렉토리가 적용된다.
           let newSessionId = null;
           if (normalized !== previous) {
