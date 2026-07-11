@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.5](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.4...v2.6.5) (2026-07-11)
+
+
+### Bug Fixes
+
+* 세션 생성 시 x-opencode-directory 헤더 누락으로 워킹 디렉토리 미적용 문제 수정 ([287e668](https://github.com/fantaXII/opencode_chrome_ext/commit/287e6684548886c536f5b081265ef3113469fc5e))
+
 ## [2.6.4](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.3...v2.6.4) (2026-07-09)
 
 
