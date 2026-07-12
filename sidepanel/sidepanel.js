@@ -81,7 +81,7 @@
 
     // 현재 탭으로 초기화
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab) await reinitForTab(activeTab);
+    if (activeTab) await reinitForTab(activeTab, 'panel-init');
   }
 
   async function loadWorkingDirectory() {
@@ -170,7 +170,7 @@
 
   workingFolderInput.addEventListener('blur', commitWorkingFolder);
 
-  async function reinitForTab(tab) {
+  async function reinitForTab(tab, reason = 'unknown') {
     currentTabId = tab.id;
     currentSessionId = null;
     isLoading = false;
@@ -180,7 +180,8 @@
     try {
       const result = await sendMessageToBackground('get-tab-session', {
         tabId: tab.id,
-        title: tab.title || 'New Chat'
+        title: tab.title || 'New Chat',
+        reason
       });
       if (result.success) {
         currentSessionId = result.sessionId;
@@ -223,7 +224,7 @@
       const response = await sendMessageToBackground('has-tab-session', { tabId: activeInfo.tabId });
       if (!response.has) return; // 이 탭에는 extension 없음
       const tab = await chrome.tabs.get(activeInfo.tabId);
-      await reinitForTab(tab);
+      await reinitForTab(tab, 'tab-activated');
     } catch (e) {}
   });
 
@@ -232,7 +233,7 @@
     if (message.action === 'reinit-for-tab') {
       chrome.tabs.get(message.tabId, (tab) => {
         if (chrome.runtime.lastError || !tab) return;
-        reinitForTab(tab);
+        reinitForTab(tab, 'reinit-for-tab-message');
       });
     } else if (message.action === 'page-changed') {
       if (message.tabId !== currentTabId) return; // 현재 보고 있는 탭이 아니면 무시

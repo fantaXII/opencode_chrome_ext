@@ -23,7 +23,7 @@ const SSE_RECONNECT_DELAY = 2000;
 // ============================================
 
 const DEBUG_LOG_KEY = 'debugLogs';
-const MAX_DEBUG_ENTRIES = 200;
+const MAX_DEBUG_ENTRIES = 500;
 
 const _debugQueue = [];
 let _debugFlushPending = false;
@@ -1253,13 +1253,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'get-tab-session': {
           const tabId = message.tabId;
+          const reason = message.reason || 'unknown';
           const existingId = tabId ? tabSessions.get(tabId) : null;
-          if (existingId && sessions.has(existingId)) {
+          const hasInSessions = existingId ? sessions.has(existingId) : false;
+          debugLog('INFO', `get-tab-session: reason=${reason}, tabId=${tabId}, existingId=${existingId || 'none'}, hasInSessions=${hasInSessions}`);
+          if (existingId && hasInSessions) {
             sendResponse({ success: true, sessionId: existingId, isNew: false });
           } else {
+            debugLog('WARN', `get-tab-session: recreating - reason=${reason}, tabId=${tabId}, discardedSessionId=${existingId || 'none'}, cause=${!existingId ? 'no tabSessions entry' : 'not in sessions map'}`);
             const newId = await createSession(message.title || 'New Chat');
             if (tabId) { tabSessions.set(tabId, newId); persistState(); }
             currentSessionId = newId;
+            debugLog('INFO', `get-tab-session: recreated - reason=${reason}, tabId=${tabId}, oldSessionId=${existingId || 'none'}, newSessionId=${newId}`);
             sendResponse({ success: true, sessionId: newId, isNew: true });
           }
           break;
