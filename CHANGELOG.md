@@ -1,5 +1,17 @@
 # Changelog
 
+# [2.7.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.5...v2.7.0) (2026-07-12)
+
+
+### Bug Fixes
+
+* 첨부 파일 기능 리뷰 발견 버그 수정 (native-host 오류 전파, 경로 중복 제거) ([a2af88c](https://github.com/fantaXII/opencode_chrome_ext/commit/a2af88c1b0765c3f035c28020f54fff3b7d395ae))
+
+
+### Features
+
+* 사이드패널 첨부 파일(+) 버튼에 다중 파일 첨부 기능 구현 ([3178cbd](https://github.com/fantaXII/opencode_chrome_ext/commit/3178cbde5eb1be255e634851984b98e1e6a1bdc1))
+
 ## [2.6.5](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.4...v2.6.5) (2026-07-11)
 
 

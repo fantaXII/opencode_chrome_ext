@@ -1,6 +1,6 @@
 {
   "name": "opencode-chrome-ext",
-  "version": "2.6.5",
+  "version": "2.7.0",
   "description": "OpenCode를 사이드패널에서 사용하는 Chrome 확장 프로그램",
   "main": "index.js",
   "scripts": {
