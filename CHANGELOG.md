@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.8.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.7.0...v2.8.0) (2026-07-12)
+
+
+### Features
+
+* 사이드패널 세션 히스토리 저장·복원 기능 구현 ([cf1dcbf](https://github.com/fantaXII/opencode_chrome_ext/commit/cf1dcbf229e44239c82349562d48847398381f87))
+
 # [2.7.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.6.5...v2.7.0) (2026-07-12)
 
 
