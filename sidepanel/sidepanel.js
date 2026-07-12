@@ -49,6 +49,7 @@
   let currentAgentIndex = -1;
   let attachedFiles = [];
   const attachmentsBar = document.getElementById('attachments-bar');
+  let reinitToken = 0; // 탭 전환 레이스 컨디션 방지용 토큰
 
   function updateSendButtonState() {
     sendBtn.disabled = !messageInput.value.trim() && attachedFiles.length === 0;
@@ -177,16 +178,26 @@
     loadingIndicator.classList.add('hidden');
     sendBtn.disabled = true; // 세션 준비 완료 전까지 전송 차단
 
+    // 이전 탭의 실제 대화 메시지만 즉시 제거한다(탭 전환 시 잔상 방지).
+    // welcome 화면은 신규 세션 판정 전까지 그대로 두어 깜빡임을 피한다.
+    clearStaleTranscript();
+
     try {
       const result = await sendMessageToBackground('get-tab-session', {
         tabId: tab.id,
         title: tab.title || 'New Chat',
         reason
       });
+      // get-tab-session 왕복 중 다른 탭으로 전환됐다면(그 reinitForTab 호출이
+      // 이미 currentTabId를 갈아끼웠다면) 이 결과는 폐기한다. isNew 분기는
+      // await 없이 동기 렌더되므로 reinitToken만으로는 이 레이스를 못 막는다.
+      if (tab.id !== currentTabId) return;
       if (result.success) {
         currentSessionId = result.sessionId;
-        if (result.isNew && tab.title) {
-          addPageContextMessage(tab.title, tab.url);
+        if (result.isNew) {
+          if (tab.title) addPageContextMessage(tab.title, tab.url);
+        } else {
+          await loadAndRenderHistory(result.sessionId, tab);
         }
       }
     } catch (e) {
@@ -240,6 +251,82 @@
       addPageChangedMessage(message.title, message.url);
     }
   });
+
+  // 이전 탭에서 렌더된 실제 메시지가 있을 때만 지운다(최초 welcome 화면은 보존).
+  function clearStaleTranscript() {
+    if (messagesContainer.querySelector('.message')) {
+      messagesContainer.innerHTML = '';
+    }
+  }
+
+  // "[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요]\n- a\n- b\n\n<본문>" 프리픽스를
+  // 분리한다. sendMessage()가 만드는 attachmentBlock과 정확히 대응되는 역변환이며,
+  // 서버가 이 텍스트를 그대로 보존함을 실측으로 확인했다(docs/session_history_plan.md §2.1).
+  function splitAttachmentBlock(raw) {
+    const re = /^\[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요\]\n((?:- .*\n)+)\n([\s\S]*)$/;
+    const match = raw.match(re);
+    if (!match) return { text: raw, attachments: [] };
+    const attachments = match[1].split('\n').filter(Boolean).map(line => line.replace(/^- /, ''));
+    return { text: match[2], attachments };
+  }
+
+  // background.js의 sendMessage()가 현재 탭 정보를 자동으로 원문 앞에 붙여
+  // 서버로 전송한다("\n---\n현재 페이지 정보:\n- 제목: ...\n- URL: ...\n" +
+  // 선택적 제목들/내용 요약/선택한 텍스트 섹션). 실시간 전송 시 addUserMessage는
+  // 사용자가 타이핑한 원문만 보여주므로(pageContext는 화면에 노출된 적이 없음),
+  // 히스토리 복원 시에도 동일하게 이 프리픽스를 벗겨내 일관성을 맞춘다.
+  const PAGE_CONTEXT_HEADER_RE = /^\n---\n현재 페이지 정보:\n- 제목: .*\n- URL: .*\n/;
+  const PAGE_CONTEXT_SECTION_LABELS = ['제목들:\n', '내용 요약:\n', '선택한 텍스트:\n'];
+
+  function stripPageContext(raw) {
+    const headerMatch = raw.match(PAGE_CONTEXT_HEADER_RE);
+    if (!headerMatch) return raw;
+    let rest = raw.slice(headerMatch[0].length);
+    for (const label of PAGE_CONTEXT_SECTION_LABELS) {
+      if (!rest.startsWith(label)) continue;
+      const sepIndex = rest.indexOf('\n\n', label.length);
+      rest = sepIndex === -1 ? '' : rest.slice(sepIndex + 2);
+    }
+    return rest;
+  }
+
+  // 서버에서 세션의 전체 대화를 가져와 다시 그린다. 탭 전환이 연달아 일어나면
+  // 늦게 도착한 응답이 화면을 덮어쓰지 않도록 두 축을 함께 확인한다:
+  // reinitToken(같은 탭에 대한 loadAndRenderHistory 중복 호출 순서),
+  // currentTabId(그 사이 다른 탭으로 전환되어 isNew 동기 경로가 이미 렌더된 경우, §3.2.4).
+  async function loadAndRenderHistory(sessionId, tab) {
+    const myToken = ++reinitToken;
+    try {
+      const res = await sendMessageToBackground('get-session-history', { sessionId });
+      if (myToken !== reinitToken || tab.id !== currentTabId) return; // 그 사이 폐기됨
+
+      const welcome = messagesContainer.querySelector('.welcome-section');
+      if (welcome) welcome.remove();
+      messagesContainer.innerHTML = ''; // 이중 안전장치
+
+      const messages = (res.success && res.messages) || [];
+      if (messages.length === 0) {
+        if (tab.title) addPageContextMessage(tab.title, tab.url);
+        return;
+      }
+
+      for (const m of messages) {
+        if (!m.text || !m.text.trim()) continue; // tool-only 턴 등 텍스트 없는 메시지는 건너뜀
+        if (m.role === 'user') {
+          // 저장 순서는 pageContext + attachmentBlock + 원문이므로 이 순서대로 벗겨낸다.
+          const { text, attachments } = splitAttachmentBlock(stripPageContext(m.text));
+          addUserMessage(text, attachments);
+        } else if (m.role === 'assistant') {
+          addBotMessage(m.text);
+        }
+      }
+    } catch (e) {
+      console.error('히스토리 복원 실패:', e);
+      if (myToken === reinitToken && tab.id === currentTabId && tab.title) {
+        addPageContextMessage(tab.title, tab.url);
+      }
+    }
+  }
 
   function addPageContextMessage(title, url) {
     const welcome = messagesContainer.querySelector('.welcome-section');

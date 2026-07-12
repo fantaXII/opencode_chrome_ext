@@ -817,6 +817,51 @@ async function fetchFallbackContent(port, sessionId) {
 }
 
 /**
+ * 세션의 전체 대화 내역을 패널 렌더링용 형태로 변환해 반환한다.
+ * 실측된 실제 응답 스키마(info.role, parts[].type)를 그대로 사용
+ * (docs/session_history_plan.md §2.1).
+ */
+async function getSessionHistory(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return { success: false, messages: [], error: 'unknown session' };
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${session.port}/session/${sessionId}/message`);
+    if (!res.ok) return { success: false, messages: [], error: `status ${res.status}` };
+
+    const raw = await res.json();
+    const messages = (raw || [])
+      .filter(m => m.info?.role === 'user' || m.info?.role === 'assistant')
+      .map(m => ({
+        role: m.info.role,
+        id: m.info.id,
+        text: (m.parts || [])
+          .filter(p => p.type === 'text' && typeof p.text === 'string')
+          .map(p => p.text)
+          .join('')
+      }));
+
+    return { success: true, messages };
+  } catch (e) {
+    debugLog('ERROR', `getSessionHistory: failed - sessionId=${sessionId}, error=${e.message}`);
+    return { success: false, messages: [], error: e.message };
+  }
+}
+
+/**
+ * 세션이 서버에 실제로 아직 존재하는지 가볍게 확인한다.
+ * GET /session/{id}는 존재 시 200, 없으면 404를 반환한다(실측 확인).
+ */
+async function checkSessionExists(port, sessionId) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * SSE 이벤트 구독 (/global/event + Last-Event-ID 재연결)
  * server.connected 수신 시 resolve → 이후 prompt_async 전송
  * 스트림 종료 시 Last-Event-ID로 재연결하여 응답 이벤트 수신
@@ -1255,18 +1300,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const tabId = message.tabId;
           const reason = message.reason || 'unknown';
           const existingId = tabId ? tabSessions.get(tabId) : null;
-          const hasInSessions = existingId ? sessions.has(existingId) : false;
+          let hasInSessions = existingId ? sessions.has(existingId) : false;
+
+          // 인메모리 sessions Map은 SW 재시작 시 소실되지만 tabSessions(storage.session)는
+          // 유지된다. 이 경우 서버에 세션이 실제로 남아있는지 먼저 확인해, 있는데도
+          // 불필요하게 폐기하고 새로 만드는 것(=대화 내역 접근 경로 상실)을 막는다.
+          if (existingId && !hasInSessions) {
+            const port = await ensureOpenCodeServer();
+            if (port) {
+              const alive = await checkSessionExists(port, existingId);
+              if (alive) {
+                sessions.set(existingId, { id: existingId, created: Date.now(), port, active: true });
+                hasInSessions = true;
+                debugLog('INFO', `get-tab-session: recovered orphaned session after SW restart - sessionId=${existingId}`);
+              }
+            }
+          }
+
           debugLog('INFO', `get-tab-session: reason=${reason}, tabId=${tabId}, existingId=${existingId || 'none'}, hasInSessions=${hasInSessions}`);
           if (existingId && hasInSessions) {
             sendResponse({ success: true, sessionId: existingId, isNew: false });
           } else {
-            debugLog('WARN', `get-tab-session: recreating - reason=${reason}, tabId=${tabId}, discardedSessionId=${existingId || 'none'}, cause=${!existingId ? 'no tabSessions entry' : 'not in sessions map'}`);
+            debugLog('WARN', `get-tab-session: recreating - reason=${reason}, tabId=${tabId}, discardedSessionId=${existingId || 'none'}, cause=${!existingId ? 'no tabSessions entry' : 'not in sessions map, server confirmed gone'}`);
             const newId = await createSession(message.title || 'New Chat');
             if (tabId) { tabSessions.set(tabId, newId); persistState(); }
             currentSessionId = newId;
             debugLog('INFO', `get-tab-session: recreated - reason=${reason}, tabId=${tabId}, oldSessionId=${existingId || 'none'}, newSessionId=${newId}`);
             sendResponse({ success: true, sessionId: newId, isNew: true });
           }
+          break;
+        }
+
+        case 'get-session-history': {
+          const result = await getSessionHistory(message.sessionId);
+          sendResponse(result);
           break;
         }
 
