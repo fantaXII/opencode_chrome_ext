@@ -1,12 +1,14 @@
 /**
  * OpenCode Chrome Extension - Background Service Worker
- * 
+ *
  * 주요 기능:
  * - OpenCode 서버 상태 관리
  * - Native Messaging Host 통신
  * - 세션 관리
  * - 메시지 전송 및 SSE 응답 처리
  */
+
+import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
 
 // ============================================
 // 상수 정의
@@ -675,7 +677,7 @@ async function getCurrentTabInfo() {
 /**
  * 메시지 전송
  */
-async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete) {
+async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onPart) {
   const session = sessions.get(sessionId);
   if (!session) {
     throw new Error('세션을 찾을 수 없음');
@@ -747,7 +749,7 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete) {
     // /global/event 는 연결 시점 이후 이벤트만 전달하므로, prompt 전송이 먼저
     // 이루어지면 응답이 빠른 모델의 경우 message.part.* 이벤트를 놓칠 수 있음
     const subscribeStart = Date.now();
-    await subscribeToEvents(sessionId, port, onChunk, onComplete);
+    await subscribeToEvents(sessionId, port, onChunk, onComplete, onPart);
     debugLog('INFO', `SSE pre-connected before prompt - sessionId=${sessionId}, elapsedMs=${Date.now() - subscribeStart}`);
 
     const promptCtrl = new AbortController();
@@ -866,7 +868,7 @@ async function checkSessionExists(port, sessionId) {
  * server.connected 수신 시 resolve → 이후 prompt_async 전송
  * 스트림 종료 시 Last-Event-ID로 재연결하여 응답 이벤트 수신
  */
-function subscribeToEvents(sessionId, port, onChunk, onComplete) {
+function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
   const existing = eventSources.get(sessionId);
   if (existing) existing.abort();
 
@@ -878,7 +880,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete) {
     let buffer = '';
     let completed = false;
     let assistantMessageId = null;
-    let textPartIds = new Set();
+    let routerState = createRouterState();
 
     let timeoutId = null;
     function resetTimeout() {
@@ -1006,20 +1008,22 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete) {
                 }
                 case 'message.part.updated': {
                   const part = evt.properties?.part;
-                  if (part?.messageID === assistantMessageId) {
-                    if (part.type === 'text') {
-                      textPartIds.add(part.id);
-                    } else {
-                      debugLog('INFO', `Non-text part for assistant message - sessionId=${sessionId}, messageId=${assistantMessageId}, partId=${part.id}, partType=${part.type}`);
-                    }
+                  const routed = routeMessagePartUpdated(routerState, part, assistantMessageId);
+                  if (routed?.action === 'part') {
+                    onPart?.(routed.part);
+                  } else if (routed?.action === 'debug') {
+                    debugLog('INFO', `Non-text part for assistant message - sessionId=${sessionId}, messageId=${assistantMessageId}, partId=${part.id}, partType=${routed.partType}`);
                   }
                   break;
                 }
                 case 'message.part.delta': {
-                  const props = evt.properties;
-                  if (textPartIds.has(props?.partID) && props?.delta) {
-                    buffer += props.delta;
-                    onChunk(props.delta);
+                  const routed = routeMessagePartDelta(routerState, evt.properties);
+                  if (routed?.action === 'chunk') {
+                    buffer += routed.delta;
+                    onChunk(routed.delta);
+                    resetTimeout();
+                  } else if (routed?.action === 'part') {
+                    onPart?.(routed.part);
                     resetTimeout();
                   }
                   break;
@@ -1029,7 +1033,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete) {
                   clearTimeout(timeoutId);
                   controller.abort();
                   eventSources.delete(sessionId);
-                  debugLog('INFO', `Session idle - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, textParts=${textPartIds.size}, bufferLength=${buffer.length}`);
+                  debugLog('INFO', `Session idle - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, trackedParts=${routerState.partTypes.size}, bufferLength=${buffer.length}`);
 
                   let finalContent = buffer;
                   if (buffer.length === 0) {
@@ -1261,6 +1265,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   error: error,
                   ...(replacedSessionId && { newSessionId: replacedSessionId })
                 });
+              },
+              (part) => {
+                chrome.runtime.sendMessage({
+                  action: 'message-part',
+                  sessionId: message.sessionId,
+                  part
+                }).catch(() => {});
               }
             );
           };

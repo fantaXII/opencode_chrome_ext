@@ -1151,6 +1151,12 @@
   async function cancelMessage() {
     if (!isLoading || !currentSessionId) return;
     await sendMessageToBackground('cancel-message', { sessionId: currentSessionId });
+    if (activeBlocks) {
+      finalizeRunning(activeBlocks, 'cancelled');
+      renderBlocks(activeBlocks, activeBlocksContainer);
+      activeBlocks = null;
+      activeBlocksContainer = null;
+    }
     removeTypingIndicator();
     setLoadingState(false);
   }
@@ -1228,6 +1234,160 @@
     }
   }
 
+  // ============================================
+  // 도구 호출 / reasoning 진행 표시 (블록 렌더링)
+  // block-state.js(전역 함수: createBlocks, appendTextDelta, upsertToolPart,
+  // upsertReasoningStart, appendReasoningDelta, finalizeRunning)를 사용한다.
+  // ============================================
+
+  let activeBlocks = null;
+  let activeBlocksContainer = null;
+
+  function ensureActiveBlockMessage() {
+    // 탭 전환/세션 초기화 등으로 messagesContainer가 통째로 비워지는 지점이 여러 곳
+    // (reinitForTab, /clear, loadAndRenderHistory 등) 있어 매번 거기서 참조를 리셋하는
+    // 대신, 여기서 DOM에 실제로 붙어있는지 확인해 끊긴 참조를 스스로 치유한다.
+    if (activeBlocks && activeBlocksContainer && document.body.contains(activeBlocksContainer)) return;
+
+    const typingIndicator = document.getElementById('typing-indicator');
+    let messageDiv;
+    if (typingIndicator) {
+      messageDiv = typingIndicator;
+      messageDiv.removeAttribute('id');
+      messageDiv.classList.remove('typing-indicator');
+      const oldContent = messageDiv.querySelector('.message-content');
+      if (oldContent) oldContent.remove();
+    } else {
+      messageDiv = document.createElement('div');
+      messageDiv.className = 'message bot-message';
+      const avatar = document.createElement('div');
+      avatar.className = 'message-avatar';
+      avatar.textContent = '🤖';
+      messageDiv.appendChild(avatar);
+      messagesContainer.appendChild(messageDiv);
+    }
+
+    const blocksContainer = document.createElement('div');
+    blocksContainer.className = 'message-blocks';
+    messageDiv.appendChild(blocksContainer);
+
+    activeBlocks = createBlocks();
+    activeBlocksContainer = blocksContainer;
+  }
+
+  const TOOL_STATUS_LABEL = {
+    pending: '대기 중',
+    running: '실행 중…',
+    completed: '완료',
+    error: '오류',
+    cancelled: '취소됨',
+    interrupted: '중단됨'
+  };
+
+  function toolStatusLabel(status) {
+    return TOOL_STATUS_LABEL[status] || status || '';
+  }
+
+  function toolTarget(part) {
+    if (part.title) return part.title;
+    const input = part.input;
+    if (input && typeof input === 'object') {
+      if (input.command) return input.command;
+      if (input.path) return input.path;
+      if (input.filePath) return input.filePath;
+    }
+    return part.tool || '';
+  }
+
+  function makeCollapsible(el, headerSelector) {
+    el.querySelector(headerSelector).addEventListener('click', () => {
+      el.classList.toggle('collapsed');
+    });
+  }
+
+  function createBlockElement(block) {
+    if (block.type === 'text') {
+      const el = document.createElement('div');
+      el.className = 'text-block markdown-body';
+      el.dataset.blockType = 'text';
+      updateBlockElement(el, block);
+      return el;
+    }
+    if (block.type === 'tool') {
+      const el = document.createElement('div');
+      el.className = 'tool-card collapsed';
+      el.dataset.blockType = 'tool';
+      el.innerHTML = `
+        <div class="tool-card-header">
+          <span class="tool-icon">🔧</span>
+          <span class="tool-name"></span>
+          <span class="tool-target"></span>
+          <span class="tool-status"></span>
+        </div>
+        <div class="tool-card-body"></div>
+      `;
+      makeCollapsible(el, '.tool-card-header');
+      updateBlockElement(el, block);
+      return el;
+    }
+    // reasoning
+    const el = document.createElement('div');
+    el.className = 'reasoning-block collapsed';
+    el.dataset.blockType = 'reasoning';
+    el.innerHTML = `
+      <div class="reasoning-block-header">💭 생각 중</div>
+      <div class="reasoning-block-body"></div>
+    `;
+    makeCollapsible(el, '.reasoning-block-header');
+    updateBlockElement(el, block);
+    return el;
+  }
+
+  // tool/reasoning 콘텐츠는 항상 textContent로만 삽입한다(서버가 준 파일/명령
+  // 출력이 신뢰 경계 밖 데이터일 수 있으므로 HTML 파싱 자체를 하지 않음 — §6 XSS).
+  function updateBlockElement(el, block) {
+    if (block.type === 'text') {
+      el.dataset.raw = block.raw;
+      el.innerHTML = typeof marked !== 'undefined'
+        ? marked.parse(block.raw)
+        : escapeHtml(block.raw);
+      return;
+    }
+    if (block.type === 'tool') {
+      el.dataset.status = block.status || '';
+      el.querySelector('.tool-name').textContent = block.tool || 'tool';
+      el.querySelector('.tool-target').textContent = toolTarget(block);
+      el.querySelector('.tool-status').textContent = toolStatusLabel(block.status);
+      const bodyParts = [];
+      if (block.input !== undefined) {
+        bodyParts.push(`입력:\n${typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2)}`);
+      }
+      if (block.output) {
+        bodyParts.push(`결과:\n${typeof block.output === 'string' ? block.output : JSON.stringify(block.output, null, 2)}`);
+      }
+      el.querySelector('.tool-card-body').textContent = bodyParts.join('\n\n').slice(0, 2000);
+      return;
+    }
+    // reasoning
+    el.querySelector('.reasoning-block-body').textContent = block.text;
+  }
+
+  function renderBlocks(blocks, container) {
+    blocks.forEach((block, i) => {
+      const existing = container.children[i];
+      if (!existing || existing.dataset.blockType !== block.type) {
+        const el = createBlockElement(block);
+        if (existing) container.replaceChild(el, existing);
+        else container.appendChild(el);
+      } else {
+        updateBlockElement(existing, block);
+      }
+    });
+    while (container.children.length > blocks.length) {
+      container.removeChild(container.lastChild);
+    }
+  }
+
   sendBtn.addEventListener('click', () => {
     if (isLoading) cancelMessage();
     else sendMessage();
@@ -1235,26 +1395,21 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'message-chunk' && message.sessionId === currentSessionId) {
-      const lastMessage = messagesContainer.querySelector('.bot-message:last-child');
-
-      function appendChunkToContent(contentDiv) {
-        contentDiv.dataset.raw = (contentDiv.dataset.raw || '') + message.chunk;
-        contentDiv.className = 'message-content markdown-body';
-        contentDiv.innerHTML = typeof marked !== 'undefined'
-          ? marked.parse(contentDiv.dataset.raw)
-          : escapeHtml(contentDiv.dataset.raw);
+      ensureActiveBlockMessage();
+      appendTextDelta(activeBlocks, message.chunk);
+      renderBlocks(activeBlocks, activeBlocksContainer);
+      scrollToBottom();
+    } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
+      ensureActiveBlockMessage();
+      const part = message.part || {};
+      if (part.kind === 'tool') {
+        upsertToolPart(activeBlocks, part);
+      } else if (part.kind === 'reasoning-start') {
+        upsertReasoningStart(activeBlocks, part.id);
+      } else if (part.kind === 'reasoning-delta') {
+        appendReasoningDelta(activeBlocks, part.id, part.delta);
       }
-
-      if (lastMessage && !lastMessage.classList.contains('typing-indicator')) {
-        appendChunkToContent(lastMessage.querySelector('.message-content'));
-      } else {
-        const typingIndicator = document.getElementById('typing-indicator');
-        if (typingIndicator) {
-          appendChunkToContent(typingIndicator.querySelector('.message-content'));
-        } else {
-          addBotMessage(message.chunk);
-        }
-      }
+      renderBlocks(activeBlocks, activeBlocksContainer);
       scrollToBottom();
     } else if (message.action === 'default-directory-updated' && !currentWorkingDir) {
       defaultWorkingDir = message.directory;
@@ -1266,32 +1421,34 @@
       setLoadingState(false);
 
       if (message.error) {
-        removeTypingIndicator();
-        addErrorMessage(message.error);
-      } else {
-        const typingIndicator = document.getElementById('typing-indicator');
-        if (typingIndicator) {
-          const content = typingIndicator.querySelector('.message-content');
-          if (content && content.dataset.raw) {
-            // 스트리밍 청크가 쌓인 경우 → 영구 메시지로 변환
-            typingIndicator.classList.remove('typing-indicator');
-            typingIndicator.removeAttribute('id');
-          } else if (message.content && message.content.trim()) {
-            // 청크를 못 받은 경우 → 최종 내용으로 표시
-            content.className = 'message-content markdown-body';
-            content.dataset.raw = message.content.trim();
-            content.innerHTML = typeof marked !== 'undefined'
-              ? marked.parse(message.content.trim())
-              : escapeHtml(message.content.trim());
-            typingIndicator.classList.remove('typing-indicator');
-            typingIndicator.removeAttribute('id');
-          } else {
-            typingIndicator.remove();
-          }
-        } else if (message.content && message.content.trim()) {
-          addBotMessage(message.content.trim());
+        // 진행 중이던 tool/reasoning 카드를 지우지 않고 'error'로 고정해 남긴다
+        // (§6: 실패 시에도 "무엇을 하고 있었는지"는 보여야 함).
+        if (activeBlocks) {
+          finalizeRunning(activeBlocks, 'error');
+          renderBlocks(activeBlocks, activeBlocksContainer);
+        } else {
+          removeTypingIndicator();
         }
+        addErrorMessage(message.error);
+      } else if (activeBlocks) {
+        // SSE가 idle까지 갔는데 텍스트 delta가 하나도 안 쌓인 경우(§6 REST 폴백,
+        // background.js의 fetchFallbackContent) message.content로 복구된 텍스트를
+        // 블록에 반영하지 않으면 tool 카드만 보이고 실제 답변이 사라진다.
+        const hasText = activeBlocks.some((b) => b.type === 'text' && b.raw.trim());
+        if (!hasText && message.content && message.content.trim()) {
+          appendTextDelta(activeBlocks, message.content.trim());
+        }
+        // running/pending으로 남은 파트가 있으면(타임아웃 등) 무한 스피너로
+        // 남지 않도록 강제 정리 (§6).
+        finalizeRunning(activeBlocks, 'interrupted');
+        renderBlocks(activeBlocks, activeBlocksContainer);
+      } else if (message.content && message.content.trim()) {
+        addBotMessage(message.content.trim());
+      } else {
+        removeTypingIndicator();
       }
+      activeBlocks = null;
+      activeBlocksContainer = null;
     }
   });
 

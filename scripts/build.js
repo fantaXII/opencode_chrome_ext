@@ -47,6 +47,7 @@ async function build() {
   const filesToCopy = [
     { src: 'manifest.json', dest: 'manifest.json' },
     { src: 'background.js', dest: 'background.js' },
+    { src: 'lib', dest: 'lib' },
     { src: 'sidepanel', dest: 'sidepanel' },
     { src: 'native-host', dest: 'native-host' },
     { src: '_locales', dest: '_locales' },

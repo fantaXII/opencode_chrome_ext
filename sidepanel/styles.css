@@ -503,6 +503,107 @@ body {
 }
 .markdown-body th { font-weight: 600; background: var(--border); }
 
+/* 도구 호출 / reasoning 진행 표시 (message-blocks) */
+.message-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: calc(100% - 44px);
+}
+
+.message-blocks .text-block {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  background-color: var(--bot-bg);
+  word-wrap: break-word;
+}
+
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--bg-secondary);
+  overflow: hidden;
+  font-size: 0.9em;
+}
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-card-header:hover {
+  background-color: var(--border);
+}
+
+.tool-card .tool-name {
+  font-weight: 600;
+}
+
+.tool-card .tool-target {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+  font-family: monospace;
+  font-size: 0.95em;
+}
+
+.tool-card .tool-status {
+  font-size: 0.85em;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
+.tool-card[data-status="running"] .tool-status { color: var(--accent); }
+.tool-card[data-status="completed"] .tool-status { color: var(--success); }
+.tool-card[data-status="error"] .tool-status,
+.tool-card[data-status="cancelled"] .tool-status,
+.tool-card[data-status="interrupted"] .tool-status { color: var(--error); }
+
+.tool-card-body {
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: monospace;
+  font-size: 0.85em;
+  border-top: 1px solid var(--border);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.tool-card.collapsed .tool-card-body {
+  display: none;
+}
+
+.reasoning-block {
+  border-left: 3px solid var(--border);
+  padding: 4px 0 4px 10px;
+  color: var(--text-secondary);
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+.reasoning-block-header {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.85;
+}
+
+.reasoning-block-body {
+  white-space: pre-wrap;
+  margin-top: 4px;
+}
+
+.reasoning-block.collapsed .reasoning-block-body {
+  display: none;
+}
+
 .input-area {
   padding: 16px;
   background-color: var(--bg-secondary);
