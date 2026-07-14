@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.9.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.8.0...v2.9.0) (2026-07-14)
+
+
+### Features
+
+* AI 도구 호출·reasoning 진행 상황 실시간 표시 ([20dca0b](https://github.com/fantaXII/opencode_chrome_ext/commit/20dca0b59a9a2f6722309026a25726dfbcbd7ac5))
+
 # [2.8.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.7.0...v2.8.0) (2026-07-12)
 
 
