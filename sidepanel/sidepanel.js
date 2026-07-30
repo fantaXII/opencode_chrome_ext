@@ -864,6 +864,7 @@
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(contentDiv);
     messagesContainer.appendChild(messageDiv);
+    enhanceCodeBlocks(contentDiv);
     scrollToBottom();
   }
 
@@ -1381,6 +1382,20 @@
   let activeBlocks = null;
   let activeBlocksContainer = null;
 
+  // SSE delta는 화면 주사율보다 훨씬 빠르게 도착할 수 있어, state(activeBlocks) 갱신은
+  // 매번 즉시 하되 실제 DOM 렌더(renderBlocks, 마크다운 재파싱 포함)는 프레임당 최대
+  // 1회로 코얼레싱한다 (copy_markdown_enhancement_plan.md §4, O(n^2) 재파싱 방지).
+  const blockRenderScheduler = createRenderScheduler({
+    render: () => {
+      if (activeBlocks && activeBlocksContainer) {
+        renderBlocks(activeBlocks, activeBlocksContainer);
+        scrollToBottom();
+      }
+    },
+    requestFrame: (cb) => requestAnimationFrame(cb),
+    cancelFrame: (id) => cancelAnimationFrame(id),
+  });
+
   function ensureActiveBlockMessage() {
     // 탭 전환/세션 초기화 등으로 messagesContainer가 통째로 비워지는 지점이 여러 곳
     // (reinitForTab, /clear, loadAndRenderHistory 등) 있어 매번 거기서 참조를 리셋하는
@@ -1485,6 +1500,7 @@
   // 출력이 신뢰 경계 밖 데이터일 수 있으므로 HTML 파싱 자체를 하지 않음 — §6 XSS).
   function updateBlockElement(el, block) {
     if (block.type === 'text') {
+      if (el.dataset.raw === block.raw) return; // 원문 불변 시 재파싱 생략 (O(n^2) 방지)
       el.dataset.raw = block.raw;
       el.innerHTML = typeof marked !== 'undefined'
         ? marked.parse(block.raw)
@@ -1526,6 +1542,51 @@
     }
   }
 
+  // 코드 블록 강조/복사 버튼은 스트리밍 중이 아니라 메시지가 확정된 시점에만
+  // 주입한다 — 스트리밍 중에는 renderBlocks()가 매 프레임 innerHTML을 다시 쓰므로
+  // 여기서 넣은 DOM이 계속 사라졌다 다시 생기게 된다 (copy_markdown_enhancement_plan.md §3).
+  function enhanceCodeBlocks(container) {
+    if (!container) return;
+    container.querySelectorAll('pre').forEach((pre) => {
+      if (pre.dataset.enhanced === '1') return; // idempotent: 같은 <pre>에 중복 주입 방지
+      const codeEl = pre.querySelector('code');
+      if (!codeEl) return;
+
+      const lang = extractLangFromClassName(codeEl.className);
+
+      if (typeof hljs !== 'undefined') {
+        try { hljs.highlightElement(codeEl); } catch { /* 미지원 언어 등은 무강조로 방치 */ }
+      }
+
+      const header = document.createElement('div');
+      header.className = 'code-block-header';
+
+      const langLabel = document.createElement('span');
+      langLabel.className = 'code-block-lang';
+      langLabel.textContent = lang || 'text';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'code-block-copy';
+      copyBtn.textContent = '📋 복사';
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(codeEl.textContent);
+          copyBtn.textContent = '✓ 복사됨';
+        } catch {
+          copyBtn.textContent = '복사 실패';
+        } finally {
+          setTimeout(() => { copyBtn.textContent = '📋 복사'; }, 1500);
+        }
+      });
+
+      header.appendChild(langLabel);
+      header.appendChild(copyBtn);
+      pre.insertBefore(header, pre.firstChild);
+      pre.dataset.enhanced = '1';
+    });
+  }
+
   sendBtn.addEventListener('click', () => {
     if (isLoading) cancelMessage();
     else sendMessage();
@@ -1535,8 +1596,7 @@
     if (message.action === 'message-chunk' && message.sessionId === currentSessionId) {
       ensureActiveBlockMessage();
       appendTextDelta(activeBlocks, message.chunk);
-      renderBlocks(activeBlocks, activeBlocksContainer);
-      scrollToBottom();
+      blockRenderScheduler.request();
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
       ensureActiveBlockMessage();
       const part = message.part || {};
@@ -1547,8 +1607,7 @@
       } else if (part.kind === 'reasoning-delta') {
         appendReasoningDelta(activeBlocks, part.id, part.delta);
       }
-      renderBlocks(activeBlocks, activeBlocksContainer);
-      scrollToBottom();
+      blockRenderScheduler.request();
     } else if (message.action === 'default-directory-updated' && !currentWorkingDir) {
       defaultWorkingDir = message.directory;
       updateWorkingFolderDisplay(message.directory, true);
@@ -1557,6 +1616,7 @@
         currentSessionId = message.newSessionId;
       }
       setLoadingState(false);
+      blockRenderScheduler.flush(); // pending 프레임을 즉시 반영해 마지막 delta 누락 방지
 
       if (message.error) {
         // 진행 중이던 tool/reasoning 카드를 지우지 않고 'error'로 고정해 남긴다
@@ -1564,6 +1624,7 @@
         if (activeBlocks) {
           finalizeRunning(activeBlocks, 'error');
           renderBlocks(activeBlocks, activeBlocksContainer);
+          enhanceCodeBlocks(activeBlocksContainer); // 에러로 끊겨도 완성된 코드 블록은 강조/복사 가능하게
         } else {
           removeTypingIndicator();
         }
@@ -1580,6 +1641,7 @@
         // 남지 않도록 강제 정리 (§6).
         finalizeRunning(activeBlocks, 'interrupted');
         renderBlocks(activeBlocks, activeBlocksContainer);
+        enhanceCodeBlocks(activeBlocksContainer);
       } else if (message.content && message.content.trim()) {
         addBotMessage(message.content.trim());
       } else {
