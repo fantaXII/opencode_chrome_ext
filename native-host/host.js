@@ -220,23 +220,146 @@ async function startOpenCodeServer(preferredPort = 4096) {
   }
 }
 
-function stopOpenCodeServer() {
-  if (opencodeProcess) {
-    fileLog('INFO', `stopOpenCodeServer: Stopping, isWSL=${isWSL}`);
-    opencodeProcess.kill();
-    opencodeProcess = null;
+// ============================================
+// 서버 종료 / 재시작 (포트 점유 프로세스 기준)
+// ============================================
 
-    if (isWSL) {
-      try {
-        execSync('wsl.exe pkill -f "opencode serve"', { encoding: 'utf8' });
-        fileLog('INFO', 'stopOpenCodeServer: WSL opencode process killed');
-      } catch (error) {
-        fileLog('DEBUG', `stopOpenCodeServer: pkill (may already be dead): ${error.message}`);
-      }
+// background.js는 chrome.runtime.sendNativeMessage(one-shot)만 사용하므로 메시지마다
+// 이 호스트 프로세스가 새로 뜬다. 즉 종료/재시작 요청이 들어온 시점에는 모듈 전역
+// opencodeProcess/isWSL이 항상 초기값이다. 따라서 프로세스 핸들이 아니라 "그 포트를
+// 점유한 프로세스"를 찾아 종료해야 한다. 서버가 Windows 네이티브인지 WSL인지도 알 수
+// 없으므로 양쪽을 모두 시도하고, 성공 판정은 "포트가 정말 죽었는지"로만 한다.
+
+// WSL2 localhost forwarding에서 WSL 내부 리스너를 Windows 쪽에서 대리 점유하는
+// 프로세스들. 이 이름이 나오면 실제 opencode는 WSL 안에 있다.
+const WSL_RELAY_PROCESSES = /^(wslrelay|wslhost|wslservice|svchost|System|Idle)$/i;
+
+function killWindowsListener(port) {
+  try {
+    const ps = [
+      `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;`,
+      'if ($c) {',
+      '  $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue;',
+      '  if ($p) { $p.Id; $p.ProcessName }',
+      '}'
+    ].join(' ');
+    const out = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8', timeout: 15000 }).trim();
+    const [pid, name] = out.split(/\r?\n/).map(s => s.trim());
+
+    if (!pid) return { side: 'windows', killed: false, reason: 'no-listener' };
+    if (WSL_RELAY_PROCESSES.test(name || '')) {
+      fileLog('INFO', `killWindowsListener: port ${port} held by relay ${name} (pid=${pid}) -> listener is inside WSL`);
+      return { side: 'windows', killed: false, reason: `relay:${name}` };
     }
 
-    isWSL = false;
+    // opencode가 .cmd/.bat 래퍼로 설치된 경우 실제 리스너는 node/bun 자식이므로
+    // /T로 프로세스 트리를 함께 종료한다.
+    execSync(`taskkill /PID ${pid} /T /F`, { encoding: 'utf8', timeout: 15000 });
+    fileLog('INFO', `killWindowsListener: killed pid=${pid} (${name}) on port ${port}`);
+    return { side: 'windows', killed: true, pid: Number(pid), name };
+  } catch (error) {
+    fileLog('DEBUG', `killWindowsListener: ${error.message}`);
+    return { side: 'windows', killed: false, reason: error.message.substring(0, 120) };
   }
+}
+
+// wsl.exe에는 셸 스크립트가 아니라 argv만 넘긴다. `wsl.exe bash -c "<스크립트>"` 형태는
+// 인자가 Windows 커맨드라인 파싱과 WSL interop을 거치는 동안 따옴표나 $ 확장이 깨질 수
+// 있어서(실측으로 깨지는 조합을 확인함) 파싱은 전부 Node 쪽에서 처리한다.
+function findWSLListenerPid(port) {
+  // ss 출력 예: LISTEN 0 512 127.0.0.1:4096 0.0.0.0:* users:(("opencode",pid=1234,fd=19))
+  const ss = spawnSync('wsl.exe', ['ss', '-ltnpH'], { encoding: 'utf8', timeout: 15000 });
+  for (const line of (ss.stdout || '').split('\n')) {
+    const localAddress = line.trim().split(/\s+/)[3] || '';
+    if (!localAddress.endsWith(`:${port}`)) continue;
+    const pidMatch = line.match(/pid=(\d+)/);
+    if (pidMatch) return Number(pidMatch[1]);
+  }
+
+  // ss가 없거나 pid 정보를 못 얻은 경우 폴백. fuser는 pid를 stdout에,
+  // "4096/tcp:" 헤더를 stderr에 쓰므로 stdout만 본다.
+  const fuser = spawnSync('wsl.exe', ['fuser', `${port}/tcp`], { encoding: 'utf8', timeout: 15000 });
+  const fuserMatch = (fuser.stdout || '').match(/\d+/);
+  return fuserMatch ? Number(fuserMatch[0]) : null;
+}
+
+function killWSLListener(port, force) {
+  try {
+    const pid = findWSLListenerPid(port);
+    if (!pid) return { side: 'wsl', killed: false, reason: 'no-listener' };
+
+    const signal = force ? '-KILL' : '-TERM';
+    const result = spawnSync('wsl.exe', ['kill', signal, String(pid)], { encoding: 'utf8', timeout: 15000 });
+    if (result.status !== 0) {
+      const stderr = (result.stderr || '').trim().substring(0, 120);
+      return { side: 'wsl', killed: false, pid, reason: stderr || `kill exit=${result.status}` };
+    }
+
+    fileLog('INFO', `killWSLListener: sent ${signal} to WSL pid=${pid} on port ${port}`);
+    return { side: 'wsl', killed: true, pid, force: !!force };
+  } catch (error) {
+    fileLog('DEBUG', `killWSLListener: ${error.message}`);
+    return { side: 'wsl', killed: false, reason: error.message.substring(0, 120) };
+  }
+}
+
+async function waitForPortFree(port, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (!(await checkOpenCodeServer(port))) return true;
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  return false;
+}
+
+/**
+ * 포트를 점유한 opencode 서버를 종료한다.
+ * WSL 우선(isWSLHint) → 반대편 → 강제(SIGKILL) 순으로 올라가며, 매 단계마다
+ * 포트가 실제로 비었는지 health로 확인한다.
+ */
+async function stopOpenCodeServer(port = currentPort, isWSLHint = false) {
+  const attempts = [];
+
+  if (opencodeProcess) {
+    try { opencodeProcess.kill(); } catch {}
+    opencodeProcess = null;
+  }
+
+  if (!(await checkOpenCodeServer(port))) {
+    fileLog('INFO', `stopOpenCodeServer: port ${port} already free`);
+    return { stopped: true, attempts };
+  }
+
+  const order = isWSLHint ? ['wsl', 'windows'] : ['windows', 'wsl'];
+  for (const force of [false, true]) {
+    for (const side of order) {
+      if (!(await checkOpenCodeServer(port))) break;
+      const result = side === 'wsl' ? killWSLListener(port, force) : killWindowsListener(port);
+      attempts.push({ ...result, force });
+      if (result.killed) await waitForPortFree(port, 5000);
+    }
+    if (!(await checkOpenCodeServer(port))) break;
+  }
+
+  const stopped = !(await checkOpenCodeServer(port));
+  fileLog(stopped ? 'INFO' : 'ERROR',
+    `stopOpenCodeServer: port=${port}, stopped=${stopped}, attempts=${JSON.stringify(attempts)}`);
+  isWSL = false;
+  return { stopped, attempts };
+}
+
+async function restartOpenCodeServer(port = currentPort, isWSLHint = false) {
+  fileLog('INFO', `restartOpenCodeServer: port=${port}, isWSLHint=${isWSLHint}`);
+  const { stopped, attempts } = await stopOpenCodeServer(port, isWSLHint);
+  if (!stopped) {
+    const error = new Error(`포트 ${port}의 서버를 종료할 수 없습니다`);
+    error.attempts = attempts;
+    throw error;
+  }
+
+  opencodeProcess = null;
+  const newPort = await startOpenCodeServer(port);
+  return { port: newPort, attempts };
 }
 
 // 드라이브 문자가 네트워크 드라이브면 매핑 대상 UNC 경로를 반환, 로컬 고정 디스크면 null
@@ -288,6 +411,9 @@ function resolveDrivePath(rawPath, driveRootCache) {
 
 async function handleMessage(message) {
   const { action, preferredPort } = message;
+  // 종료/재시작 요청은 background.js가 실측한 포트와 WSL 여부 힌트를 함께 보낸다.
+  const targetPort = message.port || currentPort;
+  const isWSLHint = message.isWSL === true;
   fileLog('INFO', `handleMessage: action=${action}`);
 
   switch (action) {
@@ -301,9 +427,27 @@ async function handleMessage(message) {
         return { status: 'error', error: error.message, diagnostic: error.diagnostic || null };
       }
 
-    case 'stop':
-      stopOpenCodeServer();
-      return { status: 'success' };
+    case 'stop': {
+      const { stopped, attempts } = await stopOpenCodeServer(targetPort, isWSLHint);
+      return stopped
+        ? { status: 'success', attempts }
+        : { status: 'error', error: `포트 ${targetPort}의 서버를 종료할 수 없습니다`, attempts };
+    }
+
+    case 'restart':
+      try {
+        const result = await restartOpenCodeServer(targetPort, isWSLHint);
+        fileLog('INFO', `handleMessage: restart success, port=${result.port}, isWSL=${isWSL}`);
+        return { status: 'success', port: result.port, isWSL, attempts: result.attempts };
+      } catch (error) {
+        fileLog('ERROR', `handleMessage: restart failed - ${error.message}`);
+        return {
+          status: 'error',
+          error: error.message,
+          attempts: error.attempts || null,
+          diagnostic: error.diagnostic || null
+        };
+      }
 
     case 'status': {
       const available = await checkOpenCodeServer(currentPort);

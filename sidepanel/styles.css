@@ -258,6 +258,64 @@ body {
   cursor: not-allowed;
 }
 
+.mcp-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.mcp-action-btn {
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.mcp-action-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.mcp-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mcp-action-btn.danger {
+  color: var(--text-secondary);
+}
+
+.mcp-action-btn.danger:hover:not(:disabled) {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.mcp-action-btn.danger.armed {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.mcp-action-status {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.mcp-action-status.ok    { color: var(--success); }
+.mcp-action-status.error { color: var(--error); }
+
+.mcp-action-status.hidden {
+  display: none;
+}
+
 .model-select {
   flex: 2;
   min-width: 0;

@@ -353,6 +353,12 @@ async function ensureOpenCodeServer() {
  * 서버 상태Periodic 확인
  */
 async function periodicServerCheck() {
+  // 하드 재시작 중에는 서버가 일시적으로 사라진다. 이때 자동 복구가 끼어들면
+  // 두 번째 서버가 다른 포트에 떠버리므로 재시작이 끝날 때까지 건너뛴다.
+  if (_restartInProgress) {
+    console.log(`[periodicServerCheck] 재시작 진행 중 - 건너뜀`);
+    return;
+  }
   console.log(`[periodicServerCheck] 주기 체크 시작 - 현재 serverState.port=${serverState.port}, available=${serverState.available}`);
   const port = await findAvailablePort();
   console.log(`[periodicServerCheck] findAvailablePort 결과: port=${port}, 기존 serverState.port=${serverState.port}`);
@@ -384,6 +390,154 @@ chrome.alarms.get('periodicServerCheck', (existing) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'periodicServerCheck') periodicServerCheck();
 });
+
+// ============================================
+// 서버 재시작
+// ============================================
+//
+// 두 단계로 나뉜다.
+//
+// (A) 소프트 재시작 = POST /global/dispose
+//     opencode는 config/MCP/skill/agent를 "Instance" 단위로 캐시하며, dispose는 그
+//     Instance만 버린다(프로세스·포트·디스크 세션 유지). 다음 요청에서 Instance가
+//     새로 만들어질 때 config를 디스크에서 다시 읽으므로, TUI를 exit 후 재진입한
+//     것과 동일한 효과다. MCP/skill/agent를 새로 등록한 경우 이것으로 충분하다.
+//     단, 서버가 열려 있는 SSE 스트림을 끊고 'server.instance.disposed'를 내보낸다.
+//
+// (B) 하드 재시작 = Native Host가 포트 점유 프로세스를 죽이고 다시 spawn
+//     서버가 응답하지 않거나 상태가 깨졌을 때 쓴다. 포트가 바뀔 수 있다.
+
+let _restartInProgress = false;
+
+function abortAllEventSources(reason) {
+  const sessionIds = [...eventSources.keys()];
+  for (const controller of eventSources.values()) {
+    try { controller.abort(); } catch {}
+  }
+  eventSources.clear();
+  if (sessionIds.length) {
+    debugLog('INFO', `${reason}: aborted ${sessionIds.length} in-flight SSE connection(s)`);
+  }
+  return sessionIds;
+}
+
+// 재시작 직후 서버 상태를 다시 읽어 serverState/모델/cwd 캐시를 맞춘다.
+// dispose 후 첫 요청에서 Instance가 재생성되므로, 여기서 미리 워밍업하는 효과도 있다.
+async function resyncAfterRestart(port) {
+  const health = await checkServerHealth(port);
+  serverState.port = port;
+  serverState.available = health.available;
+  serverState.version = health.version;
+  if (!health.available) return health;
+
+  await syncModelFromServer(port).catch(() => {});
+  _probedCwdPort = port;
+  refreshServerCwd(port).catch(() => {});
+  return health;
+}
+
+/**
+ * (A) 소프트 재시작 - opencode Instance만 폐기해 설정을 다시 읽게 한다.
+ */
+async function restartServerInstance() {
+  const port = serverState.port;
+  if (!port || !serverState.available) {
+    return { success: false, error: '서버에 연결되어 있지 않습니다' };
+  }
+  if (_restartInProgress) {
+    return { success: false, error: '이미 재시작이 진행 중입니다' };
+  }
+
+  _restartInProgress = true;
+  try {
+    const interrupted = abortAllEventSources('restart-instance');
+    debugLog('INFO', `restart-instance: POST /global/dispose on port ${port}`);
+
+    const response = await fetch(`http://127.0.0.1:${port}/global/dispose`, { method: 'POST' });
+    if (!response.ok) {
+      debugLog('ERROR', `restart-instance: dispose returned ${response.status}`);
+      return { success: false, error: `dispose 실패: ${response.status}`, interrupted: interrupted.length };
+    }
+
+    const health = await resyncAfterRestart(port);
+    debugLog('INFO', `restart-instance: done - port=${port}, healthy=${health.available}, version=${health.version}, interruptedSSE=${interrupted.length}`);
+
+    return health.available
+      ? { success: true, mode: 'soft', port, version: health.version, interrupted: interrupted.length }
+      : { success: false, error: 'dispose 후 서버가 응답하지 않습니다', interrupted: interrupted.length };
+  } catch (error) {
+    debugLog('ERROR', `restart-instance: failed - ${error.message}`);
+    return { success: false, error: error.message };
+  } finally {
+    _restartInProgress = false;
+  }
+}
+
+/**
+ * (B) 하드 재시작 - Native Host를 통해 서버 프로세스를 종료하고 다시 시작한다.
+ */
+async function hardRestartServer() {
+  if (_restartInProgress) {
+    return { success: false, error: '이미 재시작이 진행 중입니다' };
+  }
+
+  _restartInProgress = true;
+  const oldPort = serverState.port;
+  try {
+    // 서버가 Windows 네이티브인지 WSL인지에 따라 종료 방법이 달라진다. 확실치 않으므로
+    // 힌트만 넘기고(host.js가 양쪽 다 시도한다) 실패 판정은 host.js가 포트로 확인한다.
+    const { serverIsWSL } = await chrome.storage.local.get('serverIsWSL');
+    const interrupted = abortAllEventSources('restart-server');
+    serverState.available = false;
+
+    debugLog('INFO', `restart-server: requesting native host restart - port=${oldPort}, isWSLHint=${serverIsWSL === true}, interruptedSSE=${interrupted.length}`);
+
+    let response;
+    try {
+      response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
+        action: 'restart',
+        port: oldPort,
+        isWSL: serverIsWSL === true
+      });
+    } catch (error) {
+      debugLog('ERROR', `restart-server: native messaging error - ${error.message}`);
+      const reason = error.message?.includes('native messaging host not found') ? 'native-host-missing' : undefined;
+      return { success: false, error: error.message, reason };
+    }
+
+    const attemptsStr = response?.attempts ? ` | attempts=${JSON.stringify(response.attempts)}` : '';
+    if (response?.status !== 'success') {
+      debugLog('ERROR', `restart-server: host error - ${response?.error}${attemptsStr}`);
+      return { success: false, error: response?.error || '재시작 실패' };
+    }
+    if (typeof response.isWSL === 'boolean') {
+      chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
+    }
+
+    const port = await waitForServer();
+    if (!port) {
+      serverState.available = false;
+      debugLog('ERROR', `restart-server: server not reachable after restart${attemptsStr}`);
+      return { success: false, error: '재시작 후 서버를 찾을 수 없습니다' };
+    }
+
+    const health = await resyncAfterRestart(port);
+
+    // 포트가 바뀌었을 수 있다. 세션 자체는 서버 디스크에 남아 있으므로 유지하고
+    // 캐시된 포트만 갱신한다.
+    if (port !== oldPort) {
+      for (const session of sessions.values()) session.port = port;
+    }
+
+    debugLog('INFO', `restart-server: done - oldPort=${oldPort}, newPort=${port}, version=${health.version}${attemptsStr}`);
+    return { success: true, mode: 'hard', port, version: health.version, portChanged: port !== oldPort };
+  } catch (error) {
+    debugLog('ERROR', `restart-server: failed - ${error.message}`);
+    return { success: false, error: error.message };
+  } finally {
+    _restartInProgress = false;
+  }
+}
 
 async function getWorkingDirectory() {
   try {
@@ -1049,6 +1203,14 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
                   onComplete(finalContent);
                   return;
                 }
+                case 'server.instance.disposed': {
+                  // 소프트 재시작(POST /global/dispose) 시 서버가 SSE 스트림을 끊는다.
+                  // 아래 "스트림 정상 종료 → Last-Event-ID 재연결" 경로가 자동으로 다시
+                  // 붙으므로 여기서는 진단용 기록만 남긴다. 단, 진행 중이던 프롬프트는
+                  // Instance와 함께 사라지므로 응답은 오지 않는다(타임아웃 폴백에 맡긴다).
+                  debugLog('INFO', `Server instance disposed - directory=${evt.properties?.directory || '?'}, sessionId=${sessionId}`);
+                  break;
+                }
                 case 'session.error': {
                   completed = true;
                   clearTimeout(timeoutId);
@@ -1532,6 +1694,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const statusRes = await fetch(`http://127.0.0.1:${togglePort}/mcp`);
           const servers = statusRes.ok ? await statusRes.json() : {};
           sendResponse({ success: toggleRes.ok, servers });
+          break;
+        }
+
+        // 소프트 재시작: MCP/skill/agent 등 config 변경을 반영 (프로세스 유지)
+        case 'restart-instance': {
+          sendResponse(await restartServerInstance());
+          break;
+        }
+
+        // 하드 재시작: 서버가 응답하지 않거나 상태가 깨졌을 때
+        case 'restart-server': {
+          sendResponse(await hardRestartServer());
           break;
         }
 

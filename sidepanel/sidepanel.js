@@ -979,10 +979,24 @@
     }
   }
 
+  // MCP 목록 아래에 고정으로 붙는 서버 재시작 액션.
+  // - "설정 다시 읽기": POST /global/dispose (프로세스 유지, 1~2초). MCP/skill/agent를
+  //   새로 등록했을 때 TUI를 exit 후 재진입한 것과 같은 효과.
+  // - "서버 강제 재시작": 프로세스 종료 후 재기동 (10~30초). 서버가 먹통일 때만.
+  const MCP_ACTIONS_HTML = `
+    <div class="mcp-actions">
+      <button id="mcp-reload-btn" class="mcp-action-btn"
+              title="opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)">↻ 설정 다시 읽기</button>
+      <button id="mcp-hard-restart-btn" class="mcp-action-btn danger"
+              title="opencode 서버 프로세스를 종료하고 다시 시작합니다">⚡ 서버 강제 재시작</button>
+      <div id="mcp-action-status" class="mcp-action-status hidden"></div>
+    </div>`;
+
   function renderMcpDropdown() {
     const entries = Object.entries(mcpServers);
     if (entries.length === 0) {
-      mcpDropdown.innerHTML = '<div class="mcp-empty">MCP 서버 없음</div>';
+      mcpDropdown.innerHTML = '<div class="mcp-empty">MCP 서버 없음</div>' + MCP_ACTIONS_HTML;
+      bindMcpActions();
       return;
     }
     mcpDropdown.innerHTML = entries.map(([name, info]) => {
@@ -1005,7 +1019,9 @@
           <span class="mcp-toggle-slider"></span>
         </label>
       </div>`;
-    }).join('');
+    }).join('') + MCP_ACTIONS_HTML;
+
+    bindMcpActions();
 
     mcpDropdown.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', async (e) => {
@@ -1030,9 +1046,131 @@
     });
   }
 
+  // 드롭다운은 토글/재시작마다 innerHTML을 다시 쓰므로 상태 문구를 여기 보관해
+  // 재렌더 후에도 복원한다.
+  let mcpActionStatus = null; // { text, kind }
+  let restartBusy = false;
+  let hardRestartArmed = false;
+  let hardRestartArmTimer = null;
+
+  function applyMcpActionStatus() {
+    const el = document.getElementById('mcp-action-status');
+    if (!el) return;
+    if (!mcpActionStatus) {
+      el.className = 'mcp-action-status hidden';
+      el.textContent = '';
+      return;
+    }
+    el.className = 'mcp-action-status' + (mcpActionStatus.kind ? ` ${mcpActionStatus.kind}` : '');
+    el.textContent = mcpActionStatus.text;
+  }
+
+  function setMcpActionStatus(text, kind) {
+    mcpActionStatus = text ? { text, kind } : null;
+    applyMcpActionStatus();
+  }
+
+  function disarmHardRestart() {
+    clearTimeout(hardRestartArmTimer);
+    hardRestartArmed = false;
+    const btn = document.getElementById('mcp-hard-restart-btn');
+    if (btn) {
+      btn.classList.remove('armed');
+      btn.textContent = '⚡ 서버 강제 재시작';
+    }
+  }
+
+  function bindMcpActions() {
+    const reloadBtn = document.getElementById('mcp-reload-btn');
+    const hardBtn = document.getElementById('mcp-hard-restart-btn');
+    if (restartBusy) {
+      if (reloadBtn) reloadBtn.disabled = true;
+      if (hardBtn) hardBtn.disabled = true;
+    }
+    applyMcpActionStatus();
+
+    reloadBtn?.addEventListener('click', () => runServerRestart('soft'));
+
+    // 사이드패널에서는 confirm() 동작을 보장할 수 없으므로 "두 번 클릭"으로 확인을 받는다.
+    hardBtn?.addEventListener('click', () => {
+      if (restartBusy) return;
+      if (!hardRestartArmed) {
+        hardRestartArmed = true;
+        hardBtn.classList.add('armed');
+        hardBtn.textContent = '⚠ 한 번 더 누르면 재시작';
+        setMcpActionStatus('서버 프로세스를 종료하고 다시 시작합니다 (10~30초)', null);
+        clearTimeout(hardRestartArmTimer);
+        hardRestartArmTimer = setTimeout(() => {
+          disarmHardRestart();
+          setMcpActionStatus(null);
+        }, 5000);
+        return;
+      }
+      disarmHardRestart();
+      runServerRestart('hard');
+    });
+  }
+
+  // 재시작 후 서버에서 다시 읽어야 하는 목록들을 갱신한다.
+  async function refreshServerCatalogs() {
+    const prevAgentName = availableAgents[currentAgentIndex]?.name;
+    await loadMcpStatus();
+    await loadCommandCatalog();
+    await loadAgents();
+    // loadAgents()는 선택을 0번으로 되돌리므로 이전에 고른 에이전트를 복원한다.
+    if (prevAgentName) {
+      const idx = availableAgents.findIndex(a => a.name === prevAgentName);
+      if (idx >= 0) {
+        currentAgentIndex = idx;
+        updateAgentBar();
+      }
+    }
+    await loadModels();
+  }
+
+  async function runServerRestart(mode) {
+    if (restartBusy) return;
+    const isHard = mode === 'hard';
+
+    restartBusy = true;
+    disarmHardRestart();
+    for (const id of ['mcp-reload-btn', 'mcp-hard-restart-btn']) {
+      const btn = document.getElementById(id);
+      if (btn) btn.disabled = true;
+    }
+    setMcpActionStatus(isHard ? '서버를 재시작하는 중… (최대 30초)' : '설정을 다시 읽는 중…', null);
+
+    // 재시작하면 진행 중인 응답은 서버 쪽에서 사라진다. 로딩 상태가 영구히 남지 않도록
+    // 먼저 취소해 UI를 정리한다.
+    if (isLoading) await cancelMessage();
+
+    try {
+      const res = await sendMessageToBackground(isHard ? 'restart-server' : 'restart-instance');
+      if (!res?.success) {
+        setMcpActionStatus(`실패: ${res?.error || '알 수 없는 오류'}`, 'error');
+        if (isHard) updateConnectionStatus('disconnected');
+        return;
+      }
+
+      updateConnectionStatus('connected');
+      await refreshServerCatalogs();
+
+      const suffix = isHard && res.portChanged ? ` (포트 ${res.port})` : '';
+      setMcpActionStatus(isHard ? `서버 재시작 완료${suffix}` : '설정을 다시 읽었습니다', 'ok');
+    } catch (error) {
+      setMcpActionStatus(`실패: ${error.message}`, 'error');
+    } finally {
+      restartBusy = false;
+      // MCP 목록이 바뀌었을 수 있으므로 다시 그린다(상태 문구는 재렌더 후 복원된다).
+      if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
+      else applyMcpActionStatus();
+    }
+  }
+
   mcpBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (mcpDropdown.classList.contains('hidden')) {
+      if (!restartBusy) mcpActionStatus = null; // 지난 재시작 결과 문구는 열 때 지운다
       renderMcpDropdown();
       mcpDropdown.classList.remove('hidden');
     } else {
