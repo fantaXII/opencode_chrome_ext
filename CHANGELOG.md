@@ -1,5 +1,13 @@
 # Changelog
 
+# [2.10.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.9.0...v2.10.0) (2026-07-30)
+
+
+### Features
+
+* OpenCode 서버 재시작 기능 추가 (소프트/하드) ([55da3df](https://github.com/fantaXII/opencode_chrome_ext/commit/55da3df29690c1cd3ee74d4e89bc087876a8d31b))
+* 코드 블록 복사/구문강조 + 스트리밍 마크다운 렌더 성능 개선 ([25361f0](https://github.com/fantaXII/opencode_chrome_ext/commit/25361f0870ce6cd1349a28b232edc83290bdcfa1))
+
 # [2.9.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.8.0...v2.9.0) (2026-07-14)
 
 
