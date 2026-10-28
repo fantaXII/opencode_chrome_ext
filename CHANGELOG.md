@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.11.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.10.0...v2.11.0) (2026-10-28)
+
+
+### Features
+
+* 설정(⚙) 메뉴 추가 - 실행 환경(WSL/Windows) 우선순위 선택 ([b1048bb](https://github.com/fantaXII/opencode_chrome_ext/commit/b1048bb5e822cd5ef70de438d80af71a5b1d9591))
+
 # [2.10.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.9.0...v2.10.0) (2026-07-30)
 
 
