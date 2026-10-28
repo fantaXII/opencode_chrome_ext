@@ -91,16 +91,6 @@ body {
   gap: 16px;
 }
 
-.header-placeholder {
-  color: var(--text-secondary);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.header-placeholder:hover {
-  color: var(--text-primary);
-}
-
 .toast {
   position: fixed;
   bottom: 24px;
@@ -297,9 +287,112 @@ body {
   border-color: var(--error);
 }
 
-.mcp-action-btn.danger.armed {
-  color: var(--error);
-  border-color: var(--error);
+.settings-dropdown {
+  width: 260px;
+}
+
+.settings-section {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.settings-section + .settings-section {
+  border-top: 1px solid var(--border);
+}
+
+.settings-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.settings-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.settings-radio input:disabled + span {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-current {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.confirm-dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.confirm-box {
+  width: 100%;
+  max-width: 280px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.confirm-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.confirm-message {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-line;
+  margin-bottom: 12px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.confirm-btn {
+  padding: 5px 14px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.confirm-btn:hover {
+  border-color: var(--accent);
+}
+
+.confirm-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.confirm-btn.primary:hover {
+  background: var(--accent-hover);
 }
 
 .mcp-action-status {

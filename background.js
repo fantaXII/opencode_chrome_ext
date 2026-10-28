@@ -198,18 +198,32 @@ async function findAvailablePort() {
   return null;
 }
 
+const RUNTIME_PREFERENCES = ['auto', 'wsl', 'windows'];
+
+/** 저장된 실행 환경 우선순위. 'auto'는 Windows 우선(기존 동작). */
+async function getPreferredRuntime() {
+  try {
+    const { preferredRuntime } = await chrome.storage.local.get('preferredRuntime');
+    return RUNTIME_PREFERENCES.includes(preferredRuntime) ? preferredRuntime : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
 /**
  * Native Messaging Host를 통해 서버 시작
  */
 async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
   const MAX_RETRIES = 3;
+  const preferredRuntime = await getPreferredRuntime();
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    debugLog('INFO', `NativeMsg: attempt ${attempt}/${MAX_RETRIES}, preferredPort=${preferredPort}`);
+    debugLog('INFO', `NativeMsg: attempt ${attempt}/${MAX_RETRIES}, preferredPort=${preferredPort}, preferredRuntime=${preferredRuntime}`);
     console.log(`[startServerWithNativeMessaging] 시도 ${attempt}/${MAX_RETRIES} - preferredPort=${preferredPort}`);
     try {
       const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
         action: 'start',
-        preferredPort: preferredPort
+        preferredPort: preferredPort,
+        preferredRuntime
       });
 
       console.log(`[startServerWithNativeMessaging] Native Messaging 응답:`, response);
@@ -476,7 +490,7 @@ async function restartServerInstance() {
 /**
  * (B) 하드 재시작 - Native Host를 통해 서버 프로세스를 종료하고 다시 시작한다.
  */
-async function hardRestartServer() {
+async function hardRestartServer(requestedRuntime) {
   if (_restartInProgress) {
     return { success: false, error: '이미 재시작이 진행 중입니다' };
   }
@@ -487,17 +501,21 @@ async function hardRestartServer() {
     // 서버가 Windows 네이티브인지 WSL인지에 따라 종료 방법이 달라진다. 확실치 않으므로
     // 힌트만 넘기고(host.js가 양쪽 다 시도한다) 실패 판정은 host.js가 포트로 확인한다.
     const { serverIsWSL } = await chrome.storage.local.get('serverIsWSL');
+    const preferredRuntime = RUNTIME_PREFERENCES.includes(requestedRuntime)
+      ? requestedRuntime
+      : await getPreferredRuntime();
     const interrupted = abortAllEventSources('restart-server');
     serverState.available = false;
 
-    debugLog('INFO', `restart-server: requesting native host restart - port=${oldPort}, isWSLHint=${serverIsWSL === true}, interruptedSSE=${interrupted.length}`);
+    debugLog('INFO', `restart-server: requesting native host restart - port=${oldPort}, isWSLHint=${serverIsWSL === true}, preferredRuntime=${preferredRuntime}, interruptedSSE=${interrupted.length}`);
 
     let response;
     try {
       response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
         action: 'restart',
         port: oldPort,
-        isWSL: serverIsWSL === true
+        isWSL: serverIsWSL === true,
+        preferredRuntime
       });
     } catch (error) {
       debugLog('ERROR', `restart-server: native messaging error - ${error.message}`);
@@ -512,6 +530,10 @@ async function hardRestartServer() {
     }
     if (typeof response.isWSL === 'boolean') {
       chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
+    }
+    // 재시작이 성공한 뒤에만 선택을 저장한다(실패하면 이전 설정이 유지된다).
+    if (RUNTIME_PREFERENCES.includes(requestedRuntime)) {
+      chrome.storage.local.set({ preferredRuntime: requestedRuntime }).catch(() => {});
     }
 
     const port = await waitForServer();
@@ -1705,7 +1727,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // 하드 재시작: 서버가 응답하지 않거나 상태가 깨졌을 때
         case 'restart-server': {
-          sendResponse(await hardRestartServer());
+          sendResponse(await hardRestartServer(message.preferredRuntime));
+          break;
+        }
+
+        // 설정 화면용: 저장된 우선순위 + 마지막으로 확인된 실행 환경(WSL 여부)
+        case 'get-runtime-info': {
+          const { serverIsWSL } = await chrome.storage.local.get('serverIsWSL');
+          sendResponse({
+            success: true,
+            preferredRuntime: await getPreferredRuntime(),
+            serverIsWSL: typeof serverIsWSL === 'boolean' ? serverIsWSL : null,
+            port: serverState.available ? serverState.port : null
+          });
+          break;
+        }
+
+        // 서버를 재시작하지 않고 우선순위만 저장 (다음 시작부터 적용)
+        case 'set-runtime-preference': {
+          if (!RUNTIME_PREFERENCES.includes(message.preferredRuntime)) {
+            sendResponse({ success: false, error: '잘못된 값입니다' });
+            break;
+          }
+          await chrome.storage.local.set({ preferredRuntime: message.preferredRuntime });
+          sendResponse({ success: true });
           break;
         }
 

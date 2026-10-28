@@ -79,18 +79,11 @@ async function findAvailablePort(startPort = 4096) {
 }
 
 // ============================================
-// opencode 경로 탐색 (Windows → WSL fallback)
+// opencode 경로 탐색 (preferredRuntime 순서, 못 찾으면 반대편 fallback)
 // ============================================
 
-async function findOpenCodePath() {
-  const diagnostic = {
-    windowsPath: { checked: true, found: false, error: null },
-    wsl: { checked: false, found: false, strategies: [] }
-  };
-
-  fileLog('DEBUG', 'findOpenCodePath: Starting path detection...');
-
-  // 1순위: Windows PATH
+function findWindowsOpenCode(diagnostic) {
+  diagnostic.windowsPath.checked = true;
   try {
     fileLog('DEBUG', 'findOpenCodePath: Trying Windows PATH...');
     const windowsPath = require('which').sync('opencode');
@@ -100,9 +93,12 @@ async function findOpenCodePath() {
   } catch (error) {
     diagnostic.windowsPath.error = error.message;
     fileLog('WARN', `findOpenCodePath: Not in Windows PATH - ${error.message}`);
+    return null;
   }
+}
 
-  // 2순위: WSL (최대 3회 재시도, 3가지 전략)
+// WSL (최대 3회 재시도, 3가지 전략)
+async function findWslOpenCode(diagnostic) {
   diagnostic.wsl.checked = true;
   const wslStrategies = [
     ['bash', '-c', 'test -x "$HOME/.opencode/bin/opencode" && echo "$HOME/.opencode/bin/opencode"'],
@@ -138,6 +134,24 @@ async function findOpenCodePath() {
     }
   }
 
+  return null;
+}
+
+// preferredRuntime: 'auto'(Windows 우선) | 'windows' | 'wsl'(WSL 우선)
+async function findOpenCodePath(preferredRuntime = 'auto') {
+  const diagnostic = {
+    windowsPath: { checked: false, found: false, error: null },
+    wsl: { checked: false, found: false, strategies: [] }
+  };
+
+  const order = preferredRuntime === 'wsl' ? ['wsl', 'windows'] : ['windows', 'wsl'];
+  fileLog('DEBUG', `findOpenCodePath: preferredRuntime=${preferredRuntime}, order=${order.join('>')}`);
+
+  for (const side of order) {
+    const found = side === 'wsl' ? await findWslOpenCode(diagnostic) : findWindowsOpenCode(diagnostic);
+    if (found) return found;
+  }
+
   fileLog('ERROR', 'findOpenCodePath: Not found in Windows PATH or WSL after all attempts');
   return { path: null, isWSL: false, diagnostic };
 }
@@ -146,7 +160,7 @@ async function findOpenCodePath() {
 // OpenCode 서버 기동
 // ============================================
 
-async function startOpenCodeServer(preferredPort = 4096) {
+async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'auto') {
   if (opencodeProcess) {
     fileLog('INFO', `startOpenCodeServer: Already running on port ${currentPort}`);
     return currentPort;
@@ -161,7 +175,7 @@ async function startOpenCodeServer(preferredPort = 4096) {
     currentPort = port;
     fileLog('INFO', `startOpenCodeServer: Using port ${port}`);
 
-    const found = await findOpenCodePath();
+    const found = await findOpenCodePath(preferredRuntime);
 
     if (!found.path) {
       const err = new Error('opencode를 찾을 수 없음 (Windows/WSL 모두 확인)');
@@ -348,8 +362,8 @@ async function stopOpenCodeServer(port = currentPort, isWSLHint = false) {
   return { stopped, attempts };
 }
 
-async function restartOpenCodeServer(port = currentPort, isWSLHint = false) {
-  fileLog('INFO', `restartOpenCodeServer: port=${port}, isWSLHint=${isWSLHint}`);
+async function restartOpenCodeServer(port = currentPort, isWSLHint = false, preferredRuntime = 'auto') {
+  fileLog('INFO', `restartOpenCodeServer: port=${port}, isWSLHint=${isWSLHint}, preferredRuntime=${preferredRuntime}`);
   const { stopped, attempts } = await stopOpenCodeServer(port, isWSLHint);
   if (!stopped) {
     const error = new Error(`포트 ${port}의 서버를 종료할 수 없습니다`);
@@ -358,7 +372,7 @@ async function restartOpenCodeServer(port = currentPort, isWSLHint = false) {
   }
 
   opencodeProcess = null;
-  const newPort = await startOpenCodeServer(port);
+  const newPort = await startOpenCodeServer(port, preferredRuntime);
   return { port: newPort, attempts };
 }
 
@@ -411,6 +425,7 @@ function resolveDrivePath(rawPath, driveRootCache) {
 
 async function handleMessage(message) {
   const { action, preferredPort } = message;
+  const preferredRuntime = ['auto', 'wsl', 'windows'].includes(message.preferredRuntime) ? message.preferredRuntime : 'auto';
   // 종료/재시작 요청은 background.js가 실측한 포트와 WSL 여부 힌트를 함께 보낸다.
   const targetPort = message.port || currentPort;
   const isWSLHint = message.isWSL === true;
@@ -419,7 +434,7 @@ async function handleMessage(message) {
   switch (action) {
     case 'start':
       try {
-        const port = await startOpenCodeServer(preferredPort || 4096);
+        const port = await startOpenCodeServer(preferredPort || 4096, preferredRuntime);
         fileLog('INFO', `handleMessage: start success, port=${port}, isWSL=${isWSL}`);
         return { status: 'success', port, isWSL };
       } catch (error) {
@@ -436,7 +451,7 @@ async function handleMessage(message) {
 
     case 'restart':
       try {
-        const result = await restartOpenCodeServer(targetPort, isWSLHint);
+        const result = await restartOpenCodeServer(targetPort, isWSLHint, preferredRuntime);
         fileLog('INFO', `handleMessage: restart success, port=${result.port}, isWSL=${isWSL}`);
         return { status: 'success', port: result.port, isWSL, attempts: result.attempts };
       } catch (error) {

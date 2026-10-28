@@ -26,6 +26,8 @@
 
   const mcpBtn = document.getElementById('mcp-btn');
   const mcpDropdown = document.getElementById('mcp-dropdown');
+  const settingsBtn = document.getElementById('settings-btn');
+  const settingsDropdown = document.getElementById('settings-dropdown');
 
   const nativeHostGuide = document.getElementById('native-host-guide');
   const guideDownloadBtn = document.getElementById('guide-download-btn');
@@ -980,16 +982,14 @@
     }
   }
 
-  // MCP 목록 아래에 고정으로 붙는 서버 재시작 액션.
+  // MCP 목록 아래에 고정으로 붙는 소프트 재시작 액션.
   // - "설정 다시 읽기": POST /global/dispose (프로세스 유지, 1~2초). MCP/skill/agent를
   //   새로 등록했을 때 TUI를 exit 후 재진입한 것과 같은 효과.
-  // - "서버 강제 재시작": 프로세스 종료 후 재기동 (10~30초). 서버가 먹통일 때만.
+  // 서버 강제 재시작과 실행 환경(WSL/Windows) 선택은 설정(⚙) 드롭다운에 있다.
   const MCP_ACTIONS_HTML = `
     <div class="mcp-actions">
       <button id="mcp-reload-btn" class="mcp-action-btn"
               title="opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)">↻ 설정 다시 읽기</button>
-      <button id="mcp-hard-restart-btn" class="mcp-action-btn danger"
-              title="opencode 서버 프로세스를 종료하고 다시 시작합니다">⚡ 서버 강제 재시작</button>
       <div id="mcp-action-status" class="mcp-action-status hidden"></div>
     </div>`;
 
@@ -1048,22 +1048,22 @@
   }
 
   // 드롭다운은 토글/재시작마다 innerHTML을 다시 쓰므로 상태 문구를 여기 보관해
-  // 재렌더 후에도 복원한다.
+  // 재렌더 후에도 복원한다. MCP·설정 드롭다운이 같은 문구를 공유한다.
   let mcpActionStatus = null; // { text, kind }
   let restartBusy = false;
-  let hardRestartArmed = false;
-  let hardRestartArmTimer = null;
 
   function applyMcpActionStatus() {
-    const el = document.getElementById('mcp-action-status');
-    if (!el) return;
-    if (!mcpActionStatus) {
-      el.className = 'mcp-action-status hidden';
-      el.textContent = '';
-      return;
+    for (const id of ['mcp-action-status', 'settings-action-status']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      if (!mcpActionStatus) {
+        el.className = 'mcp-action-status hidden';
+        el.textContent = '';
+        continue;
+      }
+      el.className = 'mcp-action-status' + (mcpActionStatus.kind ? ` ${mcpActionStatus.kind}` : '');
+      el.textContent = mcpActionStatus.text;
     }
-    el.className = 'mcp-action-status' + (mcpActionStatus.kind ? ` ${mcpActionStatus.kind}` : '');
-    el.textContent = mcpActionStatus.text;
   }
 
   function setMcpActionStatus(text, kind) {
@@ -1071,45 +1071,12 @@
     applyMcpActionStatus();
   }
 
-  function disarmHardRestart() {
-    clearTimeout(hardRestartArmTimer);
-    hardRestartArmed = false;
-    const btn = document.getElementById('mcp-hard-restart-btn');
-    if (btn) {
-      btn.classList.remove('armed');
-      btn.textContent = '⚡ 서버 강제 재시작';
-    }
-  }
-
   function bindMcpActions() {
     const reloadBtn = document.getElementById('mcp-reload-btn');
-    const hardBtn = document.getElementById('mcp-hard-restart-btn');
-    if (restartBusy) {
-      if (reloadBtn) reloadBtn.disabled = true;
-      if (hardBtn) hardBtn.disabled = true;
-    }
+    if (restartBusy && reloadBtn) reloadBtn.disabled = true;
     applyMcpActionStatus();
 
     reloadBtn?.addEventListener('click', () => runServerRestart('soft'));
-
-    // 사이드패널에서는 confirm() 동작을 보장할 수 없으므로 "두 번 클릭"으로 확인을 받는다.
-    hardBtn?.addEventListener('click', () => {
-      if (restartBusy) return;
-      if (!hardRestartArmed) {
-        hardRestartArmed = true;
-        hardBtn.classList.add('armed');
-        hardBtn.textContent = '⚠ 한 번 더 누르면 재시작';
-        setMcpActionStatus('서버 프로세스를 종료하고 다시 시작합니다 (10~30초)', null);
-        clearTimeout(hardRestartArmTimer);
-        hardRestartArmTimer = setTimeout(() => {
-          disarmHardRestart();
-          setMcpActionStatus(null);
-        }, 5000);
-        return;
-      }
-      disarmHardRestart();
-      runServerRestart('hard');
-    });
   }
 
   // 재시작 후 서버에서 다시 읽어야 하는 목록들을 갱신한다.
@@ -1129,24 +1096,27 @@
     await loadModels();
   }
 
-  async function runServerRestart(mode) {
+  // runtime: 하드 재시작 때만 사용. 'wsl' | 'windows'면 그 환경으로 전환, 없으면 저장된 우선순위.
+  async function runServerRestart(mode, runtime) {
     if (restartBusy) return;
     const isHard = mode === 'hard';
 
     restartBusy = true;
-    disarmHardRestart();
-    for (const id of ['mcp-reload-btn', 'mcp-hard-restart-btn']) {
-      const btn = document.getElementById(id);
-      if (btn) btn.disabled = true;
-    }
-    setMcpActionStatus(isHard ? '서버를 재시작하는 중… (최대 30초)' : '설정을 다시 읽는 중…', null);
+    setRestartControlsDisabled(true);
+    const runtimeLabel = runtime ? RUNTIME_LABELS[runtime] : null;
+    setMcpActionStatus(isHard
+      ? `${runtimeLabel ? runtimeLabel + '(으)로 ' : ''}서버를 재시작하는 중… (최대 30초)`
+      : '설정을 다시 읽는 중…', null);
 
     // 재시작하면 진행 중인 응답은 서버 쪽에서 사라진다. 로딩 상태가 영구히 남지 않도록
     // 먼저 취소해 UI를 정리한다.
     if (isLoading) await cancelMessage();
 
     try {
-      const res = await sendMessageToBackground(isHard ? 'restart-server' : 'restart-instance');
+      const res = await sendMessageToBackground(
+        isHard ? 'restart-server' : 'restart-instance',
+        isHard && runtime ? { preferredRuntime: runtime } : {}
+      );
       if (!res?.success) {
         setMcpActionStatus(`실패: ${res?.error || '알 수 없는 오류'}`, 'error');
         if (isHard) updateConnectionStatus('disconnected');
@@ -1162,15 +1132,150 @@
       setMcpActionStatus(`실패: ${error.message}`, 'error');
     } finally {
       restartBusy = false;
-      // MCP 목록이 바뀌었을 수 있으므로 다시 그린다(상태 문구는 재렌더 후 복원된다).
+      // 목록/실행 환경이 바뀌었을 수 있으므로 열려 있는 드롭다운을 다시 그린다
+      // (상태 문구는 재렌더 후 복원된다).
       if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
-      else applyMcpActionStatus();
+      if (!settingsDropdown.classList.contains('hidden')) renderSettingsDropdown();
+      applyMcpActionStatus();
+      setRestartControlsDisabled(restartBusy);
     }
   }
+
+  function setRestartControlsDisabled(disabled) {
+    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, input[name="runtime-pref"]')
+      .forEach(el => { el.disabled = disabled; });
+  }
+
+  // ---- 확인/취소 다이얼로그 (사이드패널에서는 window.confirm을 보장할 수 없다) ----
+  const confirmDialog = document.getElementById('confirm-dialog');
+  const confirmTitle = document.getElementById('confirm-title');
+  const confirmMessage = document.getElementById('confirm-message');
+  const confirmOkBtn = document.getElementById('confirm-ok-btn');
+  const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+
+  function showConfirm(title, message) {
+    return new Promise((resolve) => {
+      confirmTitle.textContent = title;
+      confirmMessage.textContent = message;
+      confirmDialog.classList.remove('hidden');
+      confirmOkBtn.focus();
+
+      const finish = (result) => {
+        confirmDialog.classList.add('hidden');
+        confirmOkBtn.removeEventListener('click', onOk);
+        confirmCancelBtn.removeEventListener('click', onCancel);
+        confirmDialog.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey, true);
+        resolve(result);
+      };
+      const onOk = () => finish(true);
+      const onCancel = () => finish(false);
+      const onBackdrop = (e) => { if (e.target === confirmDialog) finish(false); };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.stopPropagation(); finish(false); }
+      };
+      confirmOkBtn.addEventListener('click', onOk);
+      confirmCancelBtn.addEventListener('click', onCancel);
+      confirmDialog.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKey, true);
+    });
+  }
+
+  // ---- 설정(⚙) 드롭다운: 실행 환경(WSL/Windows) 선택 + 서버 강제 재시작 ----
+  const RUNTIME_LABELS = { auto: '자동', wsl: 'WSL', windows: 'Windows' };
+
+  async function renderSettingsDropdown() {
+    let info;
+    try {
+      info = await sendMessageToBackground('get-runtime-info');
+    } catch {
+      info = { preferredRuntime: 'auto', serverIsWSL: null, port: null };
+    }
+    const pref = info.preferredRuntime || 'auto';
+    const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
+    const currentText = !info.port
+      ? '서버 연결 안 됨'
+      : `현재 실행 중: ${currentRuntime ? RUNTIME_LABELS[currentRuntime] : '알 수 없음'} · :${info.port}`;
+
+    const radio = (value, label) => `
+      <label class="settings-radio">
+        <input type="radio" name="runtime-pref" value="${value}" ${pref === value ? 'checked' : ''}${restartBusy ? ' disabled' : ''}>
+        <span>${label}</span>
+      </label>`;
+
+    settingsDropdown.innerHTML = `
+      <div class="settings-section">
+        <div class="settings-title">실행 환경</div>
+        ${radio('auto', '자동 (Windows 우선)')}
+        ${radio('wsl', 'WSL')}
+        ${radio('windows', 'Windows')}
+        <div class="settings-current">${escapeHtml(currentText)}</div>
+      </div>
+      <div class="mcp-actions">
+        <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${restartBusy ? ' disabled' : ''}
+                title="opencode 서버 프로세스를 종료하고 다시 시작합니다">⚡ 서버 강제 재시작</button>
+        <div id="settings-action-status" class="mcp-action-status hidden"></div>
+      </div>`;
+    applyMcpActionStatus();
+
+    settingsDropdown.querySelectorAll('input[name="runtime-pref"]').forEach((input) => {
+      input.addEventListener('change', async () => {
+        const next = input.value;
+        // 연결된 서버가 있고, 명시적으로 고른 환경이 현재와 다를 때만 재시작이 필요하다.
+        // (환경을 알 수 없는 경우도 다른 것으로 본다.)
+        const needsRestart = !!info.port && next !== 'auto' && next !== currentRuntime;
+        if (!needsRestart) {
+          try {
+            await sendMessageToBackground('set-runtime-preference', { preferredRuntime: next });
+            setMcpActionStatus('저장했습니다 (다음 시작부터 적용)', 'ok');
+          } catch (e) {
+            setMcpActionStatus(`실패: ${e.message}`, 'error');
+          }
+          renderSettingsDropdown();
+          return;
+        }
+
+        const change = currentRuntime
+          ? `${RUNTIME_LABELS[currentRuntime]} → ${RUNTIME_LABELS[next]}(으)로 변경합니다.`
+          : `${RUNTIME_LABELS[next]} 환경으로 변경합니다.`;
+        const ok = await showConfirm(
+          '실행 환경 변경',
+          `${change}\nOpenCode가 재시작됩니다.\n진행 중인 응답은 중단됩니다.`
+        );
+        if (!ok) {
+          renderSettingsDropdown(); // 선택을 이전 값으로 되돌린다
+          return;
+        }
+        runServerRestart('hard', next);
+      });
+    });
+
+    document.getElementById('settings-hard-restart-btn')?.addEventListener('click', async () => {
+      if (restartBusy) return;
+      const ok = await showConfirm(
+        '서버 강제 재시작',
+        'OpenCode가 재시작됩니다.\n진행 중인 응답은 중단되며 10~30초 걸릴 수 있습니다.'
+      );
+      if (ok) runServerRestart('hard');
+    });
+  }
+
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (settingsDropdown.classList.contains('hidden')) {
+      mcpDropdown.classList.add('hidden');
+      if (!restartBusy) mcpActionStatus = null;
+      settingsDropdown.classList.remove('hidden');
+      renderSettingsDropdown();
+    } else {
+      settingsDropdown.classList.add('hidden');
+    }
+  });
 
   mcpBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (mcpDropdown.classList.contains('hidden')) {
+      settingsDropdown.classList.add('hidden');
       if (!restartBusy) mcpActionStatus = null; // 지난 재시작 결과 문구는 열 때 지운다
       renderMcpDropdown();
       mcpDropdown.classList.remove('hidden');
@@ -1183,6 +1288,10 @@
     if (!mcpDropdown.classList.contains('hidden') &&
         !mcpBtn.contains(e.target) && !mcpDropdown.contains(e.target)) {
       mcpDropdown.classList.add('hidden');
+    }
+    if (!settingsDropdown.classList.contains('hidden') &&
+        !settingsBtn.contains(e.target) && !settingsDropdown.contains(e.target)) {
+      settingsDropdown.classList.add('hidden');
     }
   });
 
@@ -1659,10 +1768,6 @@
     clearTimeout(toast._hideTimer);
     toast._hideTimer = setTimeout(() => toast.classList.remove('show'), 2500);
   }
-
-  document.querySelector('.header-placeholder').addEventListener('click', () => {
-    showToast('🚧 준비 중입니다');
-  });
 
   function renderAttachments() {
     attachmentsBar.innerHTML = '';

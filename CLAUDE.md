@@ -45,6 +45,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - `which` 모듈로 `opencode` 바이너리 경로 탐색 후 `spawn('opencode', ['serve', '--port', port])`
 - 지원 액션: `start` / `stop` / `restart` / `status` / `check-port` / `get-home-dir` / `browse-for-folder` / `browse-for-file` / `read-log`
 - `sendNativeMessage`는 메시지마다 host 프로세스를 새로 띄우므로 모듈 전역 상태(`opencodeProcess`/`isWSL`)는 요청 간 유지되지 않는다. `stop`/`restart`는 프로세스 핸들이 아니라 **포트를 점유한 프로세스**를 찾아서 종료한다(Windows: `Get-NetTCPConnection` → `taskkill /T /F`, WSL: `wsl.exe ss -ltnpH` → `wsl.exe kill`). 서버가 어느 쪽에 있는지 알 수 없으므로 양쪽을 모두 시도하고, 성공 판정은 포트의 health로만 한다.
+- **실행 환경 우선순위**: `start`/`restart` 메시지의 `preferredRuntime`(`auto`|`windows`|`wsl`)이 `findOpenCodePath`의 탐색 순서를 정한다(`wsl`이면 WSL → Windows, 그 외 Windows → WSL; 못 찾으면 반대편으로 fallback). 값은 `chrome.storage.local.preferredRuntime`에 저장되며, 사이드패널 ⚙ 설정에서 바꾼다. 하드 재시작이 성공한 뒤에만 저장되고, 현재와 다른 환경을 고르면 확인 다이얼로그 후 하드 재시작한다.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
 
 ### OpenCode REST API (background.js가 직접 호출)

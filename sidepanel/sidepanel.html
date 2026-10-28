@@ -20,7 +20,10 @@
           </button>
           <div id="mcp-dropdown" class="mcp-dropdown hidden"></div>
         </div>
-        <span class="header-placeholder">PowerShell</span>
+        <div class="mcp-wrapper">
+          <button id="settings-btn" class="mcp-btn" title="설정">⚙</button>
+          <div id="settings-dropdown" class="mcp-dropdown settings-dropdown hidden"></div>
+        </div>
       </div>
     </header>
 
@@ -82,6 +85,17 @@
     <div class="connecting-message" id="connecting-message">OpenCode server connecting...</div>
     <div class="connecting-spinner" id="connecting-spinner"></div>
     <button id="retry-btn" class="retry-btn hidden">재연결</button>
+  </div>
+
+  <div id="confirm-dialog" class="confirm-dialog hidden">
+    <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div id="confirm-title" class="confirm-title"></div>
+      <div id="confirm-message" class="confirm-message"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel-btn" class="confirm-btn">취소</button>
+        <button id="confirm-ok-btn" class="confirm-btn primary">확인</button>
+      </div>
+    </div>
   </div>
 
   <div id="debug-dialog" class="debug-dialog hidden">
