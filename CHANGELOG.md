@@ -1,5 +1,13 @@
 # Changelog
 
+# [2.12.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.11.0...v2.12.0) (2026-10-29)
+
+
+### Features
+
+* native host 버전 확인 및 업데이트 안내 ([6ae3074](https://github.com/fantaXII/opencode_chrome_ext/commit/6ae3074453cc85d9258149c07c50e5d1c688d15e))
+* 서버 실행 환경 배지 표시 및 auto 모드 WSL 우선으로 변경 ([74549ca](https://github.com/fantaXII/opencode_chrome_ext/commit/74549ca17a3b2becb573c04c664cd957be9451d9))
+
 # [2.11.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.10.0...v2.11.0) (2026-10-28)
 
 
