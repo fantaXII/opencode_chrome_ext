@@ -120,8 +120,9 @@
           <circle cx="24" cy="38" r="2" fill="var(--accent)"/>
         </svg>
       </div>
-      <h2 class="guide-title">Native Host 설치 필요</h2>
-      <p class="guide-desc">Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.</p>
+      <h2 class="guide-title" id="guide-title">Native Host 설치 필요</h2>
+      <p class="guide-desc" id="guide-desc">Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.</p>
+      <p class="guide-version-note hidden" id="guide-version-note"></p>
 
       <ol class="guide-steps">
         <li>아래 버튼으로 인스톨러를 다운로드합니다</li>
@@ -136,6 +137,7 @@
 
       <a id="guide-download-btn" class="guide-download-btn" href="#" target="_blank">⬇ 인스톨러 다운로드</a>
       <button id="guide-retry-btn" class="guide-retry-btn">↺ 다시 연결</button>
+      <button id="guide-dismiss-btn" class="guide-retry-btn hidden">나중에</button>
     </div>
   </div>
 

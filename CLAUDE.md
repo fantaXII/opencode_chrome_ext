@@ -46,6 +46,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - 지원 액션: `start` / `stop` / `restart` / `status` / `check-port` / `get-home-dir` / `browse-for-folder` / `browse-for-file` / `read-log`
 - `sendNativeMessage`는 메시지마다 host 프로세스를 새로 띄우므로 모듈 전역 상태(`opencodeProcess`/`isWSL`)는 요청 간 유지되지 않는다. `stop`/`restart`는 프로세스 핸들이 아니라 **포트를 점유한 프로세스**를 찾아서 종료한다(Windows: `Get-NetTCPConnection` → `taskkill /T /F`, WSL: `wsl.exe ss -ltnpH` → `wsl.exe kill`). 서버가 어느 쪽에 있는지 알 수 없으므로 양쪽을 모두 시도하고, 성공 판정은 포트의 health로만 한다.
 - **실행 환경 우선순위**: `start`/`restart` 메시지의 `preferredRuntime`(`auto`|`windows`|`wsl`)이 `findOpenCodePath`의 탐색 순서를 정한다(`windows`면 Windows → WSL, `auto`·`wsl`은 WSL → Windows; 못 찾으면 반대편으로 fallback). 이미 떠 있는 서버가 여러 개면 `findAvailablePort`가 각 서버의 cwd 형식(`C:\` → Windows, `/` → WSL)으로 환경을 판별해 같은 우선순위로 고른다. 연결된 서버의 환경은 `serverState.runtime`에 보관하고 헤더 배지로 표시한다. 값은 `chrome.storage.local.preferredRuntime`에 저장되며, 사이드패널 ⚙ 설정에서 바꾼다. 하드 재시작이 성공한 뒤에만 저장되고, 현재와 다른 환경을 고르면 확인 다이얼로그 후 하드 재시작한다.
+- **host 버전 확인**: 인스톨러가 설치 폴더에 `version.txt`(= 확장과 같은 릴리스 버전)를 기록하고, host의 `get-version` 액션이 이를 돌려준다. 확장(`checkHostVersion`)은 서버 연결 후 이 값을 `chrome.runtime.getManifest().version`과 비교해, 낮으면 사이드패널에 버전 고정 다운로드 링크(`releases/download/v<버전>/...`)와 업데이트 안내를 띄운다. `get-version`을 모르는 구버전 host는 `Unknown action`을 반환하므로 outdated로 본다. 개발 환경처럼 `version.txt`가 없으면(null) 판단하지 않는다.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
 
 ### OpenCode REST API (background.js가 직접 호출)

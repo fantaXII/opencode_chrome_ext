@@ -43,6 +43,11 @@ Section "Native Host" SecMain
   File "../native-host/install.ps1"
   File "configure-extension-id.bat"
 
+  ; 설치된 host 버전 기록 (확장이 get-version으로 읽어 확장 버전과 비교한다)
+  FileOpen $1 "$INSTDIR\version.txt" w
+  FileWrite $1 "${APP_VERSION}"
+  FileClose $1
+
   ; node_modules 번들 (which 패키지, ~240KB)
   SetOutPath "$INSTDIR\node_modules"
   File /r "../native-host/node_modules/*"

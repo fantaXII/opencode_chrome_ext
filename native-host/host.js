@@ -420,6 +420,18 @@ function resolveDrivePath(rawPath, driveRootCache) {
 }
 
 // ============================================
+// host 버전 (인스톨러가 설치 폴더에 version.txt로 기록한다. 개발 환경에는 없음 → null)
+// ============================================
+
+function readHostVersion() {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'version.txt'), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================
 // 메시지 핸들러
 // ============================================
 
@@ -463,6 +475,9 @@ async function handleMessage(message) {
           diagnostic: error.diagnostic || null
         };
       }
+
+    case 'get-version':
+      return { status: 'success', version: readHostVersion() };
 
     case 'status': {
       const available = await checkOpenCodeServer(currentPort);

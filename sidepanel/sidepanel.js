@@ -32,6 +32,7 @@
   const nativeHostGuide = document.getElementById('native-host-guide');
   const guideDownloadBtn = document.getElementById('guide-download-btn');
   const guideRetryBtn = document.getElementById('guide-retry-btn');
+  const guideDismissBtn = document.getElementById('guide-dismiss-btn');
 
   let currentSessionId = null;
   let currentTabId = null;
@@ -68,6 +69,7 @@
         hideNativeHostGuide();
         updateConnectionStatus('connected');
         refreshRuntimeBadge();
+        checkHostVersionAndGuide();
         await loadModels();
         await loadCommandCatalog();
         await loadAgents();
@@ -964,22 +966,57 @@
     init();
   });
 
-  function showNativeHostGuide() {
+  // mode: 'missing'(host 미설치) | 'outdated'(설치됐지만 확장보다 낮은 버전)
+  // 안내하는 인스톨러는 항상 현재 확장 버전과 같은 릴리스의 파일이다.
+  function showNativeHostGuide(mode = 'missing', hostVersion = null) {
     const { version } = chrome.runtime.getManifest();
-    guideDownloadBtn.href = `https://github.com/fantaXII/opencode_chrome_ext/releases/latest/download/opencode-native-host-setup-v${version}.exe`;
+    guideDownloadBtn.href = `https://github.com/fantaXII/opencode_chrome_ext/releases/download/v${version}/opencode-native-host-setup-v${version}.exe`;
+
+    const outdated = mode === 'outdated';
+    document.getElementById('guide-title').textContent = outdated ? 'Native Host 업데이트 필요' : 'Native Host 설치 필요';
+    document.getElementById('guide-desc').innerHTML = outdated
+      ? '확장 프로그램이 업데이트되어<br>Native Host도 최신 버전이 필요합니다.'
+      : 'Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.';
+    const note = document.getElementById('guide-version-note');
+    note.textContent = outdated
+      ? `설치된 버전: ${hostVersion ? 'v' + hostVersion : '구버전'} → 필요한 버전: v${version} (기존 설치 위에 그대로 설치하면 됩니다)`
+      : `설치할 버전: v${version}`;
+    note.classList.remove('hidden');
+    guideDismissBtn.classList.toggle('hidden', !outdated);
+
     nativeHostGuide.classList.remove('hidden');
-    updateConnectionStatus('disconnected');
-    connectingIndicator.classList.add('hidden');
+    if (!outdated) {
+      updateConnectionStatus('disconnected');
+      connectingIndicator.classList.add('hidden');
+    }
   }
 
   function hideNativeHostGuide() {
     nativeHostGuide.classList.add('hidden');
   }
 
+  // 업데이트 안내를 이번 패널 세션 동안만 닫는다(패널을 다시 열면 구버전일 때 다시 안내).
+  let hostGuideDismissed = false;
+
   guideRetryBtn.addEventListener('click', () => {
+    hostGuideDismissed = false;
     hideNativeHostGuide();
     init();
   });
+
+  guideDismissBtn.addEventListener('click', () => {
+    hostGuideDismissed = true;
+    hideNativeHostGuide();
+  });
+
+  // 서버 연결에 성공한 뒤 설치된 host가 확장 버전보다 낮으면 업데이트를 안내한다.
+  async function checkHostVersionAndGuide() {
+    if (hostGuideDismissed) return;
+    try {
+      const res = await sendMessageToBackground('check-host-version');
+      if (res.state === 'outdated') showNativeHostGuide('outdated', res.hostVersion);
+    } catch {}
+  }
 
   async function loadMcpStatus() {
     try {

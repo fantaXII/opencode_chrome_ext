@@ -212,6 +212,45 @@ async function findAvailablePort() {
   return chosen;
 }
 
+// "1.2.3" 형식 비교: a<b → -1, a==b → 0, a>b → 1
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * 설치된 native host 버전을 확장 버전과 비교한다.
+ * state: 'ok' | 'outdated' | 'missing'(host 미설치) | 'unknown'(판단 불가 - 안내하지 않음)
+ * get-version이 없는 구버전 host는 'Unknown action'을 돌려주므로 outdated로 본다.
+ */
+async function checkHostVersion() {
+  const required = chrome.runtime.getManifest().version;
+  try {
+    const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-version' });
+    let result;
+    if (res?.status === 'success') {
+      result = res.version
+        ? { state: compareVersions(res.version, required) < 0 ? 'outdated' : 'ok', hostVersion: res.version }
+        : { state: 'unknown', hostVersion: null }; // version.txt 없음(개발 환경)
+    } else if (res?.error === 'Unknown action') {
+      result = { state: 'outdated', hostVersion: null };
+    } else {
+      result = { state: 'unknown', hostVersion: null };
+    }
+    debugLog('INFO', `checkHostVersion: ${JSON.stringify(result)} required=${required}`);
+    return { ...result, required };
+  } catch (error) {
+    const missing = error.message?.includes('native messaging host not found');
+    debugLog(missing ? 'WARN' : 'ERROR', `checkHostVersion: ${error.message}`);
+    return { state: missing ? 'missing' : 'unknown', hostVersion: null, required };
+  }
+}
+
 const RUNTIME_PREFERENCES = ['auto', 'wsl', 'windows'];
 
 /** 저장된 실행 환경 우선순위. 'auto'는 Windows 우선(기존 동작). */
@@ -1773,6 +1812,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               : (typeof serverIsWSL === 'boolean' ? serverIsWSL : null),
             port: serverState.available ? serverState.port : null
           });
+          break;
+        }
+
+        // 설치된 native host가 현재 확장 버전보다 낮은지 확인
+        case 'check-host-version': {
+          sendResponse(await checkHostVersion());
           break;
         }
 
