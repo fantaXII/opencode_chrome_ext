@@ -55,7 +55,8 @@ let serverState = {
   port: DEFAULT_PORT,
   available: false,
   version: null,
-  checking: false
+  checking: false,
+  runtime: null // 'wsl' | 'windows' | null(미확인) - 연결된 서버가 실제로 실행 중인 환경
 };
 
 let nativeHostMissingFlag = false;
@@ -187,15 +188,28 @@ async function checkServerHealth(port) {
  */
 async function findAvailablePort() {
   console.log(`[findAvailablePort] ${DEFAULT_PORT} ~ ${DEFAULT_PORT + MAX_PORT_CHECK - 1} 범위 포트 스캔 시작`);
-  for (let port = DEFAULT_PORT; port < DEFAULT_PORT + MAX_PORT_CHECK; port++) {
-    const state = await checkServerHealth(port);
-    if (state.available) {
-      console.log(`[findAvailablePort] 포트 ${port} 발견!`);
-      return port;
-    }
+  const ports = Array.from({ length: MAX_PORT_CHECK }, (_, i) => DEFAULT_PORT + i);
+  const states = await Promise.all(ports.map((port) => checkServerHealth(port)));
+  const healthy = ports.filter((_, i) => states[i].available);
+
+  if (healthy.length === 0) {
+    console.log(`[findAvailablePort] 모든 포트 실패 - 사용 가능한 서버 없음`);
+    return null;
   }
-  console.log(`[findAvailablePort] 모든 포트 실패 - 사용 가능한 서버 없음`);
-  return null;
+  if (healthy.length === 1) {
+    console.log(`[findAvailablePort] 포트 ${healthy[0]} 발견!`);
+    return healthy[0];
+  }
+
+  // 서버가 여러 개(WSL + Windows)면 우선순위 설정에 맞는 환경의 서버를 고른다.
+  // 'auto'는 WSL 우선. 환경을 못 알아내면 가장 낮은 포트로 fallback.
+  const preferred = await getPreferredRuntime();
+  const want = preferred === 'windows' ? 'windows' : 'wsl';
+  const runtimes = await Promise.all(healthy.map(async (port) => runtimeFromDirectory(await probeServerDirectory(port))));
+  const idx = runtimes.indexOf(want);
+  const chosen = idx >= 0 ? healthy[idx] : healthy[0];
+  debugLog('INFO', `findAvailablePort: multiple servers ${JSON.stringify(healthy.map((p, i) => ({ port: p, runtime: runtimes[i] })))} - preferred=${preferred}, chosen=${chosen}`);
+  return chosen;
 }
 
 const RUNTIME_PREFERENCES = ['auto', 'wsl', 'windows'];
@@ -232,6 +246,7 @@ async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
         console.log(`[startServerWithNativeMessaging] 성공 - port=${response.port}`);
         if (typeof response.isWSL === 'boolean') {
           chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
+          serverState.runtime = response.isWSL ? 'wsl' : 'windows';
         }
         return response.port;
       }
@@ -530,6 +545,7 @@ async function hardRestartServer(requestedRuntime) {
     }
     if (typeof response.isWSL === 'boolean') {
       chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
+      serverState.runtime = response.isWSL ? 'wsl' : 'windows';
     }
     // 재시작이 성공한 뒤에만 선택을 저장한다(실패하면 이전 설정이 유지된다).
     if (RUNTIME_PREFERENCES.includes(requestedRuntime)) {
@@ -620,15 +636,15 @@ function toWSLPath(p) {
  * 사용자가 지정한 working directory를 "실제 실행 중인 opencode 서버"가 이해하는
  * 경로 포맷으로 정규화한다.
  *
- * host.js는 Windows PATH를 1순위, WSL을 2순위 fallback으로 opencode를 찾아 기동한다
- * (native-host/host.js findOpenCodePath). 따라서 서버가 항상 WSL이라고 가정하고
+ * host.js는 preferredRuntime 순서(기본 WSL 우선)로 opencode를 찾아 기동하므로 서버가
+ * WSL일 수도 Windows일 수도 있다(native-host/host.js findOpenCodePath). 따라서 서버가 항상 WSL이라고 가정하고
  * C:\... 를 /mnt/c/... 로 강제 변환하면, Windows 네이티브로 뜬 서버에는 존재하지
  * 않는 경로를 보내게 되어 working directory 설정이 조용히 무시된다.
  *
  * 판단 우선순위:
  *   1. serverCwd (SSE/probe로 실측한 서버의 실제 cwd 포맷) — 가장 신뢰도 높음
  *   2. serverIsWSL (이번 세션에 native host가 직접 서버를 띄우며 기록한 값)
- *   3. 둘 다 모르면 변환하지 않음 (host.js의 Windows-우선 탐색과 일치하는 기본값)
+ *   3. 둘 다 모르면 변환하지 않음
  */
 async function normalizeWorkingDirectory(rawPath) {
   if (!rawPath) return '';
@@ -709,11 +725,26 @@ async function probeServerDirectory(port) {
   return null;
 }
 
+// 서버가 보고한 cwd 형식으로 실행 환경 추정: C:\... → Windows, /... → WSL
+function runtimeFromDirectory(directory) {
+  if (!directory) return null;
+  if (isWindowsDrivePath(directory)) return 'windows';
+  return directory.startsWith('/') ? 'wsl' : null;
+}
+
 async function refreshServerCwd(port) {
   const directory = await probeServerDirectory(port);
   if (!directory) {
     debugLog('WARN', `refreshServerCwd: probe failed or timed out - port=${port}`);
     return;
+  }
+  // 서버가 보고한 cwd 형식으로 실제 실행 환경을 확정한다(C:\ → Windows, / → WSL).
+  const runtime = runtimeFromDirectory(directory);
+  if (runtime && runtime !== serverState.runtime) {
+    serverState.runtime = runtime;
+    chrome.storage.local.set({ serverIsWSL: runtime === 'wsl' }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime }).catch(() => {});
+    debugLog('INFO', `refreshServerCwd: server runtime detected - ${runtime}`);
   }
   const { serverCwd } = await chrome.storage.local.get('serverCwd');
   if (serverCwd === directory) return;
@@ -1737,7 +1768,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({
             success: true,
             preferredRuntime: await getPreferredRuntime(),
-            serverIsWSL: typeof serverIsWSL === 'boolean' ? serverIsWSL : null,
+            serverIsWSL: serverState.runtime
+              ? serverState.runtime === 'wsl'
+              : (typeof serverIsWSL === 'boolean' ? serverIsWSL : null),
             port: serverState.available ? serverState.port : null
           });
           break;

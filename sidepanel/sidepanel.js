@@ -67,6 +67,7 @@
       if (serverState.success && serverState.available) {
         hideNativeHostGuide();
         updateConnectionStatus('connected');
+        refreshRuntimeBadge();
         await loadModels();
         await loadCommandCatalog();
         await loadAgents();
@@ -899,7 +900,29 @@
     scrollToBottom();
   }
 
+  const runtimeBadge = document.getElementById('runtime-badge');
+
+  // runtime: 'wsl' | 'windows' | null(숨김). 서버가 연결돼 있을 때만 표시한다.
+  function setRuntimeBadge(runtime) {
+    if (!runtime) {
+      runtimeBadge.classList.add('hidden');
+      return;
+    }
+    runtimeBadge.textContent = RUNTIME_LABELS[runtime];
+    runtimeBadge.classList.remove('hidden');
+  }
+
+  async function refreshRuntimeBadge() {
+    try {
+      const info = await sendMessageToBackground('get-runtime-info');
+      setRuntimeBadge(info.port && info.serverIsWSL !== null ? (info.serverIsWSL ? 'wsl' : 'windows') : null);
+    } catch {
+      setRuntimeBadge(null);
+    }
+  }
+
   function updateConnectionStatus(status) {
+    if (status !== 'connected') setRuntimeBadge(null);
     header.classList.remove('connected', 'connecting');
     inputArea.classList.remove('disabled');
     connectingIndicator.classList.add('hidden');
@@ -1124,6 +1147,7 @@
       }
 
       updateConnectionStatus('connected');
+      refreshRuntimeBadge();
       await refreshServerCatalogs();
 
       const suffix = isHard && res.portChanged ? ` (포트 ${res.port})` : '';
@@ -1206,7 +1230,7 @@
     settingsDropdown.innerHTML = `
       <div class="settings-section">
         <div class="settings-title">실행 환경</div>
-        ${radio('auto', '자동 (Windows 우선)')}
+        ${radio('auto', '자동 (WSL 우선)')}
         ${radio('wsl', 'WSL')}
         ${radio('windows', 'Windows')}
         <div class="settings-current">${escapeHtml(currentText)}</div>
@@ -1717,6 +1741,8 @@
         appendReasoningDelta(activeBlocks, part.id, part.delta);
       }
       blockRenderScheduler.request();
+    } else if (message.action === 'server-runtime-updated') {
+      setRuntimeBadge(message.runtime);
     } else if (message.action === 'default-directory-updated' && !currentWorkingDir) {
       defaultWorkingDir = message.directory;
       updateWorkingFolderDisplay(message.directory, true);

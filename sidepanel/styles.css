@@ -113,6 +113,15 @@ body {
   opacity: 1;
 }
 
+.runtime-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
 .mcp-wrapper {
   position: relative;
 }

@@ -137,14 +137,14 @@ async function findWslOpenCode(diagnostic) {
   return null;
 }
 
-// preferredRuntime: 'auto'(Windows 우선) | 'windows' | 'wsl'(WSL 우선)
+// preferredRuntime: 'auto'·'wsl'(WSL 우선) | 'windows'(Windows 우선)
 async function findOpenCodePath(preferredRuntime = 'auto') {
   const diagnostic = {
     windowsPath: { checked: false, found: false, error: null },
     wsl: { checked: false, found: false, strategies: [] }
   };
 
-  const order = preferredRuntime === 'wsl' ? ['wsl', 'windows'] : ['windows', 'wsl'];
+  const order = preferredRuntime === 'windows' ? ['windows', 'wsl'] : ['wsl', 'windows'];
   fileLog('DEBUG', `findOpenCodePath: preferredRuntime=${preferredRuntime}, order=${order.join('>')}`);
 
   for (const side of order) {
