@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.13.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.12.0...v2.13.0) (2026-11-01)
+
+
+### Features
+
+* 설정 메뉴에 프록시 설정 추가 ([1eaf659](https://github.com/fantaXII/opencode_chrome_ext/commit/1eaf659a321a2e9d73f898933503bb14177b0a69))
+
 # [2.12.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.11.0...v2.12.0) (2026-10-29)
 
 
