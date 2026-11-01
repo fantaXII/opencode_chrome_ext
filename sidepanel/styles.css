@@ -298,6 +298,8 @@ body {
 
 .settings-dropdown {
   width: 260px;
+  max-height: 80vh;
+  overflow-y: auto;
 }
 
 .settings-section {
@@ -336,6 +338,48 @@ body {
   font-size: 10px;
   color: var(--text-secondary);
   margin-top: 2px;
+}
+
+.settings-current.warn {
+  color: var(--error);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.settings-field input {
+  padding: 4px 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings-field input:disabled {
+  opacity: 0.5;
+}
+
+.settings-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.settings-buttons .mcp-action-btn {
+  text-align: center;
 }
 
 .confirm-dialog {

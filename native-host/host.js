@@ -157,10 +157,62 @@ async function findOpenCodePath(preferredRuntime = 'auto') {
 }
 
 // ============================================
+// Proxy 환경변수 (확장 설정 메뉴 → start/restart 메시지의 proxy 필드)
+// ============================================
+
+// Windows 환경변수는 대소문자를 구분하지 않아 HTTP_PROXY와 http_proxy가 같은 변수다.
+// 그래서 대문자 이름 하나만 설정하고, 사용자가 이미 소문자(no_proxy 등)로 등록해 둔
+// 같은 변수는 먼저 지워 중복·충돌을 막는다. (WSL은 WSLENV에 적힌 이름과 정확히 같은
+// 대소문자의 변수만 받으므로, 소문자로 남아 있으면 대문자 WSLENV가 값을 못 찾는다.)
+const PROXY_FIELDS = [
+  ['http', 'HTTP_PROXY'],
+  ['https', 'HTTPS_PROXY'],
+  ['noProxy', 'NO_PROXY']
+];
+
+/** 메시지로 받은 proxy 값을 문자열 3개로 정규화한다(제어문자 제거, 빈 값은 ''). */
+function normalizeProxy(proxy) {
+  const out = { http: '', https: '', noProxy: '' };
+  if (!proxy || typeof proxy !== 'object') return out;
+  for (const [key] of PROXY_FIELDS) {
+    const v = proxy[key];
+    out[key] = typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
+  }
+  return out;
+}
+
+/**
+ * opencode 프로세스에 줄 환경변수를 만든다. 값이 빈 항목은 건드리지 않아 기존
+ * 시스템 환경변수가 그대로 유지된다. WSL 쪽은 wsl.exe가 WSLENV에 등록된 변수만
+ * 넘겨주므로 설정한 이름을 WSLENV에 추가한다.
+ */
+function buildProxyEnv(baseEnv, proxy) {
+  const env = { ...baseEnv };
+  const p = normalizeProxy(proxy);
+  const names = [];
+  for (const [key, name] of PROXY_FIELDS) {
+    if (!p[key]) continue;
+    for (const k of Object.keys(env)) {
+      if (k.toUpperCase() === name) delete env[k];
+    }
+    env[name] = p[key];
+    names.push(name);
+  }
+  if (names.length) {
+    // 같은 변수를 다른 대소문자로 등록한 기존 항목은 값을 못 찾으므로 빼고 대문자로 다시 넣는다.
+    const upper = new Set(names);
+    const kept = (baseEnv.WSLENV || '').split(':').filter(Boolean)
+      .filter(e => !upper.has(e.split('/')[0].toUpperCase()));
+    env.WSLENV = kept.concat(names).join(':');
+  }
+  return env;
+}
+
+// ============================================
 // OpenCode 서버 기동
 // ============================================
 
-async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'auto') {
+async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'auto', proxy = null) {
   if (opencodeProcess) {
     fileLog('INFO', `startOpenCodeServer: Already running on port ${currentPort}`);
     return currentPort;
@@ -185,17 +237,24 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
 
     isWSL = found.isWSL;
 
+    const spawnEnv = buildProxyEnv(process.env, proxy);
+    const p = normalizeProxy(proxy);
+    // 값(계정 포함 가능)은 로그에 남기지 않고 어떤 항목이 설정됐는지만 기록한다.
+    fileLog('INFO', `startOpenCodeServer: proxy http=${!!p.http} https=${!!p.https} noProxy=${!!p.noProxy}`);
+
     if (isWSL) {
       fileLog('INFO', `startOpenCodeServer: Spawning via WSL: wsl.exe ${found.path} serve --port ${port}`);
       opencodeProcess = spawn('wsl.exe', [found.path, 'serve', '--port', port.toString()], {
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: spawnEnv
       });
     } else {
       fileLog('INFO', `startOpenCodeServer: Spawning on Windows: ${found.path} serve --port ${port}`);
       const isCmd = /\.(cmd|bat)$/i.test(found.path);
       opencodeProcess = spawn(found.path, ['serve', '--port', port.toString()], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: isCmd
+        shell: isCmd,
+        env: spawnEnv
       });
     }
 
@@ -221,6 +280,7 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
       const available = await checkOpenCodeServer(port);
       if (available) {
         fileLog('INFO', `startOpenCodeServer: Server ready on port ${port} after ${attempts + 1}s`);
+        recordServerListener(port);
         return port;
       }
       attempts++;
@@ -248,29 +308,42 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
 // 프로세스들. 이 이름이 나오면 실제 opencode는 WSL 안에 있다.
 const WSL_RELAY_PROCESSES = /^(wslrelay|wslhost|wslservice|svchost|System|Idle)$/i;
 
-function killWindowsListener(port) {
+// 포트 리스너 조회. relay는 WSL 포트 포워딩 대리 점유 프로세스(실제 서버는 WSL 안).
+function findWindowsListener(port) {
   try {
     const ps = [
       `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;`,
       'if ($c) {',
       '  $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue;',
       '  if ($p) { $p.Id; $p.ProcessName }',
-      '}'
+      '}',
+      'exit 0' // 리스너가 없을 때 Get-NetTCPConnection의 오류 때문에 종료 코드가 1이 되는 것을 막는다
     ].join(' ');
     const out = execSync(`powershell -NoProfile -Command "${ps}"`, { encoding: 'utf8', timeout: 15000 }).trim();
     const [pid, name] = out.split(/\r?\n/).map(s => s.trim());
+    if (!pid) return null;
+    return { pid: Number(pid), name: name || '', relay: WSL_RELAY_PROCESSES.test(name || '') };
+  } catch (error) {
+    fileLog('DEBUG', `findWindowsListener: ${error.message}`);
+    return { error: error.message.substring(0, 120) };
+  }
+}
 
-    if (!pid) return { side: 'windows', killed: false, reason: 'no-listener' };
-    if (WSL_RELAY_PROCESSES.test(name || '')) {
-      fileLog('INFO', `killWindowsListener: port ${port} held by relay ${name} (pid=${pid}) -> listener is inside WSL`);
-      return { side: 'windows', killed: false, reason: `relay:${name}` };
+function killWindowsListener(port) {
+  try {
+    const l = findWindowsListener(port);
+    if (l?.error) return { side: 'windows', killed: false, reason: l.error };
+    if (!l) return { side: 'windows', killed: false, reason: 'no-listener' };
+    if (l.relay) {
+      fileLog('INFO', `killWindowsListener: port ${port} held by relay ${l.name} (pid=${l.pid}) -> listener is inside WSL`);
+      return { side: 'windows', killed: false, reason: `relay:${l.name}` };
     }
 
     // opencode가 .cmd/.bat 래퍼로 설치된 경우 실제 리스너는 node/bun 자식이므로
     // /T로 프로세스 트리를 함께 종료한다.
-    execSync(`taskkill /PID ${pid} /T /F`, { encoding: 'utf8', timeout: 15000 });
-    fileLog('INFO', `killWindowsListener: killed pid=${pid} (${name}) on port ${port}`);
-    return { side: 'windows', killed: true, pid: Number(pid), name };
+    execSync(`taskkill /PID ${l.pid} /T /F`, { encoding: 'utf8', timeout: 15000 });
+    fileLog('INFO', `killWindowsListener: killed pid=${l.pid} (${l.name}) on port ${port}`);
+    return { side: 'windows', killed: true, pid: l.pid, name: l.name };
   } catch (error) {
     fileLog('DEBUG', `killWindowsListener: ${error.message}`);
     return { side: 'windows', killed: false, reason: error.message.substring(0, 120) };
@@ -280,21 +353,31 @@ function killWindowsListener(port) {
 // wsl.exe에는 셸 스크립트가 아니라 argv만 넘긴다. `wsl.exe bash -c "<스크립트>"` 형태는
 // 인자가 Windows 커맨드라인 파싱과 WSL interop을 거치는 동안 따옴표나 $ 확장이 깨질 수
 // 있어서(실측으로 깨지는 조합을 확인함) 파싱은 전부 Node 쪽에서 처리한다.
-function findWSLListenerPid(port) {
-  // ss 출력 예: LISTEN 0 512 127.0.0.1:4096 0.0.0.0:* users:(("opencode",pid=1234,fd=19))
-  const ss = spawnSync('wsl.exe', ['ss', '-ltnpH'], { encoding: 'utf8', timeout: 15000 });
-  for (const line of (ss.stdout || '').split('\n')) {
+// ss 출력 예: LISTEN 0 512 127.0.0.1:4096 0.0.0.0:* users:(("opencode",pid=1234,fd=19))
+function parseSsListener(output, port) {
+  for (const line of (output || '').split('\n')) {
     const localAddress = line.trim().split(/\s+/)[3] || '';
     if (!localAddress.endsWith(`:${port}`)) continue;
-    const pidMatch = line.match(/pid=(\d+)/);
-    if (pidMatch) return Number(pidMatch[1]);
+    const m = line.match(/\("([^"]*)",pid=(\d+)/);
+    if (m) return { pid: Number(m[2]), name: m[1] };
   }
+  return null;
+}
+
+function findWSLListener(port) {
+  const ss = spawnSync('wsl.exe', ['ss', '-ltnpH'], { encoding: 'utf8', timeout: 15000 });
+  const parsed = parseSsListener(ss.stdout, port);
+  if (parsed) return parsed;
 
   // ss가 없거나 pid 정보를 못 얻은 경우 폴백. fuser는 pid를 stdout에,
   // "4096/tcp:" 헤더를 stderr에 쓰므로 stdout만 본다.
   const fuser = spawnSync('wsl.exe', ['fuser', `${port}/tcp`], { encoding: 'utf8', timeout: 15000 });
   const fuserMatch = (fuser.stdout || '').match(/\d+/);
-  return fuserMatch ? Number(fuserMatch[0]) : null;
+  return fuserMatch ? { pid: Number(fuserMatch[0]), name: '' } : null;
+}
+
+function findWSLListenerPid(port) {
+  return findWSLListener(port)?.pid ?? null;
 }
 
 function killWSLListener(port, force) {
@@ -362,7 +445,58 @@ async function stopOpenCodeServer(port = currentPort, isWSLHint = false) {
   return { stopped, attempts };
 }
 
-async function restartOpenCodeServer(port = currentPort, isWSLHint = false, preferredRuntime = 'auto') {
+// ============================================
+// 확장이 띄운 서버 식별 (host는 요청마다 새 프로세스라 파일로 남긴다)
+// ============================================
+
+const SERVER_RECORD_FILE = path.join(path.dirname(LOG_DIR), 'server.json');
+
+/** 포트의 실제 리스너(서버 프로세스) 조회. 결과: { side, pid, name } | null */
+function getListener(port) {
+  const win = findWindowsListener(port);
+  if (win && !win.error && !win.relay) return { side: 'windows', pid: win.pid, name: win.name };
+  const wsl = findWSLListener(port);
+  return wsl ? { side: 'wsl', ...wsl } : null;
+}
+
+/** 방금 띄운 서버의 리스너 pid를 기록한다. 실패해도 서버 기동은 막지 않는다. */
+function recordServerListener(port) {
+  try {
+    const l = getListener(port);
+    if (!l) return;
+    fs.mkdirSync(path.dirname(SERVER_RECORD_FILE), { recursive: true });
+    fs.writeFileSync(SERVER_RECORD_FILE, JSON.stringify({ port, side: l.side, pid: l.pid, startedAt: Date.now() }));
+    fileLog('INFO', `recordServerListener: port=${port} side=${l.side} pid=${l.pid}`);
+  } catch (error) {
+    fileLog('DEBUG', `recordServerListener: ${error.message}`);
+  }
+}
+
+function readServerRecord() {
+  try {
+    return JSON.parse(fs.readFileSync(SERVER_RECORD_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** 기록과 현재 리스너를 대조: 같으면 확장이 띄운 서버. */
+function isManagedListener(record, listener, port) {
+  return !!(record && listener
+    && record.port === port
+    && record.side === listener.side
+    && record.pid === listener.pid);
+}
+
+function getServerInfo(port) {
+  const listener = getListener(port);
+  return {
+    listener: listener ? { side: listener.side, pid: listener.pid, name: listener.name } : null,
+    managed: isManagedListener(readServerRecord(), listener, port)
+  };
+}
+
+async function restartOpenCodeServer(port = currentPort, isWSLHint = false, preferredRuntime = 'auto', proxy = null) {
   fileLog('INFO', `restartOpenCodeServer: port=${port}, isWSLHint=${isWSLHint}, preferredRuntime=${preferredRuntime}`);
   const { stopped, attempts } = await stopOpenCodeServer(port, isWSLHint);
   if (!stopped) {
@@ -372,7 +506,7 @@ async function restartOpenCodeServer(port = currentPort, isWSLHint = false, pref
   }
 
   opencodeProcess = null;
-  const newPort = await startOpenCodeServer(port, preferredRuntime);
+  const newPort = await startOpenCodeServer(port, preferredRuntime, proxy);
   return { port: newPort, attempts };
 }
 
@@ -439,6 +573,7 @@ async function handleMessage(message) {
   const { action, preferredPort } = message;
   const preferredRuntime = ['auto', 'wsl', 'windows'].includes(message.preferredRuntime) ? message.preferredRuntime : 'auto';
   // 종료/재시작 요청은 background.js가 실측한 포트와 WSL 여부 힌트를 함께 보낸다.
+  const proxy = message.proxy || null;
   const targetPort = message.port || currentPort;
   const isWSLHint = message.isWSL === true;
   fileLog('INFO', `handleMessage: action=${action}`);
@@ -446,7 +581,7 @@ async function handleMessage(message) {
   switch (action) {
     case 'start':
       try {
-        const port = await startOpenCodeServer(preferredPort || 4096, preferredRuntime);
+        const port = await startOpenCodeServer(preferredPort || 4096, preferredRuntime, proxy);
         fileLog('INFO', `handleMessage: start success, port=${port}, isWSL=${isWSL}`);
         return { status: 'success', port, isWSL };
       } catch (error) {
@@ -463,7 +598,7 @@ async function handleMessage(message) {
 
     case 'restart':
       try {
-        const result = await restartOpenCodeServer(targetPort, isWSLHint, preferredRuntime);
+        const result = await restartOpenCodeServer(targetPort, isWSLHint, preferredRuntime, proxy);
         fileLog('INFO', `handleMessage: restart success, port=${result.port}, isWSL=${isWSL}`);
         return { status: 'success', port: result.port, isWSL, attempts: result.attempts };
       } catch (error) {
@@ -475,6 +610,9 @@ async function handleMessage(message) {
           diagnostic: error.diagnostic || null
         };
       }
+
+    case 'server-info':
+      return { status: 'success', ...getServerInfo(targetPort) };
 
     case 'get-version':
       return { status: 'success', version: readHostVersion() };
@@ -659,4 +797,9 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+} else {
+  // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener };
+}

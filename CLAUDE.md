@@ -43,10 +43,12 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 ### native-host/host.js
 - Chrome Native Messaging 프로토콜: stdin/stdout, 메시지 앞에 4바이트 LE 길이 헤더
 - `which` 모듈로 `opencode` 바이너리 경로 탐색 후 `spawn('opencode', ['serve', '--port', port])`
-- 지원 액션: `start` / `stop` / `restart` / `status` / `check-port` / `get-home-dir` / `browse-for-folder` / `browse-for-file` / `read-log`
+- 지원 액션: `start` / `stop` / `restart` / `status` / `server-info` / `check-port` / `get-home-dir` / `browse-for-folder` / `browse-for-file` / `read-log`
 - `sendNativeMessage`는 메시지마다 host 프로세스를 새로 띄우므로 모듈 전역 상태(`opencodeProcess`/`isWSL`)는 요청 간 유지되지 않는다. `stop`/`restart`는 프로세스 핸들이 아니라 **포트를 점유한 프로세스**를 찾아서 종료한다(Windows: `Get-NetTCPConnection` → `taskkill /T /F`, WSL: `wsl.exe ss -ltnpH` → `wsl.exe kill`). 서버가 어느 쪽에 있는지 알 수 없으므로 양쪽을 모두 시도하고, 성공 판정은 포트의 health로만 한다.
 - **실행 환경 우선순위**: `start`/`restart` 메시지의 `preferredRuntime`(`auto`|`windows`|`wsl`)이 `findOpenCodePath`의 탐색 순서를 정한다(`windows`면 Windows → WSL, `auto`·`wsl`은 WSL → Windows; 못 찾으면 반대편으로 fallback). 이미 떠 있는 서버가 여러 개면 `findAvailablePort`가 각 서버의 cwd 형식(`C:\` → Windows, `/` → WSL)으로 환경을 판별해 같은 우선순위로 고른다. 연결된 서버의 환경은 `serverState.runtime`에 보관하고 헤더 배지로 표시한다. 값은 `chrome.storage.local.preferredRuntime`에 저장되며, 사이드패널 ⚙ 설정에서 바꾼다. 하드 재시작이 성공한 뒤에만 저장되고, 현재와 다른 환경을 고르면 확인 다이얼로그 후 하드 재시작한다.
 - **host 버전 확인**: 인스톨러가 설치 폴더에 `version.txt`(= 확장과 같은 릴리스 버전)를 기록하고, host의 `get-version` 액션이 이를 돌려준다. 확장(`checkHostVersion`)은 서버 연결 후 이 값을 `chrome.runtime.getManifest().version`과 비교해, 낮으면 사이드패널에 버전 고정 다운로드 링크(`releases/download/v<버전>/...`)와 업데이트 안내를 띄운다. `get-version`을 모르는 구버전 host는 `Unknown action`을 반환하므로 outdated로 본다. 개발 환경처럼 `version.txt`가 없으면(null) 판단하지 않는다.
+- **프록시 설정**: 사이드패널 ⚙ 설정의 `HTTP`/`HTTPS`/`NO_PROXY` 입력값은 `chrome.storage.local.proxy`에 저장되고(`set-proxy`가 `http(s)://`·`socks5(h)://` 형식만 허용), `start`/`restart` 메시지의 `proxy` 필드로 host에 전달되어 opencode 프로세스의 환경변수(`HTTP_PROXY` 등)로 주입된다. 서버 프로세스의 환경변수라서 **저장만으로는 반영되지 않고 하드 재시작이 필요**하다(소프트 `dispose`는 프로세스 env를 바꾸지 못한다). 빈 항목은 건드리지 않아 기존 시스템 환경변수가 유지된다. Windows 환경변수는 대소문자를 구분하지 않으므로 대문자 이름 하나만 설정하고 같은 이름의 기존 소문자 변수는 spawn env에서 제거한다. WSL 쪽은 `wsl.exe`가 `WSLENV`에 적힌 이름(대소문자 정확히 일치)만 넘겨주므로 `buildProxyEnv`가 `WSLENV`에 이름을 추가한다(WSL 안의 소문자 `http_proxy` 변수는 설정되지 않는다).
+- **확장이 띄운 서버 식별**: host가 서버 기동 후 포트의 리스너 pid를 `%LOCALAPPDATA%\OpenCodeChrome\server.json`에 기록하고, `server-info` 액션이 현재 리스너와 대조해 `managed`를 돌려준다. 프록시를 저장하면 사이드패널이 `get-server-origin`(= `server-info` + `GET /session/status`의 응답 중 세션 수)으로 재시작 안내를 달리한다: 확장이 띄운 서버면 재시작 확인, 아니면(터미널/VS Code TUI가 띄웠거나 이 기능 이전 버전이 띄운 서버) "저장만"/"그래도 재시작" 선택.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
 
 ### OpenCode REST API (background.js가 직접 호출)

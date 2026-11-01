@@ -1203,7 +1203,7 @@
   }
 
   function setRestartControlsDisabled(disabled) {
-    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, input[name="runtime-pref"]')
+    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, input[name="runtime-pref"], #proxy-save-btn, #proxy-reset-btn, .settings-field input')
       .forEach(el => { el.disabled = disabled; });
   }
 
@@ -1214,10 +1214,12 @@
   const confirmOkBtn = document.getElementById('confirm-ok-btn');
   const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
 
-  function showConfirm(title, message) {
+  function showConfirm(title, message, { okText = '확인', cancelText = '취소' } = {}) {
     return new Promise((resolve) => {
       confirmTitle.textContent = title;
       confirmMessage.textContent = message;
+      confirmOkBtn.textContent = okText;
+      confirmCancelBtn.textContent = cancelText;
       confirmDialog.classList.remove('hidden');
       confirmOkBtn.focus();
 
@@ -1252,6 +1254,10 @@
     } catch {
       info = { preferredRuntime: 'auto', serverIsWSL: null, port: null };
     }
+    let proxy = { http: '', https: '', noProxy: '' };
+    try {
+      proxy = (await sendMessageToBackground('get-proxy')).proxy || proxy;
+    } catch {}
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
     const currentText = !info.port
@@ -1271,6 +1277,24 @@
         ${radio('wsl', 'WSL')}
         ${radio('windows', 'Windows')}
         <div class="settings-current">${escapeHtml(currentText)}</div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">프록시</div>
+        <label class="settings-field">HTTP
+          <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${restartBusy ? ' disabled' : ''}>
+        </label>
+        <label class="settings-field">HTTPS
+          <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${restartBusy ? ' disabled' : ''}>
+        </label>
+        <label class="settings-field">제외 목록 (NO_PROXY)
+          <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${restartBusy ? ' disabled' : ''}>
+        </label>
+        <div class="settings-current">계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.</div>
+        <div class="settings-current warn">⚠ 입력값은 브라우저에 평문으로 저장됩니다.</div>
+        <div class="settings-buttons">
+          <button id="proxy-reset-btn" class="mcp-action-btn"${restartBusy ? ' disabled' : ''}>초기화</button>
+          <button id="proxy-save-btn" class="mcp-action-btn"${restartBusy ? ' disabled' : ''}>저장</button>
+        </div>
       </div>
       <div class="mcp-actions">
         <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${restartBusy ? ' disabled' : ''}
@@ -1311,6 +1335,14 @@
       });
     });
 
+    const readProxyInputs = () => ({
+      http: document.getElementById('proxy-http').value.trim(),
+      https: document.getElementById('proxy-https').value.trim(),
+      noProxy: document.getElementById('proxy-no').value.trim()
+    });
+    document.getElementById('proxy-save-btn')?.addEventListener('click', () => saveProxy(readProxyInputs()));
+    document.getElementById('proxy-reset-btn')?.addEventListener('click', () => saveProxy({ http: '', https: '', noProxy: '' }));
+
     document.getElementById('settings-hard-restart-btn')?.addEventListener('click', async () => {
       if (restartBusy) return;
       const ok = await showConfirm(
@@ -1319,6 +1351,60 @@
       );
       if (ok) runServerRestart('hard');
     });
+  }
+
+  // 프록시는 서버 프로세스의 환경변수라 저장만으로는 반영되지 않고, 확장이 띄운 서버를
+  // 하드 재시작해야 적용된다. 서버 상태에 따라 안내를 달리한다.
+  async function saveProxy(values) {
+    if (restartBusy) return;
+    try {
+      await sendMessageToBackground('set-proxy', { proxy: values });
+    } catch (e) {
+      setMcpActionStatus(`실패: ${e.message}`, 'error');
+      renderSettingsDropdown();
+      return;
+    }
+
+    let origin = { connected: false };
+    try { origin = await sendMessageToBackground('get-server-origin'); } catch {}
+
+    const savedLater = '저장했습니다 (서버를 다시 시작하면 적용)';
+    if (!origin.connected) {
+      setMcpActionStatus('저장했습니다 (서버 시작 시 적용)', 'ok');
+      renderSettingsDropdown();
+      return;
+    }
+
+    // 이 확장이 응답을 받는 중이면 busy에 그 세션 1개가 포함된다.
+    const otherBusy = Math.max(0, (origin.busy || 0) - (isLoading ? 1 : 0));
+    const busyWarn = otherBusy > 0
+      ? `\n\n⚠ 이 서버에서 응답 중인 다른 세션이 ${otherBusy}개 있습니다 (TUI 등 다른 클라이언트). 재시작하면 중단됩니다.`
+      : '';
+
+    let restart;
+    if (origin.managed === true) {
+      restart = await showConfirm(
+        '프록시 적용',
+        `프록시를 적용하려면 OpenCode 서버를 재시작해야 합니다.\n10~30초 걸리며 진행 중인 응답은 중단됩니다.${busyWarn}`,
+        { okText: '지금 재시작', cancelText: '나중에' }
+      );
+    } else {
+      const why = origin.managed === false
+        ? '현재 연결된 서버는 이 확장이 시작한 것이 아니라서(터미널·VS Code 등에서 실행했거나 이전 버전이 시작) 프록시가 적용되지 않을 수 있습니다.'
+        : '현재 서버를 이 확장이 시작했는지 확인할 수 없습니다.';
+      restart = await showConfirm(
+        '프록시 적용',
+        `설정은 저장되었고, 이 확장이 서버를 새로 시작할 때 적용됩니다.\n${why}\n\n그래도 지금 서버를 종료하고 재시작할까요?${busyWarn}`,
+        { okText: '그래도 재시작', cancelText: '저장만' }
+      );
+    }
+
+    if (restart) {
+      runServerRestart('hard');
+    } else {
+      setMcpActionStatus(savedLater, 'ok');
+      renderSettingsDropdown();
+    }
   }
 
   settingsBtn.addEventListener('click', (e) => {

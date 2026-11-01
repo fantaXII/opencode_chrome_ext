@@ -263,12 +263,37 @@ async function getPreferredRuntime() {
   }
 }
 
+const PROXY_KEYS = ['http', 'https', 'noProxy'];
+
+/** 저장된 프록시 설정. 비어 있으면 host가 기존 시스템 환경변수를 그대로 쓴다. */
+async function getProxy() {
+  const out = { http: '', https: '', noProxy: '' };
+  try {
+    const { proxy } = await chrome.storage.local.get('proxy');
+    for (const k of PROXY_KEYS) out[k] = typeof proxy?.[k] === 'string' ? proxy[k].trim() : '';
+  } catch {}
+  return out;
+}
+
+/** 프록시 주소 검증. 문제가 없으면 null, 있으면 사유 문자열. (http/https/socks5[h] 스킴만 허용) */
+function validateProxyUrl(value) {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    if (!/^(https?|socks5h?):$/.test(u.protocol) || !u.hostname) throw new Error('scheme');
+    return null;
+  } catch {
+    return `'${value.replace(/\/\/[^@/]*@/, '//***@')}' 형식이 올바르지 않습니다 (예: http://host:8080)`;
+  }
+}
+
 /**
  * Native Messaging Host를 통해 서버 시작
  */
 async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
   const MAX_RETRIES = 3;
   const preferredRuntime = await getPreferredRuntime();
+  const proxy = await getProxy();
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     debugLog('INFO', `NativeMsg: attempt ${attempt}/${MAX_RETRIES}, preferredPort=${preferredPort}, preferredRuntime=${preferredRuntime}`);
     console.log(`[startServerWithNativeMessaging] 시도 ${attempt}/${MAX_RETRIES} - preferredPort=${preferredPort}`);
@@ -276,7 +301,8 @@ async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
       const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
         action: 'start',
         preferredPort: preferredPort,
-        preferredRuntime
+        preferredRuntime,
+        proxy
       });
 
       console.log(`[startServerWithNativeMessaging] Native Messaging 응답:`, response);
@@ -569,7 +595,8 @@ async function hardRestartServer(requestedRuntime) {
         action: 'restart',
         port: oldPort,
         isWSL: serverIsWSL === true,
-        preferredRuntime
+        preferredRuntime,
+        proxy: await getProxy()
       });
     } catch (error) {
       debugLog('ERROR', `restart-server: native messaging error - ${error.message}`);
@@ -1829,6 +1856,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           await chrome.storage.local.set({ preferredRuntime: message.preferredRuntime });
           sendResponse({ success: true });
+          break;
+        }
+
+        // 프록시 설정 조회
+        case 'get-proxy': {
+          sendResponse({ success: true, proxy: await getProxy() });
+          break;
+        }
+
+        // 프록시 설정만 저장 (서버를 재시작해야 반영된다)
+        case 'set-proxy': {
+          const next = {};
+          for (const k of PROXY_KEYS) next[k] = typeof message.proxy?.[k] === 'string' ? message.proxy[k].trim() : '';
+          const bad = validateProxyUrl(next.http) || validateProxyUrl(next.https);
+          if (bad) {
+            sendResponse({ success: false, error: bad });
+            break;
+          }
+          await chrome.storage.local.set({ proxy: next });
+          sendResponse({ success: true });
+          break;
+        }
+
+        // 프록시 적용(재시작) 전 확인용: 연결된 서버를 확장이 띄웠는지, 진행 중인 작업이 있는지
+        case 'get-server-origin': {
+          if (!serverState.available) {
+            sendResponse({ success: true, connected: false });
+            break;
+          }
+          const result = { success: true, connected: true, port: serverState.port, managed: null, busy: null };
+          try {
+            const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port: serverState.port });
+            if (info?.status === 'success') result.managed = info.managed === true;
+          } catch {}
+          try {
+            // 응답 생성 중인 세션만 키로 들어오는 맵 (idle이면 {})
+            const res = await fetch(`http://127.0.0.1:${serverState.port}/session/status`, { signal: AbortSignal.timeout(3000) });
+            if (res.ok) result.busy = Object.keys(await res.json()).length;
+          } catch {}
+          sendResponse(result);
           break;
         }
 
