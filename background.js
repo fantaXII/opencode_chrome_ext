@@ -1954,15 +1954,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // 컨텍스트 메뉴 (우클릭 → 선택 텍스트 전송)
 // ============================================
 
-function createContextMenus() {
+async function createContextMenus() {
+  // 사이드패널 언어 설정(storage.local.lang)을 따른다. 기본은 한국어.
+  let lang = 'ko';
+  try { lang = (await chrome.storage.local.get('lang')).lang === 'en' ? 'en' : 'ko'; } catch {}
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'send-to-opencode',
-      title: 'OpenCode로 보내기',
+      title: lang === 'en' ? 'Send to OpenCode' : 'OpenCode로 보내기',
       contexts: ['selection']
     });
   });
 }
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.lang) createContextMenus();
+});
 
 // Chrome이 Web Store에서 새 버전을 받아 두면 알려준다. 적용(reload)은 사용자가 고른 시점에 한다.
 chrome.runtime.onUpdateAvailable.addListener((details) => {

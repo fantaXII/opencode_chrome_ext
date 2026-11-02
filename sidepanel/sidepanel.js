@@ -1,4 +1,4 @@
-(function() {
+I18N.ready.then(function() {
   const messagesContainer = document.getElementById('messages-container');
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
@@ -41,10 +41,10 @@
   let selectedModel = null;
   let mcpServers = {};
   let commandCatalog = [
-    { id: 'local.help',  slash: '/help',  title: 'Help',        description: '사용 가능한 커맨드 목록 표시', hasArg: false },
-    { id: 'local.clear', slash: '/clear', title: 'Clear',       description: '채팅 히스토리 초기화',         hasArg: false },
-    { id: 'local.model', slash: '/model', title: 'Model',       description: '모델 변경 <model-name>',       hasArg: true  },
-    { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: '작업 디렉토리 변경 <path>',    hasArg: true  },
+    { id: 'local.help',  slash: '/help',  title: 'Help',        description: t('사용 가능한 커맨드 목록 표시'), hasArg: false },
+    { id: 'local.clear', slash: '/clear', title: 'Clear',       description: t('채팅 히스토리 초기화'),         hasArg: false },
+    { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),       hasArg: true  },
+    { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),    hasArg: true  },
   ];
   let isDropdownOpen = false;
   let selectedDropdownIndex = -1;
@@ -106,7 +106,7 @@
   function updateWorkingFolderDisplay(dir, isDefault = false) {
     if (!isDefault) currentWorkingDir = dir;
     if (!dir) {
-      workingFolderDisplay.textContent = '폴더 없음';
+      workingFolderDisplay.textContent = t('폴더 없음');
       workingFolderWrapper.title = '';
       workingFolderDisplay.classList.remove('default');
       return;
@@ -114,7 +114,7 @@
     const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
     const short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : dir;
     workingFolderDisplay.textContent = short;
-    workingFolderWrapper.title = isDefault ? `기본값: ${dir}` : dir;
+    workingFolderWrapper.title = isDefault ? t('기본값: {dir}', { dir }) : dir;
     workingFolderDisplay.classList.toggle('default', isDefault);
   }
 
@@ -144,7 +144,7 @@
       updateWorkingFolderDisplay(result.directory || res.directory);
       applyWorkingDirSessionReset(result);
       if (res.warning) {
-        addErrorMessage(res.warning);
+        addErrorMessage(t(res.warning));
       }
     }
   });
@@ -166,7 +166,7 @@
     if (!result?.newSessionId) return;
     currentSessionId = result.newSessionId;
     messagesContainer.innerHTML = '';
-    addBotMessage('작업 디렉토리가 변경되어 새 세션을 시작합니다.');
+    addBotMessage(t('작업 디렉토리가 변경되어 새 세션을 시작합니다.'));
   }
 
   workingFolderInput.addEventListener('keydown', async (e) => {
@@ -400,7 +400,7 @@
   }
 
   function updateModelSelect() {
-    modelSelect.innerHTML = '<option value="">모델 선택</option>';
+    modelSelect.innerHTML = `<option value="">${t('모델 선택')}</option>`;
     
     availableModels.forEach(provider => {
       const optgroup = document.createElement('optgroup');
@@ -457,10 +457,10 @@
 
   async function loadCommandCatalog() {
     const localCommands = [
-      { id: 'local.help',  slash: '/help',  title: 'Help',        description: '사용 가능한 커맨드 목록 표시',   hasArg: false },
-      { id: 'local.clear', slash: '/clear', title: 'Clear',       description: '채팅 히스토리 초기화',           hasArg: false },
-      { id: 'local.model', slash: '/model', title: 'Model',       description: '모델 변경 <model-name>',         hasArg: true  },
-      { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: '작업 디렉토리 변경 <path>',      hasArg: true  },
+      { id: 'local.help',  slash: '/help',  title: 'Help',        description: t('사용 가능한 커맨드 목록 표시'),   hasArg: false },
+      { id: 'local.clear', slash: '/clear', title: 'Clear',       description: t('채팅 히스토리 초기화'),           hasArg: false },
+      { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),         hasArg: true  },
+      { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),      hasArg: true  },
     ];
     try {
       const res = await sendMessageToBackground('get-commands', {});
@@ -566,7 +566,7 @@
     const agent = availableAgents[currentAgentIndex];
     if (!agent) {
       agentDot.style.color = 'var(--text-secondary)';
-      agentNameEl.textContent = '에이전트';
+      agentNameEl.textContent = t('에이전트');
       return;
     }
     const fullName = agent.name.replace(/[​-‍﻿]/g, '').trim();
@@ -594,7 +594,7 @@
   function showModelPicker() {
     removeTypingIndicator();
     if (!availableModels.length) {
-      addBotMessage('모델 목록을 불러오지 못했습니다. 서버 연결 상태를 확인하세요.');
+      addBotMessage(t('모델 목록을 불러오지 못했습니다. 서버 연결 상태를 확인하세요.'));
       return;
     }
 
@@ -613,7 +613,7 @@
 
     const title = document.createElement('p');
     title.className = 'model-picker-title';
-    title.textContent = '모델을 선택하세요:';
+    title.textContent = t('모델을 선택하세요:');
     picker.appendChild(title);
 
     availableModels.forEach(provider => {
@@ -660,9 +660,9 @@
               } catch {}
             }
             messageDiv.remove();
-            addBotMessage(`모델이 변경되었습니다: ${modelName}`);
+            addBotMessage(t('모델이 변경되었습니다: {name}', { name: modelName }));
           } catch (e) {
-            addErrorMessage(`모델 변경 실패: ${e.message}`);
+            addErrorMessage(t('모델 변경 실패: {error}', { error: t(e.message) }));
           }
         });
 
@@ -692,7 +692,7 @@
 
     if (slash === '/help') {
       const lines = commandCatalog.map(c => `${c.slash.padEnd(12)} ${c.description}`).join('\n');
-      addBotMessage('사용 가능한 커맨드:\n\n' + lines);
+      addBotMessage(t('사용 가능한 커맨드:\n\n') + lines);
       sendBtn.disabled = false;
       return;
     }
@@ -705,9 +705,9 @@
         else currentSessionId = null;
       } catch {
         currentSessionId = null;
-        addErrorMessage('세션 재생성에 실패했습니다.');
+        addErrorMessage(t('세션 재생성에 실패했습니다.'));
       }
-      addBotMessage('채팅이 초기화되었습니다.');
+      addBotMessage(t('채팅이 초기화되었습니다.'));
       sendBtn.disabled = false;
       return;
     }
@@ -715,10 +715,10 @@
     if (slash === '/model') {
       if (!args) { showModelPicker(); sendBtn.disabled = false; return; }
       const found = findModelByName(args);
-      if (!found) { addBotMessage(`모델을 찾을 수 없습니다: ${args}`); sendBtn.disabled = false; return; }
+      if (!found) { addBotMessage(t('모델을 찾을 수 없습니다: {name}', { name: args })); sendBtn.disabled = false; return; }
       try {
         await sendMessageToBackground('set-model', { providerId: found.providerID, modelName: found.modelID });
-        addBotMessage(`모델이 변경되었습니다: ${found.modelID}`);
+        addBotMessage(t('모델이 변경되었습니다: {name}', { name: found.modelID }));
         for (const option of modelSelect.options) {
           if (!option.value) continue;
           try {
@@ -731,7 +731,7 @@
           } catch {}
         }
       } catch (e) {
-        addErrorMessage(`모델 변경 실패: ${e.message}`);
+        addErrorMessage(t('모델 변경 실패: {error}', { error: t(e.message) }));
       } finally {
         sendBtn.disabled = false;
       }
@@ -739,14 +739,14 @@
     }
 
     if (slash === '/wd') {
-      if (!args) { addBotMessage('사용법: /wd <path>'); sendBtn.disabled = false; return; }
+      if (!args) { addBotMessage(t('사용법: /wd <path>')); sendBtn.disabled = false; return; }
       try {
         const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId });
         updateWorkingFolderDisplay(result.directory || args);
         applyWorkingDirSessionReset(result);
-        addBotMessage(`작업 디렉토리가 변경되었습니다: ${result.directory || args}`);
+        addBotMessage(t('작업 디렉토리가 변경되었습니다: {dir}', { dir: result.directory || args }));
       } catch (e) {
-        addErrorMessage(`디렉토리 변경 실패: ${e.message}`);
+        addErrorMessage(t('디렉토리 변경 실패: {error}', { error: t(e.message) }));
       } finally {
         sendBtn.disabled = false;
       }
@@ -763,7 +763,7 @@
         await sendMessageToBackground('send-message', { sessionId: currentSessionId, message: promptText });
       } catch (error) {
         removeTypingIndicator();
-        addErrorMessage(`커맨드 실행 실패: ${error.message}`);
+        addErrorMessage(t('커맨드 실행 실패: {error}', { error: t(error.message) }));
         setLoadingState(false);
       }
       return;
@@ -776,7 +776,7 @@
       await sendMessageToBackground('send-message', { sessionId: currentSessionId, message: input });
     } catch (error) {
       removeTypingIndicator();
-      addErrorMessage('메시지 전송에 실패했습니다.');
+      addErrorMessage(t('메시지 전송에 실패했습니다.'));
       setLoadingState(false);
     }
   }
@@ -825,7 +825,7 @@
     } catch (error) {
       console.error('메시지 전송 실패:', error);
       removeTypingIndicator();
-      addErrorMessage('메시지 전송에 실패했습니다.');
+      addErrorMessage(t('메시지 전송에 실패했습니다.'));
       setLoadingState(false);
     }
   }
@@ -923,7 +923,9 @@
     }
   }
 
+  let connectionStatus = 'connecting';
   function updateConnectionStatus(status) {
+    connectionStatus = status;
     if (status !== 'connected') setRuntimeBadge(null);
     header.classList.remove('connected', 'connecting');
     inputArea.classList.remove('disabled');
@@ -934,27 +936,27 @@
     switch (status) {
       case 'connected':
         header.classList.add('connected');
-        connectionText.textContent = '연결됨';
+        connectionText.textContent = t('연결됨');
         break;
       case 'connecting':
         header.classList.add('connecting');
-        connectionText.textContent = '연결 중...';
+        connectionText.textContent = t('연결 중...');
         inputArea.classList.add('disabled');
         connectingMessage.textContent = 'OpenCode server connecting...';
         connectingIndicator.classList.remove('hidden');
         break;
       case 'disconnected':
-        connectionText.textContent = '연결 안됨';
+        connectionText.textContent = t('연결 안됨');
         inputArea.classList.add('disabled');
-        connectingMessage.textContent = '서버 연결에 실패했습니다';
+        connectingMessage.textContent = t('서버 연결에 실패했습니다');
         connectingSpinner.classList.add('hidden');
         retryBtn.classList.remove('hidden');
         connectingIndicator.classList.remove('hidden');
         break;
       case 'error':
-        connectionText.textContent = '오류';
+        connectionText.textContent = t('오류');
         inputArea.classList.add('disabled');
-        connectingMessage.textContent = '연결 오류가 발생했습니다';
+        connectingMessage.textContent = t('연결 오류가 발생했습니다');
         connectingSpinner.classList.add('hidden');
         retryBtn.classList.remove('hidden');
         connectingIndicator.classList.remove('hidden');
@@ -973,14 +975,14 @@
     guideDownloadBtn.href = `https://github.com/fantaXII/opencode_chrome_ext/releases/download/v${version}/opencode-native-host-setup-v${version}.exe`;
 
     const outdated = mode === 'outdated';
-    document.getElementById('guide-title').textContent = outdated ? 'Native Host 업데이트 필요' : 'Native Host 설치 필요';
+    document.getElementById('guide-title').textContent = outdated ? t('Native Host 업데이트 필요') : t('Native Host 설치 필요');
     document.getElementById('guide-desc').innerHTML = outdated
-      ? '확장 프로그램이 업데이트되어<br>Native Host도 최신 버전이 필요합니다.'
-      : 'Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.';
+      ? t('확장 프로그램이 업데이트되어<br>Native Host도 최신 버전이 필요합니다.')
+      : t('Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.');
     const note = document.getElementById('guide-version-note');
     note.textContent = outdated
-      ? `설치된 버전: ${hostVersion ? 'v' + hostVersion : '구버전'} → 필요한 버전: v${version} (기존 설치 위에 그대로 설치하면 됩니다)`
-      : `설치할 버전: v${version}`;
+      ? t('설치된 버전: {installed} → 필요한 버전: v{required} (기존 설치 위에 그대로 설치하면 됩니다)', { installed: hostVersion ? 'v' + hostVersion : t('구버전'), required: version })
+      : t('설치할 버전: v{version}', { version });
     note.classList.remove('hidden');
     guideDismissBtn.classList.toggle('hidden', !outdated);
 
@@ -1046,17 +1048,17 @@
   // - "설정 다시 읽기": POST /global/dispose (프로세스 유지, 1~2초). MCP/skill/agent를
   //   새로 등록했을 때 TUI를 exit 후 재진입한 것과 같은 효과.
   // 서버 강제 재시작과 실행 환경(WSL/Windows) 선택은 설정(⚙) 드롭다운에 있다.
-  const MCP_ACTIONS_HTML = `
+  const mcpActionsHtml = () => `
     <div class="mcp-actions">
       <button id="mcp-reload-btn" class="mcp-action-btn"
-              title="opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)">↻ 설정 다시 읽기</button>
+              title="${t('opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)')}">${t('↻ 설정 다시 읽기')}</button>
       <div id="mcp-action-status" class="mcp-action-status hidden"></div>
     </div>`;
 
   function renderMcpDropdown() {
     const entries = Object.entries(mcpServers);
     if (entries.length === 0) {
-      mcpDropdown.innerHTML = '<div class="mcp-empty">MCP 서버 없음</div>' + MCP_ACTIONS_HTML;
+      mcpDropdown.innerHTML = `<div class="mcp-empty">${t('MCP 서버 없음')}</div>` + mcpActionsHtml();
       bindMcpActions();
       return;
     }
@@ -1065,9 +1067,9 @@
       const dotClass = info.status === 'connected' ? 'mcp-dot-connected'
                      : info.status === 'failed'    ? 'mcp-dot-failed'
                      :                               'mcp-dot-disabled';
-      const statusLabel = info.status === 'connected' ? '연결됨'
-                        : info.status === 'failed'    ? `오류`
-                        :                               '비활성';
+      const statusLabel = info.status === 'connected' ? t('연결됨')
+                        : info.status === 'failed'    ? t('오류')
+                        :                               t('비활성');
       const errorTip = info.error ? ` title="${escapeHtml(info.error)}"` : '';
       return `<div class="mcp-item">
         <span class="mcp-dot ${dotClass}">●</span>
@@ -1080,7 +1082,7 @@
           <span class="mcp-toggle-slider"></span>
         </label>
       </div>`;
-    }).join('') + MCP_ACTIONS_HTML;
+    }).join('') + mcpActionsHtml();
 
     bindMcpActions();
 
@@ -1165,8 +1167,10 @@
     setRestartControlsDisabled(true);
     const runtimeLabel = runtime ? RUNTIME_LABELS[runtime] : null;
     setMcpActionStatus(isHard
-      ? `${runtimeLabel ? runtimeLabel + '(으)로 ' : ''}서버를 재시작하는 중… (최대 30초)`
-      : '설정을 다시 읽는 중…', null);
+      ? (runtimeLabel
+          ? t('{runtime}(으)로 서버를 재시작하는 중… (최대 30초)', { runtime: runtimeLabel })
+          : t('서버를 재시작하는 중… (최대 30초)'))
+      : t('설정을 다시 읽는 중…'), null);
 
     // 재시작하면 진행 중인 응답은 서버 쪽에서 사라진다. 로딩 상태가 영구히 남지 않도록
     // 먼저 취소해 UI를 정리한다.
@@ -1178,7 +1182,7 @@
         isHard && runtime ? { preferredRuntime: runtime } : {}
       );
       if (!res?.success) {
-        setMcpActionStatus(`실패: ${res?.error || '알 수 없는 오류'}`, 'error');
+        setMcpActionStatus(t('실패: {error}', { error: t(res?.error || '알 수 없는 오류') }), 'error');
         if (isHard) updateConnectionStatus('disconnected');
         return;
       }
@@ -1187,10 +1191,10 @@
       refreshRuntimeBadge();
       await refreshServerCatalogs();
 
-      const suffix = isHard && res.portChanged ? ` (포트 ${res.port})` : '';
-      setMcpActionStatus(isHard ? `서버 재시작 완료${suffix}` : '설정을 다시 읽었습니다', 'ok');
+      const suffix = isHard && res.portChanged ? t(' (포트 {port})', { port: res.port }) : '';
+      setMcpActionStatus(isHard ? t('서버 재시작 완료{suffix}', { suffix }) : t('설정을 다시 읽었습니다'), 'ok');
     } catch (error) {
-      setMcpActionStatus(`실패: ${error.message}`, 'error');
+      setMcpActionStatus(t('실패: {error}', { error: t(error.message) }), 'error');
     } finally {
       restartBusy = false;
       // 목록/실행 환경이 바뀌었을 수 있으므로 열려 있는 드롭다운을 다시 그린다
@@ -1214,7 +1218,7 @@
   const confirmOkBtn = document.getElementById('confirm-ok-btn');
   const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
 
-  function showConfirm(title, message, { okText = '확인', cancelText = '취소' } = {}) {
+  function showConfirm(title, message, { okText = t('확인'), cancelText = t('취소') } = {}) {
     return new Promise((resolve) => {
       confirmTitle.textContent = title;
       confirmMessage.textContent = message;
@@ -1245,7 +1249,7 @@
   }
 
   // ---- 설정(⚙) 드롭다운: 실행 환경(WSL/Windows) 선택 + 서버 강제 재시작 ----
-  const RUNTIME_LABELS = { auto: '자동', wsl: 'WSL', windows: 'Windows' };
+  const RUNTIME_LABELS = { get auto() { return t('자동'); }, wsl: 'WSL', windows: 'Windows' };
 
   // 정보 섹션 상태: 패널을 여는 동안 유지한다.
   let proxyOpen = false;          // 프록시 섹션 펼침 여부(다시 그려도 유지)
@@ -1265,7 +1269,7 @@
 
   function updateUpdateDot() {
     settingsBtn.classList.toggle('has-update', !!pendingUpdate);
-    settingsBtn.title = pendingUpdate ? `설정 · 새 버전 v${pendingUpdate.version} 준비됨` : '설정';
+    settingsBtn.title = pendingUpdate ? t('설정 · 새 버전 v{version} 준비됨', { version: pendingUpdate.version }) : t('설정');
   }
 
   function loadHostInfo(force = false) {
@@ -1280,14 +1284,26 @@
   }
 
   function hostVersionHtml() {
-    if (!hostInfo) return '<span class="settings-muted">확인 중…</span>';
+    if (!hostInfo) return `<span class="settings-muted">${t('확인 중…')}</span>`;
     const v = hostInfo.hostVersion ? `v${escapeHtml(hostInfo.hostVersion)}` : '';
     switch (hostInfo.state) {
       case 'ok': return `${v} ✓`;
-      case 'outdated': return `${v || '구버전'} ⚠ <button id="host-update-btn" class="mcp-action-btn">업데이트</button>`;
-      case 'missing': return '미설치 <button id="host-update-btn" class="mcp-action-btn">설치</button>';
+      case 'outdated': return `${v || t('구버전')} ⚠ <button id="host-update-btn" class="mcp-action-btn">${t('업데이트')}</button>`;
+      case 'missing': return `${t('미설치')} <button id="host-update-btn" class="mcp-action-btn">${t('설치')}</button>`;
       default: return v || '-';
     }
+  }
+
+  // 언어를 바꾸면 이미 그려진 UI 중 상태 기반으로 다시 그릴 수 있는 것만 갱신한다.
+  // (이미 출력된 채팅 메시지는 그대로 둔다.)
+  function onLanguageChanged() {
+    updateUpdateDot();
+    updateConnectionStatus(connectionStatus);
+    updateAgentBar();
+    updateWorkingFolderDisplay(currentWorkingDir || defaultWorkingDir, !currentWorkingDir);
+    if (modelSelect.options[0]?.value === '') modelSelect.options[0].textContent = t('모델 선택');
+    if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
+    renderSettingsDropdown();
   }
 
   async function renderSettingsDropdown() {
@@ -1304,8 +1320,8 @@
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
     const currentText = !info.port
-      ? '서버 연결 안 됨'
-      : `현재 실행 중: ${currentRuntime ? RUNTIME_LABELS[currentRuntime] : '알 수 없음'} · :${info.port}`;
+      ? t('서버 연결 안 됨')
+      : t('현재 실행 중: {runtime} · :{port}', { runtime: currentRuntime ? RUNTIME_LABELS[currentRuntime] : t('알 수 없음'), port: info.port });
 
     const option = (value, label) =>
       `<option value="${value}"${pref === value ? ' selected' : ''}>${label}</option>`;
@@ -1318,9 +1334,18 @@
     settingsDropdown.innerHTML = `
       <div class="settings-section">
         <label class="settings-row">
-          <span class="settings-title">실행 환경</span>
+          <span class="settings-title">${t('언어 / Language')}</span>
+          <select id="lang-select" class="settings-select">
+            <option value="ko"${I18N.getLang() === 'ko' ? ' selected' : ''}>한국어</option>
+            <option value="en"${I18N.getLang() === 'en' ? ' selected' : ''}>English</option>
+          </select>
+        </label>
+      </div>
+      <div class="settings-section">
+        <label class="settings-row">
+          <span class="settings-title">${t('실행 환경')}</span>
           <select id="runtime-pref" class="settings-select"${dis}>
-            ${option('auto', '자동 (WSL 우선)')}
+            ${option('auto', t('자동 (WSL 우선)'))}
             ${option('wsl', 'WSL')}
             ${option('windows', 'Windows')}
           </select>
@@ -1328,43 +1353,48 @@
         <div class="settings-current">${escapeHtml(currentText)}</div>
       </div>
       <details id="proxy-details" class="settings-section settings-collapse"${proxyOpen ? ' open' : ''}>
-        <summary class="settings-title">프록시 <span class="settings-muted">${proxySet ? '(설정됨)' : '(미설정)'}</span></summary>
+        <summary class="settings-title">${t('프록시')} <span class="settings-muted">${proxySet ? t('(설정됨)') : t('(미설정)')}</span></summary>
         <label class="settings-field">HTTP
           <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${dis}>
         </label>
         <label class="settings-field">HTTPS
           <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${dis}>
         </label>
-        <label class="settings-field">제외 목록 (NO_PROXY)
+        <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
           <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
         </label>
-        <div class="settings-current" title="계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.">계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용</div>
-        <div class="settings-current warn">⚠ 입력값은 브라우저에 평문으로 저장됩니다.</div>
+        <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
+        <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
         <div class="settings-buttons">
-          <button id="proxy-reset-btn" class="mcp-action-btn"${dis}>초기화</button>
-          <button id="proxy-save-btn" class="mcp-action-btn"${dis}>저장</button>
+          <button id="proxy-reset-btn" class="mcp-action-btn"${dis}>${t('초기화')}</button>
+          <button id="proxy-save-btn" class="mcp-action-btn"${dis}>${t('저장')}</button>
         </div>
       </details>
       <div class="mcp-actions">
         <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
-                title="opencode 서버 프로세스를 종료하고 다시 시작합니다">⚡ 서버 강제 재시작</button>
+                title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('⚡ 서버 강제 재시작')}</button>
         <div id="settings-action-status" class="mcp-action-status hidden"></div>
       </div>
       <div class="settings-section">
-        <div class="settings-title">정보</div>
+        <div class="settings-title">${t('정보')}</div>
         <div class="settings-row">
-          <span>확장 v${escapeHtml(currentVersion)}</span>
-          <button id="update-check-btn" class="mcp-action-btn"${updateCheckBusy ? ' disabled' : ''}>${updateCheckBusy ? '확인 중…' : '업데이트 확인'}</button>
+          <span>${t('확장 v{version}', { version: escapeHtml(currentVersion) })}</span>
+          <button id="update-check-btn" class="mcp-action-btn"${updateCheckBusy ? ' disabled' : ''}>${updateCheckBusy ? t('확인 중…') : t('업데이트 확인')}</button>
         </div>
         <div class="settings-row"><span>Native Host</span><span class="settings-row-end">${hostVersionHtml()}</span></div>
         ${pendingUpdate ? `
         <div class="settings-update">
-          <span>⬆ 새 버전 v${escapeHtml(pendingUpdate.version)} 준비됨</span>
-          <button id="update-apply-btn" class="mcp-action-btn">지금 적용</button>
+          <span>${t('⬆ 새 버전 v{version} 준비됨', { version: escapeHtml(pendingUpdate.version) })}</span>
+          <button id="update-apply-btn" class="mcp-action-btn">${t('지금 적용')}</button>
         </div>` : ''}
         ${updateCheckText ? `<div class="settings-current">${escapeHtml(updateCheckText)}</div>` : ''}
       </div>`;
     applyMcpActionStatus();
+
+    document.getElementById('lang-select')?.addEventListener('change', (e) => {
+      I18N.setLang(e.target.value);
+      onLanguageChanged();
+    });
 
     document.getElementById('proxy-details')?.addEventListener('toggle', (e) => { proxyOpen = e.target.open; });
 
@@ -1381,12 +1411,12 @@
       renderSettingsDropdown();
       try {
         const res = await sendMessageToBackground('check-extension-update');
-        if (!res.success) updateCheckText = `확인 실패: ${res.error}`;
-        else if (res.status === 'update_available') updateCheckText = `새 버전 v${res.version || ''}을 받았습니다.`;
-        else if (res.status === 'throttled') updateCheckText = '잠시 후 다시 시도해 주세요.';
-        else updateCheckText = '최신 버전입니다.';
+        if (!res.success) updateCheckText = t('확인 실패: {error}', { error: res.error });
+        else if (res.status === 'update_available') updateCheckText = t('새 버전 v{version}을 받았습니다.', { version: res.version || '' });
+        else if (res.status === 'throttled') updateCheckText = t('잠시 후 다시 시도해 주세요.');
+        else updateCheckText = t('최신 버전입니다.');
       } catch (e) {
-        updateCheckText = `확인 실패: ${e.message}`;
+        updateCheckText = t('확인 실패: {error}', { error: e.message });
       }
       updateCheckBusy = false;
       renderSettingsDropdown();
@@ -1394,9 +1424,9 @@
 
     document.getElementById('update-apply-btn')?.addEventListener('click', async () => {
       const ok = await showConfirm(
-        '업데이트 적용',
-        `확장이 v${pendingUpdate.version}으로 다시 로드됩니다.\n진행 중인 응답은 중단됩니다.`,
-        { okText: '지금 적용', cancelText: '나중에' }
+        t('업데이트 적용'),
+        t('확장이 v{version}으로 다시 로드됩니다.\n진행 중인 응답은 중단됩니다.', { version: pendingUpdate.version }),
+        { okText: t('지금 적용'), cancelText: t('나중에') }
       );
       if (!ok) return;
       try { await sendMessageToBackground('cancel-message', { sessionId: currentSessionId }); } catch {}
@@ -1413,20 +1443,20 @@
         if (!needsRestart) {
           try {
             await sendMessageToBackground('set-runtime-preference', { preferredRuntime: next });
-            setMcpActionStatus('저장했습니다 (다음 시작부터 적용)', 'ok');
+            setMcpActionStatus(t('저장했습니다 (다음 시작부터 적용)'), 'ok');
           } catch (e) {
-            setMcpActionStatus(`실패: ${e.message}`, 'error');
+            setMcpActionStatus(t('실패: {error}', { error: t(e.message) }), 'error');
           }
           renderSettingsDropdown();
           return;
         }
 
         const change = currentRuntime
-          ? `${RUNTIME_LABELS[currentRuntime]} → ${RUNTIME_LABELS[next]}(으)로 변경합니다.`
-          : `${RUNTIME_LABELS[next]} 환경으로 변경합니다.`;
+          ? t('{from} → {to}(으)로 변경합니다.', { from: RUNTIME_LABELS[currentRuntime], to: RUNTIME_LABELS[next] })
+          : t('{to} 환경으로 변경합니다.', { to: RUNTIME_LABELS[next] });
         const ok = await showConfirm(
-          '실행 환경 변경',
-          `${change}\nOpenCode가 재시작됩니다.\n진행 중인 응답은 중단됩니다.`
+          t('실행 환경 변경'),
+          t('{change}\nOpenCode가 재시작됩니다.\n진행 중인 응답은 중단됩니다.', { change })
         );
         if (!ok) {
           renderSettingsDropdown(); // 선택을 이전 값으로 되돌린다
@@ -1447,8 +1477,8 @@
     document.getElementById('settings-hard-restart-btn')?.addEventListener('click', async () => {
       if (restartBusy) return;
       const ok = await showConfirm(
-        '서버 강제 재시작',
-        'OpenCode가 재시작됩니다.\n진행 중인 응답은 중단되며 10~30초 걸릴 수 있습니다.'
+        t('서버 강제 재시작'),
+        t('OpenCode가 재시작됩니다.\n진행 중인 응답은 중단되며 10~30초 걸릴 수 있습니다.')
       );
       if (ok) runServerRestart('hard');
     });
@@ -1461,7 +1491,7 @@
     try {
       await sendMessageToBackground('set-proxy', { proxy: values });
     } catch (e) {
-      setMcpActionStatus(`실패: ${e.message}`, 'error');
+      setMcpActionStatus(t('실패: {error}', { error: t(e.message) }), 'error');
       renderSettingsDropdown();
       return;
     }
@@ -1469,9 +1499,9 @@
     let origin = { connected: false };
     try { origin = await sendMessageToBackground('get-server-origin'); } catch {}
 
-    const savedLater = '저장했습니다 (서버를 다시 시작하면 적용)';
+    const savedLater = t('저장했습니다 (서버를 다시 시작하면 적용)');
     if (!origin.connected) {
-      setMcpActionStatus('저장했습니다 (서버 시작 시 적용)', 'ok');
+      setMcpActionStatus(t('저장했습니다 (서버 시작 시 적용)'), 'ok');
       renderSettingsDropdown();
       return;
     }
@@ -1479,24 +1509,24 @@
     // 이 확장이 응답을 받는 중이면 busy에 그 세션 1개가 포함된다.
     const otherBusy = Math.max(0, (origin.busy || 0) - (isLoading ? 1 : 0));
     const busyWarn = otherBusy > 0
-      ? `\n\n⚠ 이 서버에서 응답 중인 다른 세션이 ${otherBusy}개 있습니다 (TUI 등 다른 클라이언트). 재시작하면 중단됩니다.`
+      ? t('\n\n⚠ 이 서버에서 응답 중인 다른 세션이 {count}개 있습니다 (TUI 등 다른 클라이언트). 재시작하면 중단됩니다.', { count: otherBusy })
       : '';
 
     let restart;
     if (origin.managed === true) {
       restart = await showConfirm(
-        '프록시 적용',
-        `프록시를 적용하려면 OpenCode 서버를 재시작해야 합니다.\n10~30초 걸리며 진행 중인 응답은 중단됩니다.${busyWarn}`,
-        { okText: '지금 재시작', cancelText: '나중에' }
+        t('프록시 적용'),
+        t('프록시를 적용하려면 OpenCode 서버를 재시작해야 합니다.\n10~30초 걸리며 진행 중인 응답은 중단됩니다.{busyWarn}', { busyWarn }),
+        { okText: t('지금 재시작'), cancelText: t('나중에') }
       );
     } else {
       const why = origin.managed === false
-        ? '현재 연결된 서버는 이 확장이 시작한 것이 아니라서(터미널·VS Code 등에서 실행했거나 이전 버전이 시작) 프록시가 적용되지 않을 수 있습니다.'
-        : '현재 서버를 이 확장이 시작했는지 확인할 수 없습니다.';
+        ? t('현재 연결된 서버는 이 확장이 시작한 것이 아니라서(터미널·VS Code 등에서 실행했거나 이전 버전이 시작) 프록시가 적용되지 않을 수 있습니다.')
+        : t('현재 서버를 이 확장이 시작했는지 확인할 수 없습니다.');
       restart = await showConfirm(
-        '프록시 적용',
-        `설정은 저장되었고, 이 확장이 서버를 새로 시작할 때 적용됩니다.\n${why}\n\n그래도 지금 서버를 종료하고 재시작할까요?${busyWarn}`,
-        { okText: '그래도 재시작', cancelText: '저장만' }
+        t('프록시 적용'),
+        t('설정은 저장되었고, 이 확장이 서버를 새로 시작할 때 적용됩니다.\n{why}\n\n그래도 지금 서버를 종료하고 재시작할까요?{busyWarn}', { why, busyWarn }),
+        { okText: t('그래도 재시작'), cancelText: t('저장만') }
       );
     }
 
@@ -1672,17 +1702,17 @@
   debugCopyBtn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(debugContent.textContent);
-      debugCopyStatus.textContent = '✓ 복사됨';
+      debugCopyStatus.textContent = t('✓ 복사됨');
       setTimeout(() => { debugCopyStatus.textContent = ''; }, 2000);
     } catch {
-      debugCopyStatus.textContent = '수동으로 복사하세요';
+      debugCopyStatus.textContent = t('수동으로 복사하세요');
     }
   });
 
   async function showDebugLog() {
     const loadingDiv = document.createElement('div');
     loadingDiv.className = 'message bot-message';
-    loadingDiv.innerHTML = `<div class="message-avatar">🔍</div><div class="message-content">디버그 로그 수집 중...</div>`;
+    loadingDiv.innerHTML = `<div class="message-avatar">🔍</div><div class="message-content">${t('디버그 로그 수집 중...')}</div>`;
     messagesContainer.appendChild(loadingDiv);
     scrollToBottom();
 
@@ -1691,7 +1721,7 @@
       result = await sendMessageToBackground('get-debug-logs');
     } catch (e) {
       loadingDiv.remove();
-      addErrorMessage('디버그 로그 수집 실패: ' + e.message);
+      addErrorMessage(t('디버그 로그 수집 실패: {error}', { error: e.message }));
       return;
     }
     loadingDiv.remove();
@@ -1724,9 +1754,9 @@
 
     try {
       await navigator.clipboard.writeText(fullText);
-      debugCopyStatus.textContent = '✓ 클립보드에 자동 복사됨';
+      debugCopyStatus.textContent = t('✓ 클립보드에 자동 복사됨');
     } catch {
-      debugCopyStatus.textContent = '복사 버튼을 눌러 수동으로 복사하세요';
+      debugCopyStatus.textContent = t('복사 버튼을 눌러 수동으로 복사하세요');
     }
   }
 
@@ -1786,12 +1816,12 @@
   }
 
   const TOOL_STATUS_LABEL = {
-    pending: '대기 중',
-    running: '실행 중…',
-    completed: '완료',
-    error: '오류',
-    cancelled: '취소됨',
-    interrupted: '중단됨'
+    get pending() { return t('대기 중'); },
+    get running() { return t('실행 중…'); },
+    get completed() { return t('완료'); },
+    get error() { return t('오류'); },
+    get cancelled() { return t('취소됨'); },
+    get interrupted() { return t('중단됨'); }
   };
 
   function toolStatusLabel(status) {
@@ -1845,7 +1875,7 @@
     el.className = 'reasoning-block collapsed';
     el.dataset.blockType = 'reasoning';
     el.innerHTML = `
-      <div class="reasoning-block-header">💭 생각 중</div>
+      <div class="reasoning-block-header">${t('💭 생각 중')}</div>
       <div class="reasoning-block-body"></div>
     `;
     makeCollapsible(el, '.reasoning-block-header');
@@ -1871,10 +1901,10 @@
       el.querySelector('.tool-status').textContent = toolStatusLabel(block.status);
       const bodyParts = [];
       if (block.input !== undefined) {
-        bodyParts.push(`입력:\n${typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2)}`);
+        bodyParts.push(`${t('입력:\n')}${typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2)}`);
       }
       if (block.output) {
-        bodyParts.push(`결과:\n${typeof block.output === 'string' ? block.output : JSON.stringify(block.output, null, 2)}`);
+        bodyParts.push(`${t('결과:\n')}${typeof block.output === 'string' ? block.output : JSON.stringify(block.output, null, 2)}`);
       }
       el.querySelector('.tool-card-body').textContent = bodyParts.join('\n\n').slice(0, 2000);
       return;
@@ -1925,15 +1955,15 @@
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
       copyBtn.className = 'code-block-copy';
-      copyBtn.textContent = '📋 복사';
+      copyBtn.textContent = t('📋 복사');
       copyBtn.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(codeEl.textContent);
-          copyBtn.textContent = '✓ 복사됨';
+          copyBtn.textContent = t('✓ 복사됨');
         } catch {
-          copyBtn.textContent = '복사 실패';
+          copyBtn.textContent = t('복사 실패');
         } finally {
-          setTimeout(() => { copyBtn.textContent = '📋 복사'; }, 1500);
+          setTimeout(() => { copyBtn.textContent = t('📋 복사'); }, 1500);
         }
       });
 
@@ -1987,7 +2017,7 @@
         } else {
           removeTypingIndicator();
         }
-        addErrorMessage(message.error);
+        addErrorMessage(t(message.error));
       } else if (activeBlocks) {
         // SSE가 idle까지 갔는데 텍스트 delta가 하나도 안 쌓인 경우(§6 REST 폴백,
         // background.js의 fetchFallbackContent) message.content로 복구된 텍스트를
@@ -2038,7 +2068,7 @@
 
       const removeBtn = document.createElement('button');
       removeBtn.className = 'attachment-chip-remove';
-      removeBtn.title = '제거';
+      removeBtn.title = t('제거');
       removeBtn.textContent = '✕';
       removeBtn.addEventListener('click', () => {
         attachedFiles = attachedFiles.filter((f) => f !== filePath);
@@ -2077,10 +2107,11 @@
       if (files.length > 0) addAttachedFiles(files);
       (res?.warnings || []).forEach((w) => showToast(w));
     } catch (e) {
-      const input = window.prompt('첨부할 파일의 절대 경로를 입력하세요 (여러 개는 쉼표로 구분):');
+      const input = window.prompt(t('첨부할 파일의 절대 경로를 입력하세요 (여러 개는 쉼표로 구분):'));
       if (input) addAttachedFiles(input.split(','));
     }
   });
 
+  updateAgentBar();
   init();
-})();
+});

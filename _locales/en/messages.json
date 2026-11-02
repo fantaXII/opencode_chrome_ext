@@ -1,0 +1,10 @@
+{
+  "extension_name": {
+    "message": "OpenCode Chat",
+    "description": "Extension name"
+  },
+  "extension_description": {
+    "message": "Chrome extension to use OpenCode in the side panel",
+    "description": "Extension description"
+  }
+}

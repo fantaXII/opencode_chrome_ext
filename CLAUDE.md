@@ -83,4 +83,4 @@ dispose는 열려 있는 SSE 스트림을 끊고 `server.instance.disposed` 이�
 - **테스트 없음**: 테스트 프레임워크 미설정.
 - **Windows 전용 Native Host**: `native-host/`는 Windows 레지스트리(`install.reg`)에 경로를 등록해야 동작. WSL에서는 개발만 가능.
 - **native-host/manifest.json의 `allowed_origins`**: `"chrome-extension://*"` (와일드카드)로 설정 — 실제 배포 시 특정 Extension ID로 교체 필요.
-- **i18n**: UI 텍스트는 `_locales/ko/messages.json`에서 관리; `manifest.json`의 이름/설명은 `__MSG_*__` 형식 사용.
+- **i18n**: `manifest.json`의 이름/설명은 `_locales/{ko,en}/messages.json`의 `__MSG_*__`(브라우저 언어를 따름). 사이드패널 UI 언어는 `chrome.i18n`으로 런타임 전환이 안 되므로 `sidepanel/i18n.js`가 따로 처리한다: **한국어 원문을 키로** 쓰는 `t('원문', {param})`(사전 `EN`에 없으면 원문 그대로 → 기본 ko), 정적 HTML은 `data-i18n`/`data-i18n-html`/`data-i18n-title`/`data-i18n-placeholder`(요소의 원래 한국어가 키). 선택값은 `chrome.storage.local.lang`(`ko`|`en`)이고 ⚙ 설정 맨 위에서 바꾼다. 새 UI 문자열을 추가하면 한국어로 `t()`/속성을 쓰고 `i18n.js`의 `EN`에 번역을 넣는다. background가 돌려주는 오류 문구는 사이드패널에서 `t(error)`로 감싸 번역한다. `/debug` 로그와 모델에 보내는 프롬프트는 번역하지 않는다.
