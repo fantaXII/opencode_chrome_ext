@@ -1,5 +1,18 @@
 # Changelog
 
+# [2.14.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.13.0...v2.14.0) (2026-11-02)
+
+
+### Bug Fixes
+
+* package.json 버전을 2.13.0으로 동기화 ([5eb9736](https://github.com/fantaXII/opencode_chrome_ext/commit/5eb973652c3814cfd6c14c50c6a8a9b0891ef53b))
+
+
+### Features
+
+* 사이드패널 언어 선택 추가 (한국어 기본, 영어 선택) ([1dfe6ca](https://github.com/fantaXII/opencode_chrome_ext/commit/1dfe6ca691560d29b5f3780577d7340dde11b8a1))
+* 설정 메뉴 정리 및 버전 표시·확장 업데이트 확인 추가 ([2130432](https://github.com/fantaXII/opencode_chrome_ext/commit/213043284d65c582fdd3bb963cfd7c63bd0894ca))
+
 # [2.13.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.12.0...v2.13.0) (2026-11-01)
 
 
