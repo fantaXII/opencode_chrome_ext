@@ -1203,7 +1203,7 @@
   }
 
   function setRestartControlsDisabled(disabled) {
-    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, input[name="runtime-pref"], #proxy-save-btn, #proxy-reset-btn, .settings-field input')
+    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, #runtime-pref, #proxy-save-btn, #proxy-reset-btn, .settings-field input')
       .forEach(el => { el.disabled = disabled; });
   }
 
@@ -1247,6 +1247,49 @@
   // ---- 설정(⚙) 드롭다운: 실행 환경(WSL/Windows) 선택 + 서버 강제 재시작 ----
   const RUNTIME_LABELS = { auto: '자동', wsl: 'WSL', windows: 'Windows' };
 
+  // 정보 섹션 상태: 패널을 여는 동안 유지한다.
+  let proxyOpen = false;          // 프록시 섹션 펼침 여부(다시 그려도 유지)
+  let hostInfo = null;            // check-host-version 결과 캐시
+  let hostInfoRequested = false;
+  let pendingUpdate = null;       // Chrome이 받아 둔 새 확장 버전 { version }
+  let updateCheckText = '';       // 업데이트 확인 결과 문구
+  let updateCheckBusy = false;
+
+  chrome.storage.local.get('pendingUpdate').then((v) => { pendingUpdate = v.pendingUpdate || null; updateUpdateDot(); });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.pendingUpdate) return;
+    pendingUpdate = changes.pendingUpdate.newValue || null;
+    updateUpdateDot();
+    if (!settingsDropdown.classList.contains('hidden')) renderSettingsDropdown();
+  });
+
+  function updateUpdateDot() {
+    settingsBtn.classList.toggle('has-update', !!pendingUpdate);
+    settingsBtn.title = pendingUpdate ? `설정 · 새 버전 v${pendingUpdate.version} 준비됨` : '설정';
+  }
+
+  function loadHostInfo(force = false) {
+    if (hostInfoRequested && !force) return;
+    hostInfoRequested = true;
+    sendMessageToBackground('check-host-version')
+      .then((res) => { hostInfo = res; })
+      .catch(() => { hostInfo = { state: 'unknown', hostVersion: null }; })
+      .finally(() => {
+        if (!settingsDropdown.classList.contains('hidden')) renderSettingsDropdown();
+      });
+  }
+
+  function hostVersionHtml() {
+    if (!hostInfo) return '<span class="settings-muted">확인 중…</span>';
+    const v = hostInfo.hostVersion ? `v${escapeHtml(hostInfo.hostVersion)}` : '';
+    switch (hostInfo.state) {
+      case 'ok': return `${v} ✓`;
+      case 'outdated': return `${v || '구버전'} ⚠ <button id="host-update-btn" class="mcp-action-btn">업데이트</button>`;
+      case 'missing': return '미설치 <button id="host-update-btn" class="mcp-action-btn">설치</button>';
+      default: return v || '-';
+    }
+  }
+
   async function renderSettingsDropdown() {
     let info;
     try {
@@ -1264,47 +1307,105 @@
       ? '서버 연결 안 됨'
       : `현재 실행 중: ${currentRuntime ? RUNTIME_LABELS[currentRuntime] : '알 수 없음'} · :${info.port}`;
 
-    const radio = (value, label) => `
-      <label class="settings-radio">
-        <input type="radio" name="runtime-pref" value="${value}" ${pref === value ? 'checked' : ''}${restartBusy ? ' disabled' : ''}>
-        <span>${label}</span>
-      </label>`;
+    const option = (value, label) =>
+      `<option value="${value}"${pref === value ? ' selected' : ''}>${label}</option>`;
+    const dis = restartBusy ? ' disabled' : '';
+    const proxySet = !!(proxy.http || proxy.https || proxy.noProxy);
+    const currentVersion = chrome.runtime.getManifest().version;
+
+    loadHostInfo();
 
     settingsDropdown.innerHTML = `
       <div class="settings-section">
-        <div class="settings-title">실행 환경</div>
-        ${radio('auto', '자동 (WSL 우선)')}
-        ${radio('wsl', 'WSL')}
-        ${radio('windows', 'Windows')}
+        <label class="settings-row">
+          <span class="settings-title">실행 환경</span>
+          <select id="runtime-pref" class="settings-select"${dis}>
+            ${option('auto', '자동 (WSL 우선)')}
+            ${option('wsl', 'WSL')}
+            ${option('windows', 'Windows')}
+          </select>
+        </label>
         <div class="settings-current">${escapeHtml(currentText)}</div>
       </div>
-      <div class="settings-section">
-        <div class="settings-title">프록시</div>
+      <details id="proxy-details" class="settings-section settings-collapse"${proxyOpen ? ' open' : ''}>
+        <summary class="settings-title">프록시 <span class="settings-muted">${proxySet ? '(설정됨)' : '(미설정)'}</span></summary>
         <label class="settings-field">HTTP
-          <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${restartBusy ? ' disabled' : ''}>
+          <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${dis}>
         </label>
         <label class="settings-field">HTTPS
-          <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${restartBusy ? ' disabled' : ''}>
+          <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${dis}>
         </label>
         <label class="settings-field">제외 목록 (NO_PROXY)
-          <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${restartBusy ? ' disabled' : ''}>
+          <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
         </label>
-        <div class="settings-current">계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.</div>
+        <div class="settings-current" title="계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.">계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용</div>
         <div class="settings-current warn">⚠ 입력값은 브라우저에 평문으로 저장됩니다.</div>
         <div class="settings-buttons">
-          <button id="proxy-reset-btn" class="mcp-action-btn"${restartBusy ? ' disabled' : ''}>초기화</button>
-          <button id="proxy-save-btn" class="mcp-action-btn"${restartBusy ? ' disabled' : ''}>저장</button>
+          <button id="proxy-reset-btn" class="mcp-action-btn"${dis}>초기화</button>
+          <button id="proxy-save-btn" class="mcp-action-btn"${dis}>저장</button>
         </div>
-      </div>
+      </details>
       <div class="mcp-actions">
-        <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${restartBusy ? ' disabled' : ''}
+        <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
                 title="opencode 서버 프로세스를 종료하고 다시 시작합니다">⚡ 서버 강제 재시작</button>
         <div id="settings-action-status" class="mcp-action-status hidden"></div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">정보</div>
+        <div class="settings-row">
+          <span>확장 v${escapeHtml(currentVersion)}</span>
+          <button id="update-check-btn" class="mcp-action-btn"${updateCheckBusy ? ' disabled' : ''}>${updateCheckBusy ? '확인 중…' : '업데이트 확인'}</button>
+        </div>
+        <div class="settings-row"><span>Native Host</span><span class="settings-row-end">${hostVersionHtml()}</span></div>
+        ${pendingUpdate ? `
+        <div class="settings-update">
+          <span>⬆ 새 버전 v${escapeHtml(pendingUpdate.version)} 준비됨</span>
+          <button id="update-apply-btn" class="mcp-action-btn">지금 적용</button>
+        </div>` : ''}
+        ${updateCheckText ? `<div class="settings-current">${escapeHtml(updateCheckText)}</div>` : ''}
       </div>`;
     applyMcpActionStatus();
 
-    settingsDropdown.querySelectorAll('input[name="runtime-pref"]').forEach((input) => {
-      input.addEventListener('change', async () => {
+    document.getElementById('proxy-details')?.addEventListener('toggle', (e) => { proxyOpen = e.target.open; });
+
+    document.getElementById('host-update-btn')?.addEventListener('click', () => {
+      hostGuideDismissed = false;
+      settingsDropdown.classList.add('hidden');
+      showNativeHostGuide(hostInfo?.state === 'missing' ? 'missing' : 'outdated', hostInfo?.hostVersion);
+    });
+
+    document.getElementById('update-check-btn')?.addEventListener('click', async () => {
+      if (updateCheckBusy) return;
+      updateCheckBusy = true;
+      updateCheckText = '';
+      renderSettingsDropdown();
+      try {
+        const res = await sendMessageToBackground('check-extension-update');
+        if (!res.success) updateCheckText = `확인 실패: ${res.error}`;
+        else if (res.status === 'update_available') updateCheckText = `새 버전 v${res.version || ''}을 받았습니다.`;
+        else if (res.status === 'throttled') updateCheckText = '잠시 후 다시 시도해 주세요.';
+        else updateCheckText = '최신 버전입니다.';
+      } catch (e) {
+        updateCheckText = `확인 실패: ${e.message}`;
+      }
+      updateCheckBusy = false;
+      renderSettingsDropdown();
+    });
+
+    document.getElementById('update-apply-btn')?.addEventListener('click', async () => {
+      const ok = await showConfirm(
+        '업데이트 적용',
+        `확장이 v${pendingUpdate.version}으로 다시 로드됩니다.\n진행 중인 응답은 중단됩니다.`,
+        { okText: '지금 적용', cancelText: '나중에' }
+      );
+      if (!ok) return;
+      try { await sendMessageToBackground('cancel-message', { sessionId: currentSessionId }); } catch {}
+      try { await sendMessageToBackground('apply-extension-update'); } catch {}
+    });
+
+    document.getElementById('runtime-pref')?.addEventListener('change', async (ev) => {
+      const input = ev.target;
+      {
         const next = input.value;
         // 연결된 서버가 있고, 명시적으로 고른 환경이 현재와 다를 때만 재시작이 필요하다.
         // (환경을 알 수 없는 경우도 다른 것으로 본다.)
@@ -1332,7 +1433,7 @@
           return;
         }
         runServerRestart('hard', next);
-      });
+      }
     });
 
     const readProxyInputs = () => ({

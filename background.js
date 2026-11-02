@@ -1848,6 +1848,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        // Web Store에 새 버전이 있는지 Chrome에 확인을 요청한다(받아 두기만 하고 적용은 reload 때).
+        // 압축 해제로 로드한 개발용 확장은 항상 no_update/에러가 돌아온다.
+        case 'check-extension-update': {
+          try {
+            const { status, details } = await chrome.runtime.requestUpdateCheck();
+            const version = details?.version || null;
+            if (status === 'update_available' && version) {
+              await chrome.storage.local.set({ pendingUpdate: { version } });
+            }
+            debugLog('INFO', `check-extension-update: ${status} ${version || ''}`);
+            sendResponse({ success: true, status, version });
+          } catch (error) {
+            debugLog('WARN', `check-extension-update: ${error.message}`);
+            sendResponse({ success: false, error: error.message });
+          }
+          break;
+        }
+
+        // 받아 둔 새 버전을 적용한다. 응답을 먼저 돌려준 뒤 확장을 다시 로드한다.
+        case 'apply-extension-update': {
+          sendResponse({ success: true });
+          setTimeout(() => chrome.runtime.reload(), 200);
+          break;
+        }
+
         // 서버를 재시작하지 않고 우선순위만 저장 (다음 시작부터 적용)
         case 'set-runtime-preference': {
           if (!RUNTIME_PREFERENCES.includes(message.preferredRuntime)) {
@@ -1938,6 +1963,22 @@ function createContextMenus() {
     });
   });
 }
+
+// Chrome이 Web Store에서 새 버전을 받아 두면 알려준다. 적용(reload)은 사용자가 고른 시점에 한다.
+chrome.runtime.onUpdateAvailable.addListener((details) => {
+  debugLog('INFO', `onUpdateAvailable: ${details.version}`);
+  chrome.storage.local.set({ pendingUpdate: { version: details.version } });
+});
+
+// 이미 적용돼 현재 버전 이하가 된 pendingUpdate는 지운다.
+(async () => {
+  try {
+    const { pendingUpdate } = await chrome.storage.local.get('pendingUpdate');
+    if (pendingUpdate && compareVersions(pendingUpdate.version, chrome.runtime.getManifest().version) <= 0) {
+      await chrome.storage.local.remove('pendingUpdate');
+    }
+  } catch {}
+})();
 
 chrome.runtime.onInstalled.addListener(createContextMenus);
 chrome.runtime.onStartup.addListener(createContextMenus);

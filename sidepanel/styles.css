@@ -298,7 +298,7 @@ body {
 
 .settings-dropdown {
   width: 260px;
-  max-height: 80vh;
+  max-height: calc(100vh - 80px);
   overflow-y: auto;
 }
 
@@ -380,6 +380,78 @@ body {
 
 .settings-buttons .mcp-action-btn {
   text-align: center;
+}
+
+.settings-section + .mcp-actions,
+.mcp-actions + .settings-section {
+  border-top: 1px solid var(--border);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-row-end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-muted {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.settings-select {
+  padding: 3px 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.settings-select:disabled {
+  opacity: 0.5;
+}
+
+.settings-collapse > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-collapse[open] {
+  gap: 4px;
+}
+
+.settings-update {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+#settings-btn.has-update {
+  position: relative;
+}
+
+#settings-btn.has-update::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .confirm-dialog {
