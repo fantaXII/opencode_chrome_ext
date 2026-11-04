@@ -28,6 +28,7 @@ Chrome Extension을 통해 OpenCode를 사이드패널에서 사용할 수 있�
 - **웹페이지 컨텍스트**: 현재 탭의 URL과 제목을 자동으로 컨텍스트에 포함
 - **모델 변경**: 사용자가 모델 선택 가능
 - **MCP/Skill 지원**: OpenCode의 MCP 서버 및 Skill 활용 가능
+- **설정(⚙) 메뉴**: 언어(한국어/English), 실행 환경(WSL/Windows), 프록시, 서버 강제 재시작, 버전 정보·업데이트 확인
 
 ### 기술 스택
 
@@ -99,9 +100,16 @@ Chrome Extension을 통해 OpenCode를 사이드패널에서 사용할 수 있�
 opencode-chrome-ext/
 ├── manifest.json              # Chrome Extension Manifest V3
 ├── background.js              # Service Worker (핵심 로직)
+├── content.js                 # 콘텐츠 스크립트
+├── lib/
+│   └── part-router.mjs        # 메시지 파트(SSE) 라우팅 로직
 ├── sidepanel/
 │   ├── sidepanel.html         # 사이드패널 HTML
 │   ├── sidepanel.js           # 사이드패널 로직
+│   ├── i18n.js                # UI 언어 전환 (한국어 원문을 키로 사용)
+│   ├── block-state.js         # 스트리밍 블록 상태 관리
+│   ├── render-scheduler.js    # 렌더링 스케줄러
+│   ├── marked.min.js / highlight.min.js  # 마크다운·코드 하이라이트
 │   └── styles.css             # 스타일
 ├── native-host/               # Native Messaging Host (Windows 전용)
 │   ├── manifest.json          # Native Messaging 매니페스트
@@ -112,8 +120,9 @@ opencode-chrome-ext/
 │   ├── installer.nsi          # NSIS 스크립트
 │   └── configure-extension-id.bat  # 설치 후 Extension ID 재설정 도구
 ├── _locales/
-│   └── ko/
-│       └── messages.json       # 한국어 번역
+│   ├── ko/messages.json        # 한국어 (확장 이름/설명)
+│   └── en/messages.json        # 영어
+├── config.private.json.sample  # 사내용 설정 예시 (proxy / MCP 서버)
 ├── icons/                     # 확장 프로그램 아이콘
 │   ├── icon16.png
 │   ├── icon32.png
@@ -211,10 +220,22 @@ ${message}
 **Chrome → Native Host (JSON)**
 ```json
 {
-  "action": "start" | "stop" | "status" | "check-port",
-  "preferredPort": 4096
+  "action": "start" | "stop" | "restart" | "status" | "server-info" | "check-port"
+          | "get-version" | "get-installed-proxy" | "get-home-dir"
+          | "browse-for-folder" | "browse-for-file" | "read-log",
+  "preferredPort": 4096,
+  "preferredRuntime": "auto" | "windows" | "wsl",   // start / restart
+  "proxy": { "http": "", "https": "", "noProxy": "" } // start / restart
 }
 ```
+
+| 액션 | 설명 |
+|------|------|
+| `start` / `restart` | 서버 시작 / 하드 재시작. `preferredRuntime`·`proxy`를 함께 전달 |
+| `stop` | 포트를 점유한 프로세스를 찾아 종료 (host 프로세스는 메시지마다 새로 뜨므로 핸들을 쓰지 않음) |
+| `server-info` | 포트 리스너 정보와 확장이 띄운 서버인지(`managed`) 여부 |
+| `get-version` | 인스톨러가 기록한 `version.txt` (확장 버전과 비교해 구버전 host 안내) |
+| `get-installed-proxy` | 인스톨러가 남긴 `proxy.json` (아래 [프록시 설정](#프록시-설정) 참고) |
 
 **Native Host → Chrome (JSON)**
 ```json
@@ -313,7 +334,7 @@ ${message}
 1. 메시지 입력 및 전송
 2. 응답 표시 (마크다운 렌더링)
 3. 모델 선택 UI
-4. 설정 패널
+4. 설정 패널 (언어, 실행 환경, 프록시, 서버 재시작, 버전·업데이트)
 
 ---
 
@@ -805,6 +826,25 @@ wsl netstat -tulpn | grep 4096
 
 /help
 ```
+
+### 설정(⚙) 메뉴
+
+사이드패널 상단 ⚙ 버튼에서 다음을 설정합니다. 새 확장 버전이 준비되면 ⚙에 점(•)이 표시됩니다.
+
+| 항목 | 설명 |
+|------|------|
+| 언어 / Language | 사이드패널 UI 언어 (한국어 기본, English 선택). 브라우저 언어와 별개로 저장됨 |
+| 실행 환경 | OpenCode를 띄울 환경 우선순위: 자동(WSL 우선) / WSL / Windows. 하드 재시작이 성공한 뒤에만 저장되며, 현재와 다른 환경을 고르면 확인 후 재시작 |
+| 프록시 | HTTP / HTTPS / 제외 목록(NO_PROXY). [프록시 설정](#프록시-설정) 참고 |
+| ⚡ 서버 강제 재시작 | 포트 점유 프로세스를 종료하고 다시 시작 (10~30초, 포트가 바뀔 수 있음) |
+| 정보 | 확장 버전·Native Host 버전 표시, 확장 업데이트 확인/적용, 구버전 host 업데이트 안내 |
+
+#### 프록시 설정
+
+- 입력값은 `chrome.storage.local`에 **평문**으로 저장되며(`http(s)://`, `socks5(h)://` 형식만 허용), 서버를 시작/재시작할 때 `HTTP_PROXY` 등 환경변수로 주입됩니다. 서버 프로세스의 환경변수라서 **저장만으로는 반영되지 않고 서버 재시작이 필요**합니다. 확장이 띄운 서버가 아니면 "저장만" / "그래도 재시작" 중에서 고릅니다.
+- 빈 항목은 건드리지 않아 기존 시스템 환경변수가 유지됩니다.
+- **사내 사용자**: `config.private.json`(`config.private.json.sample` 참고)을 인스톨러 `.exe`와 같은 폴더에 두고 실행하면 `proxy`가 사용자 환경변수에 등록되고, `proxy` 섹션은 `%LOCALAPPDATA%\OpenCodeChrome\proxy.json`으로 남습니다(`config.private.json` 자체는 설치 후 삭제됨). 확장은 저장된 프록시 설정이 한 번도 없을 때에 한해 이 값을 설정 화면으로 가져옵니다. 이미 저장된 값은 덮어쓰지 않습니다.
+- ⚙를 열 때마다 저장된 값을 새로 읽으며, 읽는 동안에는 입력칸 대신 "확인 중…"이 표시되어 입력할 수 없습니다. 저장하지 않은 입력은 화면이 다시 그려져도 유지됩니다.
 
 ### 세션 관리
 
