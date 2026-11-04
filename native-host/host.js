@@ -565,6 +565,17 @@ function readHostVersion() {
   }
 }
 
+/** 인스톨러가 config.private.json의 proxy 섹션만 남겨 둔 proxy.json. 없거나 비어 있으면 null. */
+function readInstalledProxy() {
+  try {
+    const raw = fs.readFileSync(path.join(path.dirname(LOG_DIR), 'proxy.json'), 'utf8').replace(/^﻿/, '');
+    const p = normalizeProxy(JSON.parse(raw));
+    return p.http || p.https || p.noProxy ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 // ============================================
 // 메시지 핸들러
 // ============================================
@@ -616,6 +627,9 @@ async function handleMessage(message) {
 
     case 'get-version':
       return { status: 'success', version: readHostVersion() };
+
+    case 'get-installed-proxy':
+      return { status: 'success', proxy: readInstalledProxy() };
 
     case 'status': {
       const available = await checkOpenCodeServer(currentPort);

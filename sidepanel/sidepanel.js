@@ -1253,6 +1253,8 @@ I18N.ready.then(function() {
 
   // 정보 섹션 상태: 패널을 여는 동안 유지한다.
   let proxyOpen = false;          // 프록시 섹션 펼침 여부(다시 그려도 유지)
+  let proxyCache = null;          // 저장된 프록시 값(null = 아직 읽지 않음, 패널을 열 때마다 새로 읽는다)
+  let proxyDraft = null;          // 저장하지 않은 입력값(재렌더 시 유지)
   let hostInfo = null;            // check-host-version 결과 캐시
   let hostInfoRequested = false;
   let pendingUpdate = null;       // Chrome이 받아 둔 새 확장 버전 { version }
@@ -1313,10 +1315,22 @@ I18N.ready.then(function() {
     } catch {
       info = { preferredRuntime: 'auto', serverIsWSL: null, port: null };
     }
-    let proxy = { http: '', https: '', noProxy: '' };
-    try {
-      proxy = (await sendMessageToBackground('get-proxy')).proxy || proxy;
-    } catch {}
+    if (proxyCache === null) {
+      proxyCache = { http: '', https: '', noProxy: '' };
+      try {
+        proxyCache = (await sendMessageToBackground('get-proxy')).proxy || proxyCache;
+      } catch {}
+    }
+    // 재렌더(호스트 버전 확인 완료·언어 변경 등)로 저장하지 않은 입력이 지워지지 않게 현재 입력칸을 우선한다.
+    const liveHttp = document.getElementById('proxy-http');
+    if (liveHttp) {
+      proxyDraft = {
+        http: liveHttp.value,
+        https: document.getElementById('proxy-https')?.value ?? '',
+        noProxy: document.getElementById('proxy-no')?.value ?? ''
+      };
+    }
+    const proxy = proxyDraft || proxyCache;
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
     const currentText = !info.port
@@ -1490,6 +1504,8 @@ I18N.ready.then(function() {
     if (restartBusy) return;
     try {
       await sendMessageToBackground('set-proxy', { proxy: values });
+      proxyCache = values;
+      proxyDraft = null;
     } catch (e) {
       setMcpActionStatus(t('실패: {error}', { error: t(e.message) }), 'error');
       renderSettingsDropdown();
@@ -1544,6 +1560,10 @@ I18N.ready.then(function() {
       mcpDropdown.classList.add('hidden');
       if (!restartBusy) mcpActionStatus = null;
       settingsDropdown.classList.remove('hidden');
+      // 저장된 값을 읽는 동안에는 입력칸을 보여주지 않아(=입력 불가) 입력이 덮어써지는 일을 막는다.
+      proxyCache = null;
+      proxyDraft = null;
+      settingsDropdown.innerHTML = `<div class="settings-section"><span class="settings-muted">${t('확인 중…')}</span></div>`;
       renderSettingsDropdown();
     } else {
       settingsDropdown.classList.add('hidden');

@@ -370,6 +370,21 @@ if ($privateConfig -and $privateConfig.proxy) {
         [System.Environment]::SetEnvironmentVariable('NO_PROXY',  $merged, 'User')
     }
     Write-Host "Proxy 환경변수 설정 완료 (HTTP=$($p.http)) - 사용자 환경변수에 영구 저장됨" -ForegroundColor Gray
+
+    # config.private.json은 설치 끝에 삭제되므로, 확장이 설정 화면에 보여줄 수 있게 proxy 섹션만 따로 남긴다.
+    try {
+        $proxyDir = Join-Path $env:LOCALAPPDATA "OpenCodeChrome"
+        New-Item -ItemType Directory -Path $proxyDir -Force | Out-Null
+        $proxyOut = [ordered]@{
+            http    = [string]$p.http
+            https   = [string]$p.https
+            noProxy = [string]$p.noProxy
+        }
+        $json = $proxyOut | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText((Join-Path $proxyDir "proxy.json"), $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-Host "proxy.json 저장 실패 (무시): $_" -ForegroundColor Yellow
+    }
 }
 
 $sourceHost = Join-Path $scriptDir "host.js"

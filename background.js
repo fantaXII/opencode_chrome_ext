@@ -1886,7 +1886,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // 프록시 설정 조회
         case 'get-proxy': {
-          sendResponse({ success: true, proxy: await getProxy() });
+          // 저장된 값이 한 번도 없으면 인스톨러가 남긴 config.private.json의 proxy를 가져와 저장한다.
+          let imported = false;
+          try {
+            const { proxy: stored } = await chrome.storage.local.get('proxy');
+            if (stored === undefined) {
+              const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-installed-proxy' });
+              const p = res?.status === 'success' ? res.proxy : null;
+              if (p && !validateProxyUrl(p.http) && !validateProxyUrl(p.https)) {
+                const next = {};
+                for (const k of PROXY_KEYS) next[k] = typeof p[k] === 'string' ? p[k].trim() : '';
+                await chrome.storage.local.set({ proxy: next });
+                imported = true;
+                debugLog('INFO', 'Proxy: config.private.json 값을 가져와 저장');
+              }
+            }
+          } catch (e) {
+            debugLog('WARN', `Proxy: 설치된 proxy 조회 실패 - ${e.message}`);
+          }
+          sendResponse({ success: true, proxy: await getProxy(), imported });
           break;
         }
 
