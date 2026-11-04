@@ -10,6 +10,8 @@ yarn build          # dist/ 폴더에 빌드 + .zip 생성 (prebuild가 dist 삭
 yarn release        # release-it으로 버전 범프 + GitHub Release 생성
 ```
 
+> **릴리스 주의 (같은 실수가 2번 발생)**: `release-it`에 **`--no-npm`을 붙이지 말 것.** 이 프로젝트는 `package.json`이 버전의 기준이다(`scripts/build.js`가 파일명과 `dist/manifest.json` 버전을 `package.json`에서 읽는다). `--no-npm`은 publish뿐 아니라 `package.json` 버전 범프도 막아서, 릴리스 자산이 이전 버전(`...-v2.14.0-webstore.zip` 등)으로 만들어진다. publish는 `.release-it.json`의 `npm.publish: false`로 이미 꺼져 있다. `.env_example`의 `yarn release-it --ci --no-npm` 안내는 낡은 것이므로 따르지 말고 `yarn release-it --ci`(또는 `yarn release`)를 쓴다. 릴리스 후에는 `package.json`·`manifest.json` 버전과 Release 자산 파일명이 모두 새 버전인지 확인한다. (`after:bump` 훅이 두 파일을 다시 맞추지만 방어용일 뿐이다.)
+
 빌드 결과물(`dist/`)을 Chrome에 로드하려면: `chrome://extensions` → 개발자 모드 활성화 → "압축 해제된 확장 프로그램 로드" → `dist/` 선택.
 
 ## Architecture
