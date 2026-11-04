@@ -21,6 +21,6 @@
     }
   },
   "hooks": {
-    "after:bump": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('manifest.json','utf8'));m.version='${version}';fs.writeFileSync('manifest.json',JSON.stringify(m,null,2)+'\\n');\" && rm -f opencode-native-host-setup-*.exe && yarn build:installer && yarn build"
+    "after:bump": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('manifest.json','utf8'));m.version='${version}';fs.writeFileSync('manifest.json',JSON.stringify(m,null,2)+'\\n');const k=JSON.parse(fs.readFileSync('package.json','utf8'));k.version='${version}';fs.writeFileSync('package.json',JSON.stringify(k,null,2)+'\\n');\" && rm -f opencode-native-host-setup-*.exe && yarn build:installer && yarn build"
   }
 }
