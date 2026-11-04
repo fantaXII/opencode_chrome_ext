@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.15.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.14.0...v2.15.0) (2026-11-04)
+
+
+### Features
+
+* config.private.json 프록시를 설정에 가져오고 로딩 중 입력 차단 ([4237252](https://github.com/fantaXII/opencode_chrome_ext/commit/42372522faf911737b753bf6a47ec2d69b80e8e1))
+
 # [2.14.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.13.0...v2.14.0) (2026-11-02)
 
 
