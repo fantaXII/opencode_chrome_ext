@@ -40,6 +40,8 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - SSE 청크는 background가 push하면 `chrome.runtime.onMessage`로 수신해 실시간 렌더링
 - 초기화 순서: `init-server` → `get-models` → `create-session`
 
+- 디버그 로그: 입력창 `/ext-log`(또는 연결 실패 화면의 "로그 보기" 버튼)로 SW 로그(`debugLogs`, 최대 500건) + host 파일 로그(`read-log`)를 다이얼로그로 표시·자동 복사한다. 새 오류 경로는 `debugLog(level, msg)`로 남긴다. `/debug`는 OpenCode 예약어와 충돌해 `/ext-log`로 바꿨다.
+
 ### native-host/host.js
 - Chrome Native Messaging 프로토콜: stdin/stdout, 메시지 앞에 4바이트 LE 길이 헤더
 - `which` 모듈로 `opencode` 바이너리 경로 탐색 후 `spawn('opencode', ['serve', '--port', port])`

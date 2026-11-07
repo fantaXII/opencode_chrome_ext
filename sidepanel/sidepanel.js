@@ -19,6 +19,7 @@ I18N.ready.then(function() {
   const connectingMessage = document.getElementById('connecting-message');
   const connectingSpinner = document.getElementById('connecting-spinner');
   const retryBtn = document.getElementById('retry-btn');
+  const logBtn = document.getElementById('log-btn');
   const commandDropdown = document.getElementById('command-dropdown');
   const agentBar = document.getElementById('agent-bar');
   const agentDot = document.getElementById('agent-dot');
@@ -45,6 +46,7 @@ I18N.ready.then(function() {
     { id: 'local.clear', slash: '/clear', title: 'Clear',       description: t('채팅 히스토리 초기화'),         hasArg: false },
     { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),       hasArg: true  },
     { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),    hasArg: true  },
+    { id: 'local.extlog', slash: '/ext-log', title: 'Extension Log', description: t('확장 디버그 로그 표시·복사 (문제 신고 시 첨부)'), hasArg: false },
   ];
   let isDropdownOpen = false;
   let selectedDropdownIndex = -1;
@@ -787,7 +789,7 @@ I18N.ready.then(function() {
     if (!message && attachedFiles.length === 0) return;
 
     if (message.startsWith('/')) {
-      if (message.trim().toLowerCase() === '/debug') {
+      if (message.trim().toLowerCase() === '/ext-log') {
         addUserMessage(message);
         messageInput.value = '';
         messageInput.style.height = 'auto';
@@ -932,6 +934,7 @@ I18N.ready.then(function() {
     connectingIndicator.classList.add('hidden');
     connectingSpinner.classList.remove('hidden');
     retryBtn.classList.add('hidden');
+    logBtn.classList.add('hidden');
 
     switch (status) {
       case 'connected':
@@ -951,6 +954,7 @@ I18N.ready.then(function() {
         connectingMessage.textContent = t('서버 연결에 실패했습니다');
         connectingSpinner.classList.add('hidden');
         retryBtn.classList.remove('hidden');
+        logBtn.classList.remove('hidden');
         connectingIndicator.classList.remove('hidden');
         break;
       case 'error':
@@ -959,10 +963,13 @@ I18N.ready.then(function() {
         connectingMessage.textContent = t('연결 오류가 발생했습니다');
         connectingSpinner.classList.add('hidden');
         retryBtn.classList.remove('hidden');
+        logBtn.classList.remove('hidden');
         connectingIndicator.classList.remove('hidden');
         break;
     }
   }
+
+  logBtn.addEventListener('click', () => showDebugLog());
 
   retryBtn.addEventListener('click', () => {
     init();
@@ -1721,7 +1728,7 @@ I18N.ready.then(function() {
   }
 
   // ============================================
-  // 디버그 로그 (/debug 커맨드)
+  // 디버그 로그 (/ext-log 커맨드)
   // ============================================
 
   const debugDialog = document.getElementById('debug-dialog');

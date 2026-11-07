@@ -805,7 +805,7 @@ wsl netstat -tulpn | grep 4096
 | `/clear` | 채팅 히스토리 초기화 (새 세션 시작) |
 | `/model <model-name>` | 사용할 모델 변경 |
 | `/wd <path>` | 작업 디렉토리(working directory) 변경 |
-| `/debug` | 디버그 로그 수집 다이얼로그 표시 — [문제 해결 시 디버그 로그 확인](#문제-해결-시-디버그-로그-확인) 참고 |
+| `/ext-log` | 디버그 로그 수집 다이얼로그 표시 — [문제 해결 시 디버그 로그 확인](#문제-해결-시-디버그-로그-확인) 참고 |
 
 ### 모델 변경
 
@@ -858,11 +858,12 @@ wsl netstat -tulpn | grep 4096
 
 서버 연결 실패, 응답이 표시되지 않거나 갑자기 멈추는 등의 문제가 발생하면, 다른 조치를 하기 전에 디버그 로그부터 확인하는 것을 권장합니다.
 
-1. 사이드패널 입력창에 `/debug`를 입력하고 전송합니다.
+1. 사이드패널 입력창에 `/ext-log`를 입력하고 전송합니다.
 2. "디버그 로그 수집 중..." 메시지가 잠시 표시된 뒤, 다음 두 가지 로그를 함께 보여주는 다이얼로그가 열립니다.
    - **Service Worker Logs**: `background.js`(Service Worker)가 기록한 서버 탐지, 세션 생성/삭제, 메시지 송수신, SSE 이벤트 등의 로그
    - **Native Host File Log**: Native Messaging Host가 파일에 기록한 로그 (`%LOCALAPPDATA%\OpenCodeChrome\logs\native-host.log`, 예: `C:\Users\<username>\AppData\Local\OpenCodeChrome\logs\native-host.log`)
-3. 다이얼로그의 **복사** 버튼을 누르면 로그 전체가 클립보드에 복사되어, GitHub 이슈 등록 시 그대로 첨부할 수 있습니다.
+3. 서버 연결에 실패해 입력창이 비활성화된 경우에는 연결 실패 화면의 **로그 보기** 버튼으로 같은 로그를 열 수 있습니다.
+4. 다이얼로그의 **복사** 버튼을 누르면 로그 전체가 클립보드에 복사되어, GitHub 이슈 등록 시 그대로 첨부할 수 있습니다.
 
 > Native Host File Log 영역에 "파일 로그 없음"이 표시된다면 Native Messaging Host와의 연결 자체가 실패한 것입니다. 이 경우 Service Worker Logs에서 `NativeMsg:`로 시작하는 에러 메시지(Chrome 레벨 연결 에러 또는 host.js가 반환한 에러/진단 정보)를 먼저 확인하세요.
 

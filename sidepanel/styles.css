@@ -1352,6 +1352,21 @@ body {
   display: none;
 }
 
+.log-btn {
+  margin-top: 12px;
+  padding: 6px 16px;
+  background: none;
+  color: var(--text-secondary, inherit);
+  border: 1px solid var(--border, currentColor);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.log-btn.hidden {
+  display: none;
+}
+
 .typing-indicator {
   display: flex;
   gap: 4px;
