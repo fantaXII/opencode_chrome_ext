@@ -9,6 +9,12 @@
  */
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
+import { createKeepAlive, createPendingStore, recoverPendingPrompt, PENDING_MAX_AGE_MS } from './lib/sw-resilience.mjs';
+
+// 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
+// → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
+const swKeepAlive = createKeepAlive({ ping: () => chrome.runtime.getPlatformInfo() });
+const pendingPrompts = createPendingStore(chrome.storage.session);
 
 // ============================================
 // 상수 정의
@@ -97,7 +103,33 @@ chrome.storage.session.get(['tabSessions', 'activeTabs', 'tabLastShownInfo', 'cu
     debugLog('INFO', `Service Worker restarted with ${tabSessions.size} active session(s), proactively ensuring server...`);
     ensureOpenCodeServer().catch(() => {});
   }
+  recoverInterruptedPrompts().catch(() => {});
 }).catch(() => {});
+
+/** SW가 응답 도중 종료된 경우: 저장된 pending 세션의 결과를 REST로 회수해 사이드패널에 전달 */
+async function recoverInterruptedPrompts() {
+  const list = await pendingPrompts.list();
+  for (const { sessionId, port, startedAt } of list) {
+    if (eventSources.has(sessionId)) continue; // 이미 이 SW에서 다시 구독 중
+    if (Date.now() - startedAt > PENDING_MAX_AGE_MS * 2) { await pendingPrompts.remove(sessionId); continue; }
+    debugLog('WARN', `Recovering interrupted prompt after SW restart - sessionId=${sessionId}, port=${port}, ageMs=${Date.now() - startedAt}`);
+    swKeepAlive.acquire(`recover:${sessionId}`);
+    recoverPendingPrompt({
+      sessionId, port, startedAt,
+      fetchContent: fetchFallbackContent,
+      onComplete: (content, error) => {
+        debugLog(error ? 'ERROR' : 'INFO', `Interrupted prompt recovery done - sessionId=${sessionId}, chars=${content?.length || 0}, error=${error || 'none'}`);
+        chrome.runtime.sendMessage({ action: 'message-complete', sessionId, content, error }).catch(() => {});
+      }
+    }).catch((e) => {
+      debugLog('ERROR', `Interrupted prompt recovery failed - sessionId=${sessionId}, error=${e.message}`);
+      chrome.runtime.sendMessage({ action: 'message-complete', sessionId, content: '', error: '응답 복구에 실패했습니다' }).catch(() => {});
+    }).finally(() => {
+      swKeepAlive.release(`recover:${sessionId}`);
+      pendingPrompts.remove(sessionId);
+    });
+  }
+}
 
 debugLog('INFO', `Service Worker started - ${new Date().toISOString()} | extensionId=${chrome.runtime.id}`);
 
@@ -1148,6 +1180,14 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
   const controller = new AbortController();
   eventSources.set(sessionId, controller);
 
+  // 응답 대기 동안 SW 유지 + 재시작 복구용 기록. 모든 종료 경로가 abort()를 거치므로 abort에서 해제한다.
+  swKeepAlive.acquire(sessionId);
+  pendingPrompts.add(sessionId, port);
+  controller.signal.addEventListener('abort', () => {
+    swKeepAlive.release(sessionId);
+    pendingPrompts.remove(sessionId);
+  }, { once: true });
+
   return new Promise((resolveConnected) => {
     let resolved = false;
     let buffer = '';
@@ -1203,6 +1243,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
           debugLog('ERROR', `SSE connect failed - status=${response.status}, sessionId=${sessionId}`);
           resolveOnce();
           clearTimeout(timeoutId);
+          controller.abort();
+          eventSources.delete(sessionId);
           onComplete('', `SSE 연결 실패: ${response.status}`);
           return;
         }

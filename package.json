@@ -9,7 +9,8 @@
     "build:installer": "node scripts/build-installer.js",
     "build:all": "node scripts/build-installer.js && yarn build",
     "release": "release-it",
-    "release-it": "release-it"
+    "release-it": "release-it",
+    "test": "node --test test/sw-resilience.test.mjs"
   },
   "keywords": [
     "chrome-extension",
