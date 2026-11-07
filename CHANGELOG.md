@@ -1,5 +1,20 @@
 # Changelog
 
+# [2.16.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.15.0...v2.16.0) (2026-11-07)
+
+
+### Bug Fixes
+
+* 릴리스 시 package.json 버전도 함께 올려 빌드 산출물 버전 불일치 해결 ([1e32674](https://github.com/fantaXII/opencode_chrome_ext/commit/1e32674e20cc3afc443da9d22e4684ad2058d686))
+* 응답 대기 중 Service Worker 종료로 UI가 멈추는 문제 대응 ([7017f47](https://github.com/fantaXII/opencode_chrome_ext/commit/7017f47812d4b361847c2425c693b071edb4886b))
+
+
+### Features
+
+* /debug를 /ext-log로 변경하고 카탈로그·연결 실패 화면에 노출 ([2112828](https://github.com/fantaXII/opencode_chrome_ext/commit/2112828fb176c4faf7a2eeceee99fe80e734c30a))
+* 서버 연결 중에는 MCP/설정 메뉴 비활성화 ([3abab57](https://github.com/fantaXII/opencode_chrome_ext/commit/3abab570355fa2e26ce44c8f75e7661200b7f3fa))
+* 설정창에 서버에 실제 적용된 프록시 표시 ([028cb38](https://github.com/fantaXII/opencode_chrome_ext/commit/028cb38f0cd73a2700727c332ff88606a4d27f80))
+
 # [2.15.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.14.0...v2.15.0) (2026-11-04)
 
 
