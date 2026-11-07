@@ -29,6 +29,9 @@
     '나중에': 'Later',
 
     // ---- 연결 상태 ----
+    '서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)': 'Proxy applied to the server: unavailable (only WSL servers can be inspected)',
+    '서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}': 'Proxy applied to the server — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}',
+    '서버에 적용된 프록시: 없음': 'Proxy applied to the server: none',
     '연결됨': 'Connected',
     '연결 중...': 'Connecting...',
     '연결 안됨': 'Disconnected',

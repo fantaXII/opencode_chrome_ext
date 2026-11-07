@@ -1928,10 +1928,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: true, connected: false });
             break;
           }
-          const result = { success: true, connected: true, port: serverState.port, managed: null, busy: null };
+          const result = { success: true, connected: true, port: serverState.port, managed: null, busy: null, proxyEnv: null };
           try {
             const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port: serverState.port });
-            if (info?.status === 'success') result.managed = info.managed === true;
+            if (info?.status === 'success') {
+              result.managed = info.managed === true;
+              result.proxyEnv = info.proxyEnv || null;
+            }
           } catch {}
           try {
             // 응답 생성 중인 세션만 키로 들어오는 맵 (idle이면 {})

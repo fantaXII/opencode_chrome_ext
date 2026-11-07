@@ -488,11 +488,50 @@ function isManagedListener(record, listener, port) {
     && record.pid === listener.pid);
 }
 
+/** 프록시 URL의 계정 정보(user:pass@)를 가린다. 표시 전용이므로 원문은 밖으로 내보내지 않는다. */
+function maskProxyValue(value) {
+  return String(value).replace(/\/\/[^@/\s]*@/g, '//***@');
+}
+
+/**
+ * /proc/<pid>/environ 원문(NUL 구분)에서 프록시 변수 3개만 뽑는다. 대소문자 변형은
+ * 대문자 쪽을 우선한다. 다른 환경변수(API 키 등)는 버린다.
+ */
+function parseProxyEnviron(raw) {
+  const out = { http: '', https: '', noProxy: '' };
+  const lower = { http: '', https: '', noProxy: '' };
+  for (const entry of String(raw || '').split('\0')) {
+    const i = entry.indexOf('=');
+    if (i < 1) continue;
+    const name = entry.slice(0, i);
+    const field = PROXY_FIELDS.find(([, n]) => n === name.toUpperCase())?.[0];
+    if (!field) continue;
+    const value = maskProxyValue(entry.slice(i + 1).replace(/[\u0000-\u001f\u007f]/g, '').trim());
+    if (name === name.toUpperCase()) out[field] = value; else lower[field] = value;
+  }
+  for (const k of Object.keys(out)) if (!out[k]) out[k] = lower[k];
+  return out;
+}
+
+/** 실행 중인 서버 프로세스가 실제로 가진 프록시 환경변수. 읽을 수 없으면 null (WSL만 지원). */
+function readListenerProxyEnv(listener) {
+  if (!listener || listener.side !== 'wsl' || !listener.pid) return null;
+  try {
+    const r = spawnSync('wsl.exe', ['cat', `/proc/${listener.pid}/environ`], { encoding: 'utf8', timeout: 5000 });
+    if (r.status !== 0) return null;
+    return parseProxyEnviron(r.stdout);
+  } catch (error) {
+    fileLog('DEBUG', `readListenerProxyEnv: ${error.message}`);
+    return null;
+  }
+}
+
 function getServerInfo(port) {
   const listener = getListener(port);
   return {
     listener: listener ? { side: listener.side, pid: listener.pid, name: listener.name } : null,
-    managed: isManagedListener(readServerRecord(), listener, port)
+    managed: isManagedListener(readServerRecord(), listener, port),
+    proxyEnv: readListenerProxyEnv(listener)
   };
 }
 
@@ -815,5 +854,5 @@ if (require.main === module) {
   main();
 } else {
   // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
-  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener };
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue };
 }

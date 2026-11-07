@@ -1331,6 +1331,18 @@ I18N.ready.then(function() {
       };
     }
     const proxy = proxyDraft || proxyCache;
+    // 서버 프로세스가 실제로 가진 프록시(WSL만 조회 가능). 저장값과 다를 수 있어 따로 보여준다.
+    let appliedProxy = null;
+    if (info.port) {
+      try { appliedProxy = (await sendMessageToBackground('get-server-origin')).proxyEnv || null; } catch {}
+    }
+    const appliedText = !info.port ? ''
+      : !appliedProxy ? t('서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)')
+      : (['http', 'https', 'noProxy'].some(k => appliedProxy[k])
+        ? t('서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}', {
+            http: appliedProxy.http || '-', https: appliedProxy.https || '-', noProxy: appliedProxy.noProxy || '-'
+          })
+        : t('서버에 적용된 프록시: 없음'));
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
     const currentText = !info.port
@@ -1377,6 +1389,7 @@ I18N.ready.then(function() {
         <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
           <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
         </label>
+        ${appliedText ? `<div class="settings-current">${escapeHtml(appliedText)}</div>` : ''}
         <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
         <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
         <div class="settings-buttons">
