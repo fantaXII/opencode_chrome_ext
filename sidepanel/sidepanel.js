@@ -931,6 +931,14 @@ I18N.ready.then(function() {
     if (status !== 'connected') setRuntimeBadge(null);
     header.classList.remove('connected', 'connecting');
     inputArea.classList.remove('disabled');
+    // 연결 중에는 MCP/설정 메뉴를 막고, 연결 완료·실패 후 다시 활성화한다
+    const isConnecting = status === 'connecting';
+    mcpBtn.disabled = isConnecting;
+    settingsBtn.disabled = isConnecting;
+    if (isConnecting) {
+      mcpDropdown.classList.add('hidden');
+      settingsDropdown.classList.add('hidden');
+    }
     connectingIndicator.classList.add('hidden');
     connectingSpinner.classList.remove('hidden');
     retryBtn.classList.add('hidden');

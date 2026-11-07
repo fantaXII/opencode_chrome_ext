@@ -137,9 +137,14 @@ body {
   white-space: nowrap;
 }
 
-.mcp-btn:hover {
+.mcp-btn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--text-primary);
+}
+
+.mcp-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .mcp-btn.has-active #mcp-count-text {
