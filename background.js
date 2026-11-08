@@ -731,25 +731,10 @@ function toWSLPath(p) {
 }
 
 /**
- * 사용자가 지정한 working directory를 "실제 실행 중인 opencode 서버"가 이해하는
- * 경로 포맷으로 정규화한다.
- *
- * host.js는 preferredRuntime 순서(기본 WSL 우선)로 opencode를 찾아 기동하므로 서버가
- * WSL일 수도 Windows일 수도 있다(native-host/host.js findOpenCodePath). 따라서 서버가 항상 WSL이라고 가정하고
- * C:\... 를 /mnt/c/... 로 강제 변환하면, Windows 네이티브로 뜬 서버에는 존재하지
- * 않는 경로를 보내게 되어 working directory 설정이 조용히 무시된다.
- *
- * 판단 우선순위:
- *   1. serverCwd (SSE/probe로 실측한 서버의 실제 cwd 포맷) — 가장 신뢰도 높음
- *   2. serverIsWSL (이번 세션에 native host가 직접 서버를 띄우며 기록한 값)
- *   3. 둘 다 모르면 변환하지 않음
+ * 연결된 opencode 서버가 POSIX(WSL)인지 Windows 네이티브인지 저장된 실측값으로 판별한다.
+ * 반환: { serverIsPosix: true | false | null(알 수 없음), source }
  */
-async function normalizeWorkingDirectory(rawPath) {
-  if (!rawPath) return '';
-  if (!isWindowsDrivePath(rawPath)) {
-    return rawPath.replace(/\\/g, '/').replace(/\/$/, '');
-  }
-
+async function detectServerIsPosix() {
   let serverIsPosix = null;
   let source = 'unknown';
   try {
@@ -769,6 +754,52 @@ async function normalizeWorkingDirectory(rawPath) {
       }
     } catch {}
   }
+  return { serverIsPosix, source };
+}
+
+/**
+ * native host에 작업 디렉터리를 변환·검증시킨다 (host의 resolve-directory).
+ * 반환: { checked: false } (host가 구버전이거나 호출 실패 → 검증 생략)
+ *     | { checked: true, exists, path, converted, note }
+ */
+async function resolveDirectoryViaHost(rawPath) {
+  const { serverIsPosix } = await detectServerIsPosix();
+  const runtime = serverIsPosix === false ? 'windows' : 'wsl';
+  try {
+    const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
+      action: 'resolve-directory', path: rawPath, runtime
+    });
+    if (res?.status === 'success' && typeof res.exists === 'boolean') {
+      return { checked: true, exists: res.exists, path: res.path, converted: !!res.converted, note: res.note || null };
+    }
+    debugLog('WARN', `resolve-directory: 검증 생략 - ${res?.error || 'unexpected response'}`);
+  } catch (e) {
+    debugLog('WARN', `resolve-directory: 검증 생략 - ${e.message}`);
+  }
+  return { checked: false };
+}
+
+/**
+ * 사용자가 지정한 working directory를 "실제 실행 중인 opencode 서버"가 이해하는
+ * 경로 포맷으로 정규화한다.
+ *
+ * host.js는 preferredRuntime 순서(기본 WSL 우선)로 opencode를 찾아 기동하므로 서버가
+ * WSL일 수도 Windows일 수도 있다(native-host/host.js findOpenCodePath). 따라서 서버가 항상 WSL이라고 가정하고
+ * C:\... 를 /mnt/c/... 로 강제 변환하면, Windows 네이티브로 뜬 서버에는 존재하지
+ * 않는 경로를 보내게 되어 working directory 설정이 조용히 무시된다.
+ *
+ * 판단 우선순위:
+ *   1. serverCwd (SSE/probe로 실측한 서버의 실제 cwd 포맷) — 가장 신뢰도 높음
+ *   2. serverIsWSL (이번 세션에 native host가 직접 서버를 띄우며 기록한 값)
+ *   3. 둘 다 모르면 변환하지 않음
+ */
+async function normalizeWorkingDirectory(rawPath) {
+  if (!rawPath) return '';
+  if (!isWindowsDrivePath(rawPath)) {
+    return rawPath.replace(/\\/g, '/').replace(/\/$/, '');
+  }
+
+  const { serverIsPosix, source } = await detectServerIsPosix();
 
   if (serverIsPosix === true) {
     const converted = toWSLPath(rawPath);
@@ -1687,7 +1718,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
 
         case 'set-working-directory': {
-          const normalized = await normalizeWorkingDirectory(message.directory || '');
+          let normalized = await normalizeWorkingDirectory(message.directory || '');
+          // 존재하지 않는 경로를 저장하면 opencode가 오류 없이 빈 응답만 돌려주므로,
+          // 저장 전에 host로 변환·검증한다. host가 구버전이면 검증을 생략한다.
+          if (normalized) {
+            const check = await resolveDirectoryViaHost(message.directory || normalized);
+            if (check.checked) {
+              if (!check.exists) {
+                debugLog('WARN', `set-working-directory: 디렉토리 없음 - input=${message.directory}, resolved=${check.path}`);
+                sendResponse({ success: false, error: 'dir-not-found', path: check.path || normalized });
+                break;
+              }
+              if (check.converted) {
+                debugLog('INFO', `set-working-directory: host 변환 - ${normalized} -> ${check.path}${check.note ? ` (${check.note})` : ''}`);
+                normalized = check.path;
+              }
+            }
+          }
           const previous = await getWorkingDirectory();
           await chrome.storage.local.set({ workingDirectory: normalized });
 

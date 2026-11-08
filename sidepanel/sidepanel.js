@@ -137,12 +137,20 @@ I18N.ready.then(function() {
     workingFolderEditBtn.classList.remove('hidden');
   }
 
+  // set-working-directory 실패 응답 → 사용자에게 보일 문구
+  function workingDirError(result) {
+    return result.error === 'dir-not-found'
+      ? t('디렉토리를 찾을 수 없습니다: {path}', { path: result.path })
+      : t(result.error);
+  }
+
   workingFolderEditBtn.addEventListener('click', enterEditMode);
 
   folderIcon.addEventListener('click', async () => {
     const res = await sendMessageToBackground('browse-for-folder');
     if (res?.directory) {
       const result = await sendMessageToBackground('set-working-directory', { directory: res.directory, tabId: currentTabId });
+      if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
       updateWorkingFolderDisplay(result.directory || res.directory);
       applyWorkingDirSessionReset(result);
       if (res.warning) {
@@ -156,6 +164,7 @@ I18N.ready.then(function() {
     exitEditMode();
     if (newPath !== currentWorkingDir) {
       const result = await sendMessageToBackground('set-working-directory', { directory: newPath, tabId: currentTabId });
+      if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
       updateWorkingFolderDisplay(result.directory || newPath);
       applyWorkingDirSessionReset(result);
     }
@@ -744,6 +753,7 @@ I18N.ready.then(function() {
       if (!args) { addBotMessage(t('사용법: /wd <path>')); sendBtn.disabled = false; return; }
       try {
         const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId });
+        if (result?.success === false) throw new Error(workingDirError(result));
         updateWorkingFolderDisplay(result.directory || args);
         applyWorkingDirSessionReset(result);
         addBotMessage(t('작업 디렉토리가 변경되었습니다: {dir}', { dir: result.directory || args }));

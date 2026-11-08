@@ -593,6 +593,81 @@ function resolveDrivePath(rawPath, driveRootCache) {
 }
 
 // ============================================
+// 작업 디렉터리 검증/변환 (resolve-directory)
+// ============================================
+
+const WSL_UNC_ROOT = /^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+(\\.*)?$/i;
+
+/**
+ * /mnt/<드라이브>/... 형태인데 WSL에 그 마운트가 없을 때, 해당 드라이브가 WSL 파일시스템을
+ * 가리키는 네트워크 드라이브(\\wsl$\...)라면 리눅스 절대경로로 되돌린다. 아니면 null.
+ * displayRoot: 해당 드라이브의 DisplayRoot (예: \\wsl.localhost\Ubuntu\)
+ */
+function mapMntToWslPath(posixPath, displayRoot) {
+  const m = String(posixPath || '').match(/^\/mnt\/([A-Za-z])(\/.*)?$/);
+  if (!m || !displayRoot) return null;
+  const root = displayRoot.match(WSL_UNC_ROOT);
+  if (!root) return null;
+  const base = (root[1] || '').replace(/\\/g, '/').replace(/\/$/, '');
+  const rest = (m[2] || '').replace(/\/$/, '');
+  return (base + rest) || '/';
+}
+
+function wslDirExists(p) {
+  // argv만 넘긴다(셸 따옴표 문제 회피). 종료 코드 0이면 존재.
+  const r = spawnSync('wsl.exe', ['test', '-d', p], { encoding: 'utf8', timeout: 8000 });
+  return r.status === 0;
+}
+
+/**
+ * 사용자가 지정한 작업 디렉터리를 서버 환경에 맞게 변환하고 실제로 존재하는지 확인한다.
+ * runtime: 'wsl' | 'windows'. 반환: { path, exists, converted, note }
+ */
+function resolveWorkingDirectory(rawPath, runtime) {
+  const input = String(rawPath || '').trim();
+  if (!input) return { path: '', exists: true, converted: false, note: null };
+
+  if (runtime === 'windows') {
+    let exists = false;
+    try { exists = fs.statSync(input).isDirectory(); } catch {}
+    return { path: input, exists, converted: false, note: null };
+  }
+
+  let candidate = input;
+  if (/^[A-Za-z]:[\\\/]/.test(input)) {
+    candidate = resolveDrivePath(input).path;
+    if (/^[A-Za-z]:[\\\/]/.test(candidate)) {
+      // 네트워크 드라이브가 아니라면 wslpath로 /mnt/<x>/... 변환
+      const r = spawnSync('wsl.exe', ['wslpath', '-u', input], { encoding: 'utf8', timeout: 8000 });
+      const out = (r.stdout || '').trim();
+      if (r.status === 0 && out) candidate = out;
+    }
+  } else if (/^\\\\/.test(input)) {
+    const unc = input.match(WSL_UNC_ROOT);
+    if (unc) candidate = (unc[1] || '').replace(/\\/g, '/') || '/';
+  } else {
+    candidate = input.replace(/\\/g, '/');
+  }
+  candidate = candidate.length > 1 ? candidate.replace(/\/+$/, '') : candidate;
+
+  let exists = wslDirExists(candidate);
+  let note = null;
+  if (!exists) {
+    // /mnt/z/... 처럼 WSL에 없는 마운트: 드라이브가 WSL을 가리키면 리눅스 경로로 복구 시도
+    const mnt = candidate.match(/^\/mnt\/([A-Za-z])(\/|$)/);
+    if (mnt) {
+      const alt = mapMntToWslPath(candidate, resolveNetworkDriveRoot(mnt[1].toUpperCase()));
+      if (alt && wslDirExists(alt)) {
+        candidate = alt;
+        exists = true;
+        note = 'mapped-drive';
+      }
+    }
+  }
+  return { path: candidate, exists, converted: candidate !== input, note };
+}
+
+// ============================================
 // host 버전 (인스톨러가 설치 폴더에 version.txt로 기록한다. 개발 환경에는 없음 → null)
 // ============================================
 
@@ -678,6 +753,18 @@ async function handleMessage(message) {
     case 'check-port': {
       const portAvailable = await findAvailablePort(preferredPort || 4096);
       return { port: portAvailable };
+    }
+
+    case 'resolve-directory': {
+      const runtime = message.runtime === 'windows' ? 'windows' : 'wsl';
+      try {
+        const r = resolveWorkingDirectory(message.path, runtime);
+        fileLog('INFO', `resolve-directory: runtime=${runtime}, in=${message.path}, out=${r.path}, exists=${r.exists}${r.note ? ', ' + r.note : ''}`);
+        return { status: 'success', ...r };
+      } catch (e) {
+        fileLog('ERROR', `resolve-directory: Failed - ${e.message}`);
+        return { status: 'error', error: e.message };
+      }
     }
 
     case 'get-home-dir': {
@@ -854,5 +941,5 @@ if (require.main === module) {
   main();
 } else {
   // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
-  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue };
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory };
 }
