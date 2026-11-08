@@ -1117,7 +1117,9 @@ async function fetchFallbackContent(port, sessionId) {
       .map(p => p.text)
       .join('');
 
-    return { content, partTypes, lastMessageId: last.info?.id || null };
+    const e = last.info?.error;
+    const errorMessage = e?.data?.message || e?.message || e?.name || null;
+    return { content, partTypes, lastMessageId: last.info?.id || null, errorMessage };
   } catch (e) {
     return { content: '', partTypes: [], lastMessageId: null, error: e.message };
   }
@@ -1351,6 +1353,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
                   debugLog('INFO', `Session idle - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, trackedParts=${routerState.partTypes.size}, bufferLength=${buffer.length}`);
 
                   let finalContent = buffer;
+                  let idleError = null;
                   if (buffer.length === 0) {
                     debugLog('WARN', `Empty buffer at idle - falling back to REST /session/${sessionId}/message`);
                     const fallback = await fetchFallbackContent(port, sessionId);
@@ -1358,9 +1361,13 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
                       debugLog('INFO', `REST fallback recovered ${fallback.content.length} chars - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId}, partTypes=${JSON.stringify(fallback.partTypes)}`);
                       finalContent = fallback.content;
                     } else {
-                      debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}`);
+                      debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}, error=${fallback.errorMessage || 'none'}`);
+                      if (fallback.partTypes.length === 0) {
+                        idleError = fallback.errorMessage || '모델이 빈 응답을 반환했습니다. 서버/모델 설정을 확인하거나 /ext-log로 로그를 확인하세요.';
+                      }
                     }
                   }
+                  if (idleError) { onComplete(null, idleError); return; }
                   onComplete(finalContent);
                   return;
                 }

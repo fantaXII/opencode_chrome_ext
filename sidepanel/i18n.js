@@ -182,6 +182,7 @@
     '세션을 찾을 수 없음': 'Session not found',
     '사용 가능한 모델이 없습니다. OpenCode에서 AI 제공자 API 키를 설정해 주세요.': 'No models available. Set an AI provider API key in OpenCode.',
     '응답 시간 초과': 'Response timed out',
+    '모델이 빈 응답을 반환했습니다. 서버/모델 설정을 확인하거나 /ext-log로 로그를 확인하세요.': 'The model returned an empty response. Check the server/model settings or view logs with /ext-log.',
     '오류가 발생했습니다': 'An error occurred',
     '파일 선택 실패': 'File selection failed',
     '잘못된 값입니다': 'Invalid value'
