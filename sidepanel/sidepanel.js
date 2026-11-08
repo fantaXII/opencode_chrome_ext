@@ -644,7 +644,7 @@ I18N.ready.then(function() {
       const btn = document.createElement('button');
       btn.className = 'model-picker-btn' + (isCurrent ? ' current' : '');
       const when = s.updated ? new Date(s.updated).toLocaleString() : '';
-      btn.textContent = `${s.title || t('(제목 없음)')}${when ? ' · ' + when : ''}${isCurrent ? ' ✓' : ''}`;
+      btn.textContent = `${s.title || t('(제목 없음)')}${s.dir ? ' [' + s.dir + ']' : ''}${when ? ' · ' + when : ''}${isCurrent ? ' ✓' : ''}`;
       btn.addEventListener('click', async () => {
         if (isCurrent || isLoading) return;
         try {

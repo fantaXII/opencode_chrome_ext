@@ -1592,11 +1592,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const listRes = await fetch(`http://127.0.0.1:${port}/session`, { headers, signal: AbortSignal.timeout(5000) });
           if (!listRes.ok) { sendResponse({ success: false, error: `세션 목록 조회 실패: ${listRes.status}` }); break; }
           const raw = await listRes.json();
-          const list = (Array.isArray(raw) ? raw : [])
+          // 패널을 열 때마다 빈 세션이 만들어지므로, 메시지가 하나라도 있는 세션만 보여준다.
+          // (x-opencode-directory 헤더는 목록을 필터링하지 않아 모든 디렉터리의 세션이 온다.)
+          const candidates = (Array.isArray(raw) ? raw : [])
             .filter(x => x?.id && !x.parentID) // 서브에이전트 세션 제외
-            .map(x => ({ id: x.id, title: x.title || '', updated: x.time?.updated || x.time?.created || 0 }))
-            .sort((a, b) => b.updated - a.updated)
-            .slice(0, 30);
+            .sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0))
+            .slice(0, 60);
+          const hasMsg = await Promise.all(candidates.map(async x => {
+            try {
+              const r = await fetch(`http://127.0.0.1:${port}/session/${x.id}/message?limit=1`, { signal: AbortSignal.timeout(3000) });
+              if (!r.ok) return false;
+              const arr = await r.json();
+              return Array.isArray(arr) && arr.length > 0;
+            } catch { return false; }
+          }));
+          const list = candidates
+            .filter((_, i) => hasMsg[i])
+            .slice(0, 30)
+            .map(x => ({
+              id: x.id,
+              title: x.title || '',
+              updated: x.time?.updated || x.time?.created || 0,
+              dir: (x.directory || '').split(/[\\/]/).filter(Boolean).pop() || ''
+            }));
           sendResponse({ success: true, sessions: list });
           break;
         }
