@@ -500,9 +500,16 @@ I18N.ready.then(function() {
   }
 
   function showCommandDropdown(query) {
-    const filtered = commandCatalog.filter(c =>
-      c.slash.toLowerCase().startsWith(query.toLowerCase())
-    );
+    // 접두 일치를 먼저, 그다음 이름 중간 일치(예: /ralph → /oh-my-claudecode:ralph)
+    const q = query.toLowerCase();
+    const needle = q.replace(/^\//, '');
+    const filtered = [
+      ...commandCatalog.filter(c => c.slash.toLowerCase().startsWith(q)),
+      ...commandCatalog.filter(c => {
+        const sl = c.slash.toLowerCase();
+        return !sl.startsWith(q) && needle && sl.slice(1).includes(needle);
+      })
+    ];
     if (filtered.length === 0) { hideCommandDropdown(); return; }
 
     commandDropdown.innerHTML = filtered.map((c, i) => `
