@@ -1579,8 +1579,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'create-session':
           const sessionId = await createSession(message.title || 'New Chat');
           currentSessionId = sessionId;
+          if (message.tabId) { tabSessions.set(message.tabId, sessionId); persistState(); }
           sendResponse({ success: true, sessionId });
           break;
+
+        case 'list-sessions': {
+          const port = await ensureOpenCodeServer();
+          if (!port) { sendResponse({ success: false, error: 'OpenCode 서버 연결 실패' }); break; }
+          const headers = {};
+          const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
+          if (dirHeader) headers['x-opencode-directory'] = dirHeader;
+          const listRes = await fetch(`http://127.0.0.1:${port}/session`, { headers, signal: AbortSignal.timeout(5000) });
+          if (!listRes.ok) { sendResponse({ success: false, error: `세션 목록 조회 실패: ${listRes.status}` }); break; }
+          const raw = await listRes.json();
+          const list = (Array.isArray(raw) ? raw : [])
+            .filter(x => x?.id && !x.parentID) // 서브에이전트 세션 제외
+            .map(x => ({ id: x.id, title: x.title || '', updated: x.time?.updated || x.time?.created || 0 }))
+            .sort((a, b) => b.updated - a.updated)
+            .slice(0, 30);
+          sendResponse({ success: true, sessions: list });
+          break;
+        }
+
+        case 'switch-session': {
+          const port = await ensureOpenCodeServer();
+          if (!port) { sendResponse({ success: false, error: 'OpenCode 서버 연결 실패' }); break; }
+          if (!(await checkSessionExists(port, message.sessionId))) {
+            sendResponse({ success: false, error: '세션을 찾을 수 없습니다' });
+            break;
+          }
+          sessions.set(message.sessionId, { id: message.sessionId, created: Date.now(), port, active: true });
+          if (message.tabId) { tabSessions.set(message.tabId, message.sessionId); persistState(); }
+          currentSessionId = message.sessionId;
+          debugLog('INFO', `switch-session: tabId=${message.tabId}, sessionId=${message.sessionId}`);
+          sendResponse({ success: true, sessionId: message.sessionId });
+          break;
+        }
 
         case 'cancel-message': {
           const ctrl = eventSources.get(message.sessionId);

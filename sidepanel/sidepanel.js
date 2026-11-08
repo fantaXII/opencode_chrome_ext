@@ -44,6 +44,9 @@ I18N.ready.then(function() {
   let commandCatalog = [
     { id: 'local.help',  slash: '/help',  title: 'Help',        description: t('사용 가능한 커맨드 목록 표시'), hasArg: false },
     { id: 'local.clear', slash: '/clear', title: 'Clear',       description: t('채팅 히스토리 초기화'),         hasArg: false },
+    { id: 'local.new',   slash: '/new',   title: 'New',         description: t('새 세션 시작'),                 hasArg: false },
+    { id: 'local.sessions', slash: '/sessions', title: 'Sessions', description: t('이전 세션 목록에서 선택해 대화 이어가기'), hasArg: false },
+    { id: 'local.resume', slash: '/resume', title: 'Resume',    description: t('/sessions와 동일'),            hasArg: false },
     { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),       hasArg: true  },
     { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),    hasArg: true  },
     { id: 'local.extlog', slash: '/ext-log', title: 'Extension Log', description: t('확장 디버그 로그 표시·복사 (문제 신고 시 첨부)'), hasArg: false },
@@ -470,6 +473,9 @@ I18N.ready.then(function() {
     const localCommands = [
       { id: 'local.help',  slash: '/help',  title: 'Help',        description: t('사용 가능한 커맨드 목록 표시'),   hasArg: false },
       { id: 'local.clear', slash: '/clear', title: 'Clear',       description: t('채팅 히스토리 초기화'),           hasArg: false },
+      { id: 'local.new',   slash: '/new',   title: 'New',         description: t('새 세션 시작'),                   hasArg: false },
+      { id: 'local.sessions', slash: '/sessions', title: 'Sessions', description: t('이전 세션 목록에서 선택해 대화 이어가기'), hasArg: false },
+      { id: 'local.resume', slash: '/resume', title: 'Resume',    description: t('/sessions와 동일'),              hasArg: false },
       { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),         hasArg: true  },
       { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),      hasArg: true  },
     ];
@@ -602,6 +608,66 @@ I18N.ready.then(function() {
 
   agentBar.addEventListener('click', () => cycleAgent());
 
+  async function showSessionPicker() {
+    let res;
+    try {
+      res = await sendMessageToBackground('list-sessions', {});
+    } catch (e) {
+      addErrorMessage(t('세션 목록 조회 실패: {error}', { error: t(e.message) }));
+      return;
+    }
+    if (!res?.success) {
+      addErrorMessage(t('세션 목록 조회 실패: {error}', { error: t(res?.error || 'unknown') }));
+      return;
+    }
+    if (!res.sessions.length) {
+      addBotMessage(t('이어갈 수 있는 이전 세션이 없습니다.'));
+      return;
+    }
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message bot-message';
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    avatar.textContent = '🕘';
+    const content = document.createElement('div');
+    content.className = 'message-content';
+    const picker = document.createElement('div');
+    picker.className = 'model-picker';
+    const title = document.createElement('p');
+    title.className = 'model-picker-title';
+    title.textContent = t('이어갈 세션을 선택하세요:');
+    picker.appendChild(title);
+
+    for (const s of res.sessions) {
+      const isCurrent = s.id === currentSessionId;
+      const btn = document.createElement('button');
+      btn.className = 'model-picker-btn' + (isCurrent ? ' current' : '');
+      const when = s.updated ? new Date(s.updated).toLocaleString() : '';
+      btn.textContent = `${s.title || t('(제목 없음)')}${when ? ' · ' + when : ''}${isCurrent ? ' ✓' : ''}`;
+      btn.addEventListener('click', async () => {
+        if (isCurrent || isLoading) return;
+        try {
+          const sw = await sendMessageToBackground('switch-session', { sessionId: s.id, tabId: currentTabId });
+          if (!sw?.success) throw new Error(sw?.error || 'switch failed');
+          currentSessionId = s.id;
+          messageDiv.remove();
+          await loadAndRenderHistory(s.id, { id: currentTabId, title: '' });
+          addBotMessage(t('세션을 불러왔습니다: {title}', { title: s.title || s.id }));
+        } catch (e) {
+          addErrorMessage(t('세션 전환 실패: {error}', { error: t(e.message) }));
+        }
+      });
+      picker.appendChild(btn);
+    }
+
+    content.appendChild(picker);
+    messageDiv.appendChild(avatar);
+    messageDiv.appendChild(content);
+    messagesContainer.appendChild(messageDiv);
+    scrollToBottom();
+  }
+
   function showModelPicker() {
     removeTypingIndicator();
     if (!availableModels.length) {
@@ -719,6 +785,28 @@ I18N.ready.then(function() {
         addErrorMessage(t('세션 재생성에 실패했습니다.'));
       }
       addBotMessage(t('채팅이 초기화되었습니다.'));
+      sendBtn.disabled = false;
+      return;
+    }
+
+    if (slash === '/new') {
+      if (isLoading) { addBotMessage(t('응답 중에는 새 세션을 시작할 수 없습니다.')); sendBtn.disabled = false; return; }
+      messagesContainer.innerHTML = '';
+      try {
+        const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
+        currentSessionId = result.success ? result.sessionId : null;
+        addBotMessage(t('새 세션을 시작했습니다.'));
+      } catch {
+        currentSessionId = null;
+        addErrorMessage(t('세션 재생성에 실패했습니다.'));
+      }
+      sendBtn.disabled = false;
+      return;
+    }
+
+    if (slash === '/sessions' || slash === '/resume') {
+      if (isLoading) { addBotMessage(t('응답 중에는 세션을 전환할 수 없습니다.')); sendBtn.disabled = false; return; }
+      await showSessionPicker();
       sendBtn.disabled = false;
       return;
     }
