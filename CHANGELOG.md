@@ -1,5 +1,20 @@
 # Changelog
 
+# [2.17.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.16.0...v2.17.0) (2026-11-08)
+
+
+### Bug Fixes
+
+* /sessions 목록에서 빈 세션 제외하고 폴더명 표시 ([af9f4f1](https://github.com/fantaXII/opencode_chrome_ext/commit/af9f4f167bc60399dc719738c1ed9a593ccc75bc))
+* 모델이 빈 응답을 반환하면 오류를 화면에 표시 ([65bbee1](https://github.com/fantaXII/opencode_chrome_ext/commit/65bbee14e2ab4b67ceb48dc5ecb9b2f6e999e8b0))
+
+
+### Features
+
+* /new, /sessions(/resume) 명령으로 이전 세션 이어가기 ([e912c46](https://github.com/fantaXII/opencode_chrome_ext/commit/e912c463293161f7baffc2a2fda7b32baca61e75))
+* 슬래시 메뉴에서 이름 중간 일치 명령도 표시 ([53f773b](https://github.com/fantaXII/opencode_chrome_ext/commit/53f773be944484111e128e8a8f324bcf2ad222c6))
+* 작업 디렉터리를 저장 전에 host에서 변환·검증 ([a4b6670](https://github.com/fantaXII/opencode_chrome_ext/commit/a4b667090cdf2da10e3f1eb3931581b0df78ca7b))
+
 # [2.16.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.15.0...v2.16.0) (2026-11-07)
 
 
