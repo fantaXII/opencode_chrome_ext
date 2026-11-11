@@ -81,11 +81,19 @@ MCP/skill/agent를 새로 등록하면 opencode는 이를 자동 반영하지 �
 
 dispose는 열려 있는 SSE 스트림을 끊고 `server.instance.disposed` 이벤트를 내보낸다. `subscribeToEvents()`의 Last-Event-ID 재연결 경로가 자동으로 다시 붙지만, 진행 중이던 프롬프트는 instance와 함께 사라진다(사이드패널이 재시작 전에 `cancel-message`로 UI를 정리한다).
 
+### 페이지 컨텍스트 / 렌더링 보안 (Web Store 심사 관련)
+- 상시 콘텐츠 스크립트는 없다. `chrome.storage.local.pageContext`(`off`|`basic`(기본)|`full`)에 따라 `getCurrentTabInfo({ forPrompt: true })`가 메시지를 보낼 때만 제목·URL을 붙이고, `full`이면 `scripting.executeScript`로 그 순간 본문 일부·선택 텍스트를 읽는다. `full`은 `optional_host_permissions: ["<all_urls>"]`를 사이드패널 ⚙에서 `permissions.request`로 받아야 동작한다(거부되면 `basic`으로 저장). 페이지 내용은 opencode를 거쳐 AI 제공자로 가므로 `PRIVACY.md`에 이 흐름을 명시해 두었다 — 전송 범위를 바꾸면 방침도 같이 고친다.
+- 모델 응답은 신뢰할 수 없는 입력(프롬프트 인젝션)이다. 마크다운은 반드시 `renderMarkdown()`(marked → DOMPurify, 원격 이미지는 링크로 치환, 링크는 http(s)/mailto만 새 탭)으로 그린다. manifest CSP도 `img-src 'self' data:`, `frame-src 'none'`으로 막는다. `marked.parse` 결과를 `innerHTML`에 직접 넣지 않는다.
+
+### 권한/질문 요청 (permission.asked / question.asked)
+- `subscribeToEvents`가 본 세션과 하위(subagent, `session.created`의 `parentID`) 세션의 요청을 `onPart({kind:'permission'|'question'})`로 사이드패널에 넘기고, 카드의 응답은 `reply-permission`(`POST /permission/{id}/reply {reply}`, 404면 구버전 `/session/{sid}/permissions/{id}`) / `reply-question`(`POST /question/{id}/reply {answers}`) / `reject-question`으로 보낸다. 요청이 남아 있는 동안에는 180초 무응답 타임아웃을 걸지 않는다.
+- 타임아웃은 텍스트 delta뿐 아니라 도구 상태 변경(`message.part.updated`), `message.updated`, `session.status`(busy/retry), 하위 세션 활동에서도 리셋된다. 완료는 `session.idle` 또는 `session.status` idle(어시스턴트 메시지를 본 뒤)이며, SSE 재연결 직후에는 `/session/status`로 놓친 idle을 확인한다.
+
 ## Key Constraints
 
 - **빌드 파이프라인 없음**: Webpack/Vite 미사용. `scripts/build.js`는 단순 파일 복사 + zip. 소스 파일을 직접 수정하면 빌드에 반영됨.
 - **테스트**: 프레임워크 없이 Node 내장 러너만 사용(`yarn test`). 현재는 `lib/sw-resilience.mjs`(SW 종료 대응)만 커버.
 - **SW 종료 대응**: 응답 대기 중 MV3 SW가 30초 idle로 죽으면 SSE·타임아웃이 사라져 UI가 멈춘다. `subscribeToEvents`가 keepalive(20초 ping)와 `storage.session.pendingPrompts` 기록을 걸고, SW 재시작 시 `recoverInterruptedPrompts`가 `/session/status` 폴링 → REST 내용으로 `message-complete`를 보낸다.
 - **Windows 전용 Native Host**: `native-host/`는 Windows 레지스트리(`install.reg`)에 경로를 등록해야 동작. WSL에서는 개발만 가능.
-- **native-host/manifest.json의 `allowed_origins`**: `"chrome-extension://*"` (와일드카드)로 설정 — 실제 배포 시 특정 Extension ID로 교체 필요.
+- **native-host/manifest.json의 `allowed_origins`**: Web Store 확장 ID(`jchffojdjnhpmdgnifkhpgmgokbidobi`)로 고정. manifest의 `key`가 이 ID를 만들며, Web Store용 zip에서는 `key`를 제거한다.
 - **i18n**: `manifest.json`의 이름/설명은 `_locales/{ko,en}/messages.json`의 `__MSG_*__`(브라우저 언어를 따름). 사이드패널 UI 언어는 `chrome.i18n`으로 런타임 전환이 안 되므로 `sidepanel/i18n.js`가 따로 처리한다: **한국어 원문을 키로** 쓰는 `t('원문', {param})`(사전 `EN`에 없으면 원문 그대로 → 기본 ko), 정적 HTML은 `data-i18n`/`data-i18n-html`/`data-i18n-title`/`data-i18n-placeholder`(요소의 원래 한국어가 키). 선택값은 `chrome.storage.local.lang`(`ko`|`en`)이고 ⚙ 설정 맨 위에서 바꾼다. 새 UI 문자열을 추가하면 한국어로 `t()`/속성을 쓰고 `i18n.js`의 `EN`에 번역을 넣는다. background가 돌려주는 오류 문구는 사이드패널에서 `t(error)`로 감싸 번역한다. `/debug` 로그와 모델에 보내는 프롬프트는 번역하지 않는다.

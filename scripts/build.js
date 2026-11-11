@@ -51,8 +51,7 @@ async function build() {
     { src: 'sidepanel', dest: 'sidepanel' },
     { src: 'native-host', dest: 'native-host' },
     { src: '_locales', dest: '_locales' },
-    { src: 'scripts/icons', dest: 'icons' },
-    { src: 'content.js', dest: 'content.js' }
+    { src: 'scripts/icons', dest: 'icons' }
   ];
 
   // build:installer가 먼저 실행된 경우 .exe를 dist에 포함

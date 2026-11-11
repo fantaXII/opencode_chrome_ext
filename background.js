@@ -205,9 +205,17 @@ async function checkServerHealth(port) {
     clearTimeout(timeoutId);
     console.log(`[checkServerHealth] 포트 ${port} 응답: status=${response.status}, ok=${response.ok}`);
     if (response.ok) {
-      const data = await response.json();
-      console.log(`[checkServerHealth] 포트 ${port} 성공 - version=${data.version}`);
-      return { available: true, version: data.version };
+      const data = await response.json().catch(() => null);
+      // 같은 포트를 쓰는 다른 프로그램을 opencode로 오인하지 않도록 응답 형태까지 확인한다.
+      if (data?.healthy === true || typeof data?.version === 'string') {
+        console.log(`[checkServerHealth] 포트 ${port} 성공 - version=${data.version}`);
+        return { available: true, version: data.version };
+      }
+      debugLog('WARN', `checkServerHealth: port ${port} answered 200 but is not an opencode server`);
+    } else if (response.status === 401) {
+      // OPENCODE_SERVER_PASSWORD가 걸린 서버(터미널/TUI에서 직접 실행). 확장은 인증을 지원하지 않으므로 사용하지 않는다.
+      debugLog('WARN', `checkServerHealth: port ${port} requires authentication (OPENCODE_SERVER_PASSWORD) - skipped`);
+      return { available: false, version: null, authRequired: true };
     }
   } catch (error) {
     console.log(`[checkServerHealth] 포트 ${port} 실패:`, error.message);
@@ -1007,14 +1015,44 @@ async function deleteSession(sessionId) {
 }
 
 /**
- * 현재 탭 정보를 가져오기
+ * 프롬프트에 붙일 현재 페이지 정보의 범위 (chrome.storage.local.pageContext)
+ *  - 'off'   : 아무것도 붙이지 않음
+ *  - 'basic' : 제목·URL (기본값)
+ *  - 'full'  : 제목·URL + 본문 일부(제목들, 문단 10개) + 선택한 텍스트.
+ *              페이지를 읽으려면 선택적 호스트 권한(<all_urls>)이 필요하고, 사이드패널 설정에서 사용자가 허용한다.
  */
-async function getCurrentTabInfo() {
+const PAGE_CONTEXT_MODES = ['off', 'basic', 'full'];
+async function getPageContextMode() {
   try {
+    const { pageContext } = await chrome.storage.local.get('pageContext');
+    return PAGE_CONTEXT_MODES.includes(pageContext) ? pageContext : 'basic';
+  } catch {
+    return 'basic';
+  }
+}
+
+// 탭 안에서 실행되는 함수 — 바깥 스코프를 참조할 수 없다(executeScript가 직렬화해 주입).
+function readPageContentInTab() {
+  const sel = (window.getSelection()?.toString() || '').trim();
+  return {
+    headings: Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 30).map(h => h.innerText.trim()).filter(Boolean),
+    paragraphs: Array.from(document.querySelectorAll('p')).slice(0, 10).map(p => p.innerText.trim()).filter(Boolean),
+    selectedText: sel ? sel.slice(0, 20000) : null
+  };
+}
+
+/**
+ * 현재 탭 정보를 가져오기
+ * @param {{ forPrompt?: boolean }} opts forPrompt면 pageContext 설정에 따라 전송할 범위만 담는다.
+ */
+async function getCurrentTabInfo({ forPrompt = false } = {}) {
+  const empty = { tabId: null, url: '', title: '', favIconUrl: '' };
+  try {
+    const mode = forPrompt ? await getPageContextMode() : 'basic';
+    if (mode === 'off') return empty;
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) {
-      return { tabId: null, url: '', title: '', favIconUrl: '' };
-    }
+    if (!tab?.id) return empty;
 
     const result = {
       tabId: tab.id,
@@ -1023,19 +1061,23 @@ async function getCurrentTabInfo() {
       favIconUrl: tab.favIconUrl
     };
 
-    try {
-      const response = await chrome.tabs.sendMessage(tab.id, { action: 'get-page-content' });
-      if (response?.success) {
-        result.pageContent = response.content;
+    if (mode === 'full') {
+      try {
+        // <all_urls> 선택 권한(또는 activeTab)이 있을 때만 성공한다. chrome://, Web Store 등은 실패 → 제목·URL만 보낸다.
+        const [injection] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: readPageContentInTab
+        });
+        if (injection?.result) result.pageContent = injection.result;
+      } catch (e) {
+        debugLog('INFO', `page content not read - ${e.message}`);
       }
-    } catch (e) {
-      console.log('content script 호출 실패 (일반적인 웹페이지가 아님):', e.message);
     }
 
     return result;
   } catch (error) {
     console.error('getCurrentTabInfo 오류:', error);
-    return { tabId: null, url: '', title: '', favIconUrl: '' };
+    return empty;
   }
 }
 
@@ -1255,6 +1297,10 @@ async function checkSessionExists(port, sessionId) {
   }
 }
 
+// 사용자 응답을 기다리는 권한/질문 요청: sessionId -> Map(requestId -> part).
+// 사이드패널이 탭 전환·재오픈으로 카드를 잃어도 다시 그릴 수 있게 SW가 보관한다(get-pending-interactions).
+const pendingInteractions = new Map();
+
 /**
  * SSE 이벤트 구독 (/global/event + Last-Event-ID 재연결)
  * server.connected 수신 시 resolve → 이후 prompt_async 전송
@@ -1273,6 +1319,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
   controller.signal.addEventListener('abort', () => {
     swKeepAlive.release(sessionId);
     pendingPrompts.remove(sessionId);
+    pendingInteractions.delete(sessionId);
   }, { once: true });
 
   return new Promise((resolveConnected) => {
@@ -1281,10 +1328,19 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
     let completed = false;
     let assistantMessageId = null;
     let routerState = createRouterState();
+    // 이 프롬프트에 속한 세션들: 본 세션 + task 도구가 만든 하위(subagent) 세션.
+    // 하위 세션의 이벤트는 화면에 그리지 않지만, 진행 신호(타임아웃 리셋)와 권한/질문 요청은 처리해야 한다.
+    const relatedSessions = new Set([sessionId]);
+    // 사용자 응답을 기다리는 권한/질문 요청 id. 남아 있는 동안에는 무응답 타임아웃을 걸지 않는다.
+    const pendingAsks = new Set();
 
     let timeoutId = null;
     function resetTimeout() {
       if (timeoutId) clearTimeout(timeoutId);
+      timeoutId = null;
+      // 사용자 응답 대기 중에는 짧은 무응답 제한 대신 넉넉한 상한(30분)만 둔다.
+      // 카드가 어떤 이유로든 사라져도 세션이 영원히 멈추지 않게 하기 위함.
+      const limitMs = pendingAsks.size > 0 ? 30 * 60 * 1000 : 180000;
       timeoutId = setTimeout(async () => {
         if (!completed) {
           controller.abort();
@@ -1310,7 +1366,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
           await abortServerSession(port, sessionId);
           onComplete(finalContent, errMsg);
         }
-      }, 180000);
+      }, limitMs);
     }
     resetTimeout();
 
@@ -1318,8 +1374,90 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
       if (!resolved) { resolved = true; resolveConnected(); }
     }
 
-    async function connect(lastEventId = '') {
+    // 응답 완료 처리(session.idle 또는 재연결 후 idle 확인). 텍스트가 비면 REST로 복구한다.
+    async function completeAsIdle(reason) {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeoutId);
+      controller.abort();
+      eventSources.delete(sessionId);
+      debugLog('INFO', `Session idle (${reason}) - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, trackedParts=${routerState.partTypes.size}, bufferLength=${buffer.length}`);
+
+      let finalContent = buffer;
+      let idleError = null;
+      if (buffer.length === 0) {
+        debugLog('WARN', `Empty buffer at idle - falling back to REST /session/${sessionId}/message`);
+        const fallback = await fetchFallbackContent(port, sessionId);
+        if (fallback.content) {
+          debugLog('INFO', `REST fallback recovered ${fallback.content.length} chars - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId}, partTypes=${JSON.stringify(fallback.partTypes)}`);
+          finalContent = fallback.content;
+        } else {
+          debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}, error=${fallback.errorMessage || 'none'}`);
+          if (fallback.partTypes.length === 0) {
+            idleError = fallback.errorMessage || '모델이 빈 응답을 반환했습니다. 서버/모델 설정을 확인하거나 /ext-log로 로그를 확인하세요.';
+          }
+        }
+      }
+      if (idleError) { onComplete(null, idleError); return; }
+      onComplete(finalContent);
+    }
+
+    function emitAsk(part) {
+      if (!pendingInteractions.has(sessionId)) pendingInteractions.set(sessionId, new Map());
+      pendingInteractions.get(sessionId).set(part.id, part);
+      onPart?.(part);
+    }
+
+    // permission.asked / question.asked 와 그 응답 이벤트를 사이드패널로 전달한다.
+    // 처리했으면 true. (v2 이벤트는 아직 opencode 기본 경로가 아니라 다루지 않는다.)
+    function handleInteractionEvent(evt) {
+      const p = evt.properties || {};
+      switch (evt.type) {
+        case 'permission.asked':
+          pendingAsks.add(p.id);
+          resetTimeout();
+          debugLog('INFO', `Permission asked - sessionId=${p.sessionID}, requestId=${p.id}, permission=${p.permission}`);
+          emitAsk({
+            kind: 'permission',
+            id: p.id,
+            sessionID: p.sessionID,
+            fromSubagent: p.sessionID !== sessionId,
+            permission: p.permission,
+            patterns: Array.isArray(p.patterns) ? p.patterns : [],
+            always: Array.isArray(p.always) ? p.always : []
+          });
+          return true;
+        case 'question.asked':
+          pendingAsks.add(p.id);
+          resetTimeout();
+          debugLog('INFO', `Question asked - sessionId=${p.sessionID}, requestId=${p.id}, count=${p.questions?.length || 0}`);
+          emitAsk({
+            kind: 'question',
+            id: p.id,
+            sessionID: p.sessionID,
+            fromSubagent: p.sessionID !== sessionId,
+            questions: Array.isArray(p.questions) ? p.questions : []
+          });
+          return true;
+        case 'permission.replied':
+        case 'question.replied':
+        case 'question.rejected': {
+          const requestId = p.requestID;
+          if (!pendingAsks.delete(requestId)) return true; // 다른 프롬프트의 요청
+          pendingInteractions.get(sessionId)?.delete(requestId);
+          resetTimeout();
+          debugLog('INFO', `${evt.type} - requestId=${requestId}, reply=${p.reply || ''}`);
+          onPart?.({ kind: 'interaction-resolved', id: requestId, reply: p.reply || (evt.type === 'question.rejected' ? 'reject' : 'answered') });
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function connect(lastEventId = '', isReconnect = false) {
       if (completed || controller.signal.aborted) return;
+      // catch(네트워크 오류) 경로에서도 마지막으로 받은 이벤트 id로 재연결해야 하므로 try 밖에 둔다.
+      let currentId = lastEventId;
 
       try {
         const headers = { 'Accept': 'text/event-stream', 'Cache-Control': 'no-cache' };
@@ -1343,26 +1481,30 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let pending = '';
-        let currentId = lastEventId;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
+          // SSE 규격상 줄바꿈은 \n, \r\n, \r 모두 가능하다. 청크 경계에서 \r\n이 갈리지 않도록 끝의 \r은 남겨 둔다.
           pending += decoder.decode(value, { stream: true });
+          const tail = pending.endsWith('\r') ? '\r' : '';
+          pending = (tail ? pending.slice(0, -1) : pending).replace(/\r\n?/g, '\n');
 
-          // SSE 이벤트는 \n\n 으로 구분
+          // SSE 이벤트는 빈 줄(\n\n)로 구분
           const parts = pending.split('\n\n');
-          pending = parts.pop();
+          pending = parts.pop() + tail;
 
           for (const part of parts) {
             let sseId = '';
-            let sseData = '';
+            const dataLines = [];
 
             for (const line of part.split('\n')) {
               if (line.startsWith('id:')) sseId = line.slice(3).trim();
-              else if (line.startsWith('data:')) sseData = line.slice(5).trim();
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
             }
+            // 여러 줄 data:는 \n으로 이어 붙인다(규격).
+            const sseData = dataLines.join('\n').trim();
 
             if (sseId) currentId = sseId;
             if (!sseData) continue;
@@ -1385,20 +1527,38 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
 
 
               if (evt.type === 'server.connected') {
-                debugLog('INFO', `SSE connected - sessionId=${sessionId}`);
+                debugLog('INFO', `SSE connected - sessionId=${sessionId}${isReconnect ? ' (reconnect)' : ''}`);
                 resolveOnce();
+                // 끊긴 사이에 session.idle이 지나갔을 수 있다(서버가 Last-Event-ID로 재전송하지 않으면 유실).
+                if (isReconnect) checkIdleAfterReconnect();
                 continue;
+              }
+
+              // 하위(subagent) 세션 추적: task 도구가 만든 세션은 parentID가 관련 세션을 가리킨다.
+              if (evt.type === 'session.created' || evt.type === 'session.updated') {
+                const sInfo = evt.properties?.info;
+                if (sInfo?.id && sInfo.parentID && relatedSessions.has(sInfo.parentID)) relatedSessions.add(sInfo.id);
               }
 
               // 세션 ID 필터
               const evtSession = evt.properties?.sessionID
                 || evt.properties?.part?.sessionID
                 || evt.properties?.info?.sessionID;
-              if (evtSession && evtSession !== sessionId) continue;
+              if (evtSession && !relatedSessions.has(evtSession)) continue;
+
+              // 권한/질문 요청은 하위 세션에서 와도 사용자에게 보여야 한다(안 보이면 서버가 영원히 대기).
+              if (handleInteractionEvent(evt)) continue;
+
+              if (evtSession && evtSession !== sessionId) {
+                // 하위 세션 활동 = 본 세션의 task 도구가 아직 일하는 중
+                resetTimeout();
+                continue;
+              }
 
               switch (evt.type) {
                 case 'message.updated': {
                   const info = evt.properties?.info;
+                  if (info?.sessionID === sessionId) resetTimeout();
                   if (info?.role === 'assistant' && info?.sessionID === sessionId) {
                     assistantMessageId = info.id;
                     debugLog('INFO', `Assistant message started - sessionId=${sessionId}, messageId=${info.id}, model=${info.providerID || '?'}/${info.modelID || '?'}`);
@@ -1414,6 +1574,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
                 }
                 case 'message.part.updated': {
                   const part = evt.properties?.part;
+                  // 도구 상태 변경(pending→running→completed)도 진행 신호다. 긴 bash 실행 중엔 delta가 없다.
+                  if (part?.sessionID === sessionId) resetTimeout();
                   const routed = routeMessagePartUpdated(routerState, part, assistantMessageId);
                   if (routed?.action === 'part') {
                     onPart?.(routed.part);
@@ -1435,30 +1597,22 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
                   break;
                 }
                 case 'session.idle': {
-                  completed = true;
-                  clearTimeout(timeoutId);
-                  controller.abort();
-                  eventSources.delete(sessionId);
-                  debugLog('INFO', `Session idle - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, trackedParts=${routerState.partTypes.size}, bufferLength=${buffer.length}`);
-
-                  let finalContent = buffer;
-                  let idleError = null;
-                  if (buffer.length === 0) {
-                    debugLog('WARN', `Empty buffer at idle - falling back to REST /session/${sessionId}/message`);
-                    const fallback = await fetchFallbackContent(port, sessionId);
-                    if (fallback.content) {
-                      debugLog('INFO', `REST fallback recovered ${fallback.content.length} chars - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId}, partTypes=${JSON.stringify(fallback.partTypes)}`);
-                      finalContent = fallback.content;
-                    } else {
-                      debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}, error=${fallback.errorMessage || 'none'}`);
-                      if (fallback.partTypes.length === 0) {
-                        idleError = fallback.errorMessage || '모델이 빈 응답을 반환했습니다. 서버/모델 설정을 확인하거나 /ext-log로 로그를 확인하세요.';
-                      }
-                    }
-                  }
-                  if (idleError) { onComplete(null, idleError); return; }
-                  onComplete(finalContent);
+                  await completeAsIdle('idle');
                   return;
+                }
+                case 'session.status': {
+                  // busy/retry = 서버가 아직 처리 중. retry는 제공자 재시도(레이트 리밋 등) 안내를 남긴다.
+                  const st = evt.properties?.status;
+                  if (st?.type === 'busy' || st?.type === 'retry') resetTimeout();
+                  // session.idle은 deprecated 경로라 status idle도 완료 신호로 받는다(프롬프트 처리를 본 뒤에만).
+                  if (st?.type === 'idle' && assistantMessageId && evt.properties?.sessionID === sessionId) {
+                    await completeAsIdle('status-idle');
+                    return;
+                  }
+                  if (st?.type === 'retry') {
+                    debugLog('WARN', `Session retry - sessionId=${sessionId}, attempt=${st.attempt}, message=${st.message || ''}`);
+                  }
+                  break;
                 }
                 case 'server.instance.disposed': {
                   // 소프트 재시작(POST /global/dispose) 시 서버가 SSE 스트림을 끊는다.
@@ -1492,7 +1646,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
         // 스트림 정상 종료 → Last-Event-ID 로 재연결
         if (!completed && !controller.signal.aborted) {
           await new Promise(r => setTimeout(r, 500));
-          connect(currentId);
+          connect(currentId, true);
         }
       } catch (error) {
         if (error.name === 'AbortError') return;
@@ -1501,8 +1655,23 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
         resolveOnce();
         if (!completed && !controller.signal.aborted) {
           await new Promise(r => setTimeout(r, 2000));
-          connect(lastEventId);
+          connect(currentId, true);
         }
+      }
+    }
+
+    // 재연결 직후 세션이 이미 idle이면(= 끊긴 사이 완료) 완료 처리한다.
+    // 사용자 응답 대기 중인 요청이 있으면 서버는 busy이므로 건드리지 않는다.
+    async function checkIdleAfterReconnect() {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/session/status`, { signal: AbortSignal.timeout(3000) });
+        // 어시스턴트 메시지를 아직 못 봤다면 프롬프트가 처리되기 전일 수 있다 → idle을 완료로 보지 않는다(타임아웃 폴백에 맡김).
+        if (!res.ok || completed || !assistantMessageId) return;
+        const statusMap = await res.json();
+        const st = statusMap?.[sessionId];
+        if (!st || st.type === 'idle') await completeAsIdle('reconnect-check');
+      } catch (e) {
+        debugLog('WARN', `Idle check after reconnect failed - sessionId=${sessionId}, error=${e.message}`);
       }
     }
 
@@ -1705,6 +1874,78 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        // 사이드패널이 다시 그릴 때 대기 중인 권한/질문 카드를 복원한다.
+        // SW가 재시작돼 메모리가 비었으면 서버의 대기 목록(GET /permission, /question)에서 본 세션 것만 가져온다.
+        case 'get-pending-interactions': {
+          const sid = message.sessionId;
+          const known = pendingInteractions.get(sid);
+          if (known?.size) {
+            sendResponse({ success: true, items: [...known.values()] });
+            break;
+          }
+          const listPort = sessions.get(sid)?.port ?? serverState.port;
+          const items = [];
+          if (sid && listPort) {
+            const headers = {};
+            const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
+            if (dirHeader) headers['x-opencode-directory'] = dirHeader;
+            const list = async (path) => {
+              try {
+                const r = await fetch(`http://127.0.0.1:${listPort}${path}`, { headers, signal: AbortSignal.timeout(3000) });
+                return r.ok ? await r.json() : [];
+              } catch { return []; }
+            };
+            for (const p of await list('/permission')) {
+              if (p?.sessionID !== sid) continue;
+              items.push({ kind: 'permission', id: p.id, sessionID: p.sessionID, fromSubagent: false,
+                permission: p.permission, patterns: p.patterns || [], always: p.always || [] });
+            }
+            for (const q of await list('/question')) {
+              if (q?.sessionID !== sid) continue;
+              items.push({ kind: 'question', id: q.id, sessionID: q.sessionID, fromSubagent: false, questions: q.questions || [] });
+            }
+          }
+          sendResponse({ success: true, items });
+          break;
+        }
+
+        // 권한/질문 요청에 대한 사용자 응답. 요청은 instance(디렉터리) 단위로 보관되므로 프롬프트와 같은 디렉터리 헤더를 보낸다.
+        case 'reply-permission':
+        case 'reply-question':
+        case 'reject-question': {
+          const replyPort = sessions.get(message.sessionId)?.port ?? serverState.port;
+          if (!replyPort) throw new Error('OpenCode 서버 연결 실패');
+          const requestId = encodeURIComponent(message.requestId || '');
+          const headers = { 'Content-Type': 'application/json' };
+          const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
+          if (dirHeader) headers['x-opencode-directory'] = dirHeader;
+          const post = (path, body) => fetch(`http://127.0.0.1:${replyPort}${path}`, {
+            method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(5000)
+          });
+
+          let res;
+          if (message.action === 'reply-permission') {
+            const reply = ['once', 'always', 'reject'].includes(message.reply) ? message.reply : 'reject';
+            res = await post(`/permission/${requestId}/reply`, { reply });
+            // 구버전 opencode는 세션 하위 경로만 있다.
+            if (res.status === 404 && message.requestSessionId) {
+              res = await post(`/session/${encodeURIComponent(message.requestSessionId)}/permissions/${requestId}`, { response: reply });
+            }
+          } else if (message.action === 'reply-question') {
+            const answers = Array.isArray(message.answers)
+              ? message.answers.map(a => (Array.isArray(a) ? a.map(String) : []))
+              : [];
+            res = await post(`/question/${requestId}/reply`, { answers });
+          } else {
+            res = await post(`/question/${requestId}/reject`, {});
+          }
+          const body = res.ok ? '' : await res.text().catch(() => '');
+          debugLog(res.ok ? 'INFO' : 'ERROR', `${message.action} - requestId=${message.requestId}, status=${res.status}${body ? `, body=${body.slice(0, 300)}` : ''}`);
+          if (!res.ok) throw new Error(`응답 전송 실패: ${res.status}`);
+          sendResponse({ success: true });
+          break;
+        }
+
         case 'send-message': {
           if (!sessions.has(message.sessionId)) {
             const recoveredPort = await ensureOpenCodeServer();
@@ -1716,7 +1957,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               });
             }
           }
-          const tabInfo = await getCurrentTabInfo();
+          const tabInfo = await getCurrentTabInfo({ forPrompt: true });
           let replacedSessionId = null;
 
           const doSendMessage = async (sid) => {

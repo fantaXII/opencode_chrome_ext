@@ -1748,3 +1748,44 @@ body {
   .hljs-type, .hljs-class .hljs-title { color: #267f99; }
   .hljs-built_in { color: #0070c1; }
 }
+/* 권한/질문 요청 카드 */
+.interaction-card {
+  margin: 8px 0 8px 40px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background-color: var(--bg-secondary);
+  font-size: 0.9em;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.interaction-card.resolved { border-color: var(--border); opacity: 0.75; }
+.interaction-title { font-weight: 600; }
+.interaction-sub { color: var(--text-secondary); font-size: 0.9em; }
+.interaction-detail {
+  margin: 0;
+  padding: 6px 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 0.9em;
+}
+.interaction-question { display: flex; flex-direction: column; gap: 4px; }
+.interaction-q-text { font-weight: 500; }
+.interaction-option { display: flex; gap: 6px; align-items: flex-start; cursor: pointer; }
+.interaction-custom {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 4px 6px;
+}
+.interaction-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.interaction-status { font-size: 0.85em; color: var(--text-secondary); }
+.interaction-status.ok { color: var(--success); }
+.interaction-status.error { color: var(--error); }
+.interaction-status.hidden { display: none; }

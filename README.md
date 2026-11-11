@@ -25,7 +25,8 @@ Chrome Extension을 통해 OpenCode를 사이드패널에서 사용할 수 있�
 - **사이드패널 채팅 UI**: Chrome 사이드패널에서 OpenCode와 채팅
 - **자동 서버 실행**: Native Messaging Host를 통해 OpenCode 서버 자동 시작/관리
 - **세션 관리**: 탭마다 독립적인 세션 생성
-- **웹페이지 컨텍스트**: 현재 탭의 URL과 제목을 자동으로 컨텍스트에 포함
+- **웹페이지 컨텍스트**: 현재 탭의 제목·URL(기본)을 컨텍스트에 포함. ⚙ 설정에서 끄거나, 페이지 읽기 권한을 허용해 본문·선택 텍스트까지 포함 가능
+- **권한/질문 요청 처리**: opencode가 도구 실행 권한이나 질문을 요청하면 사이드패널에 카드로 표시해 응답
 - **모델 변경**: 사용자가 모델 선택 가능
 - **MCP/Skill 지원**: OpenCode의 MCP 서버 및 Skill 활용 가능
 - **설정(⚙) 메뉴**: 언어(한국어/English), 실행 환경(WSL/Windows), 프록시, 서버 강제 재시작, 버전 정보·업데이트 확인
@@ -100,7 +101,6 @@ Chrome Extension을 통해 OpenCode를 사이드패널에서 사용할 수 있�
 opencode-chrome-ext/
 ├── manifest.json              # Chrome Extension Manifest V3
 ├── background.js              # Service Worker (핵심 로직)
-├── content.js                 # 콘텐츠 스크립트
 ├── lib/
 │   └── part-router.mjs        # 메시지 파트(SSE) 라우팅 로직
 ├── sidepanel/
