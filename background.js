@@ -1128,6 +1128,25 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onP
 }
 
 /**
+ * 서버의 세션 실행을 중단한다 (POST /session/{id}/abort).
+ * 로컬 SSE만 끊으면 서버에서는 hang된 tool이 남아 세션이 계속 busy라
+ * 이후 프롬프트가 큐에서 대기만 한다. abort는 실행 중 tool을 종료하고 대기 큐도 비운다(실측).
+ */
+async function abortServerSession(port, sessionId) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}/abort`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(3000)
+    });
+    debugLog('INFO', `Server session abort - sessionId=${sessionId}, status=${res.status}`);
+    return res.ok;
+  } catch (e) {
+    debugLog('WARN', `Server session abort failed - sessionId=${sessionId}, error=${e.message}`);
+    return false;
+  }
+}
+
+/**
  * 세션의 마지막 assistant 메시지를 REST로 조회해 텍스트 파트를 추출
  * SSE에서 message.part.* 이벤트를 놓쳤을 때 (idle/timeout 시 buffer가 빈 경우) 안전망으로 사용
  */
@@ -1143,6 +1162,8 @@ async function fetchFallbackContent(port, sessionId) {
 
     const parts = last.parts || [];
     const partTypes = parts.map(p => p.type);
+    // tool이 pending/running으로 남아 있으면 서버가 도구 실행에서 멈춘 것 (실측: state.status)
+    const hasUnfinishedTool = parts.some(p => p.type === 'tool' && ['pending', 'running'].includes(p.state?.status));
     const content = parts
       .filter(p => p.type === 'text' && p.text)
       .map(p => p.text)
@@ -1150,7 +1171,7 @@ async function fetchFallbackContent(port, sessionId) {
 
     const e = last.info?.error;
     const errorMessage = e?.data?.message || e?.message || e?.name || null;
-    return { content, partTypes, lastMessageId: last.info?.id || null, errorMessage };
+    return { content, partTypes, lastMessageId: last.info?.id || null, errorMessage, hasUnfinishedTool };
   } catch (e) {
     return { content: '', partTypes: [], lastMessageId: null, error: e.message };
   }
@@ -1247,9 +1268,13 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart) {
               finalContent = fallback.content;
               errMsg = null;
             } else {
-              debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}`);
+              debugLog('INFO', `REST fallback found no text parts - sessionId=${sessionId}, lastMessageId=${fallback.lastMessageId || 'none'}, partTypes=${JSON.stringify(fallback.partTypes)}, unfinishedTool=${!!fallback.hasUnfinishedTool}`);
+              if (fallback.hasUnfinishedTool) errMsg = '도구 실행이 멈춰 세션을 중단했습니다. 같은 문제가 반복되면 /new로 새 세션을 시작하거나 ⚙에서 서버를 재시작하세요.';
             }
           }
+          // 타임아웃 = 180초간 이벤트 없음. 서버에 busy 세션이 남지 않도록 항상 abort한다
+          // (이미 idle인 세션에는 무해). 안 하면 다음 프롬프트가 큐에서 영원히 대기한다.
+          await abortServerSession(port, sessionId);
           onComplete(finalContent, errMsg);
         }
       }, 180000);
@@ -1640,6 +1665,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ctrl.abort();
             eventSources.delete(message.sessionId);
           }
+          // 로컬 SSE만 끊으면 서버 tool이 계속 돌아 세션이 busy로 남는다 → 서버도 중단
+          const abortPort = sessions.get(message.sessionId)?.port ?? serverState.port;
+          if (abortPort) await abortServerSession(abortPort, message.sessionId);
           sendResponse({ success: true });
           break;
         }
