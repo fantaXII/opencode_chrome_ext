@@ -1475,6 +1475,7 @@ button, select, input, textarea {
 }
 
 .agent-model-row {
+  position: relative;
   display: flex;
   gap: 6px;
   min-width: 0;
@@ -1532,10 +1533,15 @@ button, select, input, textarea {
   opacity: 1;
 }
 
+.model-menu {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+}
+
 .model-select {
   appearance: none;
   -webkit-appearance: none;
-  flex: 0 1 auto;
   min-width: 0;
   max-width: 180px;
   height: 28px;
@@ -1545,9 +1551,38 @@ button, select, input, textarea {
   border: 0;
   border-radius: var(--radius-pill);
   box-shadow: var(--shadow-s);
+  font: inherit;
   font-size: 12px;
-  text-overflow: ellipsis;
   cursor: pointer;
+}
+
+.model-select > span {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 입력 영역 위로 열리는 모델 목록. 칩 줄(.agent-model-row)을 기준으로 한다 */
+.model-dropdown {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 200;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-pop);
+}
+
+.model-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .model-select:hover {
@@ -1863,19 +1898,148 @@ button, select, input, textarea {
   margin: 0 0 2px;
 }
 
-.model-picker-group {
+/* 모델 목록 (헤더 드롭다운·/model 피커 공용): 최근 사용은 펼침, 제공자는 접힘 */
+.model-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
-.model-picker-provider {
+.model-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.model-section-title {
   font-size: 10.5px;
   font-weight: 700;
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  padding: 0 2px;
+  padding: 6px 10px 4px;
+}
+
+.model-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.model-item:hover,
+.model-item:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.model-item.current {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.model-item-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-item-sub {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-item-check {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.model-provider > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.model-provider > summary::-webkit-details-marker {
+  display: none;
+}
+
+.model-provider > summary::before {
+  content: '';
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  background: var(--icon-chevron) no-repeat center / 12px;
+  transform: rotate(-90deg);
+  transition: transform 0.15s;
+}
+
+.model-provider[open] > summary::before {
+  transform: none;
+}
+
+.model-provider > summary:hover,
+.model-provider > summary:focus-visible {
+  outline: none;
+  background: var(--bg-tertiary);
+}
+
+.model-provider-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-provider-active {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.model-provider-count {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.model-provider-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 6px 20px;
 }
 
 .model-picker-btn {

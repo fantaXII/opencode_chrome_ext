@@ -32,6 +32,8 @@ I18N.ready.then(function() {
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
   const modelSelect = document.getElementById('model-select');
+  const modelSelectLabel = document.getElementById('model-select-label');
+  const modelDropdown = document.getElementById('model-dropdown');
   const workingFolderWrapper = document.getElementById('working-folder-wrapper');
   const folderIcon = document.getElementById('folder-icon');
   const workingFolderDisplay = document.getElementById('working-folder-display');
@@ -69,6 +71,8 @@ I18N.ready.then(function() {
   let isLoading = false;
   let availableModels = [];
   let selectedModel = null;
+  const RECENT_MODELS_MAX = 5;
+  let recentModels = []; // [{ providerId, modelName }] 최신 순, chrome.storage.local.recentModels
   let mcpServers = {};
   let commandCatalog = [
     { id: 'local.help',  slash: '/help',  title: 'Help',        description: t('사용 가능한 커맨드 목록 표시'), hasArg: false },
@@ -416,70 +420,199 @@ I18N.ready.then(function() {
       console.log('[loadModels] get-models result:', result);
       if (result.success && result.models) {
         availableModels = result.models;
-        updateModelSelect();
+        try {
+          const v = await chrome.storage.local.get('recentModels');
+          recentModels = Array.isArray(v.recentModels) ? v.recentModels : [];
+        } catch { recentModels = []; }
 
         const { model } = await sendMessageToBackground('get-current-model');
         console.log('[loadModels] get-current-model result:', model);
-        if (model) {
-          for (const option of modelSelect.options) {
-            if (!option.value) continue;
-            try {
-              const info = JSON.parse(option.value);
-              if (info.providerId === model.providerID && info.modelName === model.modelID) {
-                modelSelect.value = option.value;
-                selectedModel = info;
-                console.log('[loadModels] model selected:', modelSelect.value);
-                break;
-              }
-            } catch {}
-          }
+        const found = model && lookupModel(model.providerID, model.modelID);
+        if (found) {
+          selectedModel = { providerId: found.providerId, modelName: found.modelId };
+          // 최근 목록이 비어 있으면 현재 모델로 시작한다
+          if (!recentModels.length) rememberRecentModel(found.providerId, found.modelId);
         } else {
           console.log('[loadModels] no model found in storage');
         }
+        updateModelButton();
       }
     } catch (error) {
       console.error('모델 로드 실패:', error);
     }
   }
 
-  function updateModelSelect() {
-    modelSelect.innerHTML = `<option value="">${t('모델 선택')}</option>`;
-    
-    availableModels.forEach(provider => {
-      const optgroup = document.createElement('optgroup');
-      optgroup.label = provider.name || provider.id;
-      
-      const models = Array.isArray(provider.models)
-        ? provider.models
-        : Object.entries(provider.models || {}).map(([id, m]) => ({ id, ...(typeof m === 'object' ? m : {}) }));
-
-      models.forEach(model => {
-        const option = document.createElement('option');
-        option.value = JSON.stringify({
-          providerId: provider.id,
-          modelName: model.id || model.name
-        });
-        option.textContent = model.name || model.id;
-        optgroup.appendChild(option);
-      });
-      
-      modelSelect.appendChild(optgroup);
-    });
+  function providerModels(provider) {
+    return Array.isArray(provider.models)
+      ? provider.models
+      : Object.entries(provider.models || {}).map(([id, m]) => ({ id, ...(typeof m === 'object' ? m : {}) }));
   }
 
-  modelSelect.addEventListener('change', async (e) => {
-    if (!e.target.value) return;
-    
-    const modelInfo = JSON.parse(e.target.value);
-    selectedModel = modelInfo;
-    
-    try {
-      await sendMessageToBackground('set-model', {
-        providerId: modelInfo.providerId,
-        modelName: modelInfo.modelName
-      });
-    } catch (error) {
-      console.error('모델 변경 실패:', error);
+  // availableModels에서 모델을 찾아 표시용 정보를 돌려준다(없으면 null)
+  function lookupModel(providerId, modelId) {
+    const provider = availableModels.find(p => p.id === providerId);
+    if (!provider) return null;
+    const m = providerModels(provider).find(x => (x.id || x.name) === modelId);
+    if (!m) return null;
+    return {
+      providerId,
+      providerName: provider.name || provider.id,
+      modelId,
+      modelName: m.name || m.id,
+    };
+  }
+
+  function isCurrentModel(providerId, modelId) {
+    return !!selectedModel && selectedModel.providerId === providerId && selectedModel.modelName === modelId;
+  }
+
+  function rememberRecentModel(providerId, modelName) {
+    recentModels = [{ providerId, modelName },
+      ...recentModels.filter(r => !(r.providerId === providerId && r.modelName === modelName))]
+      .slice(0, RECENT_MODELS_MAX);
+    chrome.storage.local.set({ recentModels }).catch(() => {});
+  }
+
+  function updateModelButton() {
+    const info = selectedModel && lookupModel(selectedModel.providerId, selectedModel.modelName);
+    modelSelectLabel.textContent = info ? info.modelName : t('모델 선택');
+    modelSelect.title = info ? `${info.providerName} / ${info.modelName}` : '';
+  }
+
+  // 모델 선택 공통 처리: 서버 반영 + 상태/버튼/최근 목록 갱신
+  async function applyModel(providerId, modelId) {
+    await sendMessageToBackground('set-model', { providerId, modelName: modelId });
+    selectedModel = { providerId, modelName: modelId };
+    rememberRecentModel(providerId, modelId);
+    updateModelButton();
+  }
+
+  // 최근 모델은 펼쳐서, 나머지는 provider별로 접어서 보여주는 목록.
+  // 헤더 드롭다운과 /model 피커가 같이 쓴다.
+  function buildModelList(onPick) {
+    const root = document.createElement('div');
+    root.className = 'model-list';
+
+    const makeItem = (providerId, modelId, label, sub) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const current = isCurrentModel(providerId, modelId);
+      btn.className = 'model-item' + (current ? ' current' : '');
+      const name = document.createElement('span');
+      name.className = 'model-item-name';
+      name.textContent = label;
+      btn.appendChild(name);
+      if (sub) {
+        const s = document.createElement('span');
+        s.className = 'model-item-sub';
+        s.textContent = sub;
+        btn.appendChild(s);
+      }
+      if (current) {
+        const check = document.createElement('span');
+        check.className = 'model-item-check';
+        check.textContent = '✓';
+        btn.appendChild(check);
+      }
+      btn.addEventListener('click', () => onPick(providerId, modelId, label));
+      return btn;
+    };
+
+    const recent = recentModels
+      .map(r => lookupModel(r.providerId, r.modelName))
+      .filter(Boolean);
+    if (recent.length) {
+      const sec = document.createElement('div');
+      sec.className = 'model-section';
+      const h = document.createElement('div');
+      h.className = 'model-section-title';
+      h.textContent = t('최근 사용');
+      sec.appendChild(h);
+      recent.forEach(r => sec.appendChild(makeItem(r.providerId, r.modelId, r.modelName, r.providerName)));
+      root.appendChild(sec);
+    }
+
+    const providersTitle = document.createElement('div');
+    providersTitle.className = 'model-section-title';
+    providersTitle.textContent = t('제공자');
+    root.appendChild(providersTitle);
+
+    availableModels.forEach(provider => {
+      const models = providerModels(provider);
+      if (!models.length) return;
+      const details = document.createElement('details');
+      details.className = 'model-provider';
+      const summary = document.createElement('summary');
+      const pname = document.createElement('span');
+      pname.className = 'model-provider-name';
+      pname.textContent = provider.name || provider.id;
+      const count = document.createElement('span');
+      count.className = 'model-provider-count';
+      count.textContent = String(models.length);
+      summary.appendChild(pname);
+      if (selectedModel?.providerId === provider.id) {
+        const dot = document.createElement('span');
+        dot.className = 'model-provider-active';
+        dot.setAttribute('aria-hidden', 'true');
+        summary.appendChild(dot);
+      }
+      summary.appendChild(count);
+      details.appendChild(summary);
+
+      const body = document.createElement('div');
+      body.className = 'model-provider-body';
+      models.forEach(m => body.appendChild(makeItem(provider.id, m.id || m.name, m.name || m.id)));
+      details.appendChild(body);
+      root.appendChild(details);
+    });
+
+    return root;
+  }
+
+  function closeModelDropdown() {
+    modelDropdown.classList.add('hidden');
+    modelSelect.setAttribute('aria-expanded', 'false');
+  }
+
+  function openModelDropdown() {
+    modelDropdown.innerHTML = '';
+    if (!availableModels.length) {
+      const empty = document.createElement('div');
+      empty.className = 'model-empty';
+      empty.textContent = t('모델 목록을 불러오지 못했습니다. 서버 연결 상태를 확인하세요.');
+      modelDropdown.appendChild(empty);
+    } else {
+      modelDropdown.appendChild(buildModelList(async (providerId, modelId) => {
+        closeModelDropdown();
+        try {
+          await applyModel(providerId, modelId);
+        } catch (error) {
+          console.error('모델 변경 실패:', error);
+          addErrorMessage(t('모델 변경 실패: {error}', { error: t(error.message) }));
+        }
+      }));
+    }
+    modelDropdown.classList.remove('hidden');
+    modelSelect.setAttribute('aria-expanded', 'true');
+    modelDropdown.querySelector('.model-item.current')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  modelSelect.addEventListener('click', () => {
+    if (modelDropdown.classList.contains('hidden')) openModelDropdown();
+    else closeModelDropdown();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!modelDropdown.classList.contains('hidden') &&
+        !modelSelect.contains(e.target) && !modelDropdown.contains(e.target)) {
+      closeModelDropdown();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modelDropdown.classList.contains('hidden')) {
+      closeModelDropdown();
+      modelSelect.focus();
     }
   });
 
@@ -729,61 +862,15 @@ I18N.ready.then(function() {
     title.textContent = t('모델을 선택하세요:');
     picker.appendChild(title);
 
-    availableModels.forEach(provider => {
-      const models = Array.isArray(provider.models)
-        ? provider.models
-        : Object.entries(provider.models || {}).map(([id, m]) => ({ id, ...(typeof m === 'object' ? m : {}) }));
-      if (!models.length) return;
-
-      const group = document.createElement('div');
-      group.className = 'model-picker-group';
-
-      const providerLabel = document.createElement('span');
-      providerLabel.className = 'model-picker-provider';
-      providerLabel.textContent = provider.name || provider.id;
-      group.appendChild(providerLabel);
-
-      models.forEach(model => {
-        const providerId = provider.id;
-        const modelId = model.id || model.name;
-        const modelName = model.name || model.id;
-        const isCurrent = selectedModel &&
-          selectedModel.providerId === providerId &&
-          selectedModel.modelName === modelId;
-
-        const btn = document.createElement('button');
-        btn.className = 'model-picker-btn' + (isCurrent ? ' current' : '');
-        btn.textContent = modelName + (isCurrent ? ' ✓' : '');
-        btn.dataset.provider = providerId;
-        btn.dataset.model = modelId;
-        btn.dataset.name = modelName;
-
-        btn.addEventListener('click', async () => {
-          try {
-            await sendMessageToBackground('set-model', { providerId, modelName: modelId });
-            selectedModel = { providerId, modelName: modelId };
-            for (const option of modelSelect.options) {
-              if (!option.value) continue;
-              try {
-                const info = JSON.parse(option.value);
-                if (info.providerId === providerId && info.modelName === modelId) {
-                  modelSelect.value = option.value;
-                  break;
-                }
-              } catch {}
-            }
-            messageDiv.remove();
-            addBotMessage(t('모델이 변경되었습니다: {name}', { name: modelName }));
-          } catch (e) {
-            addErrorMessage(t('모델 변경 실패: {error}', { error: t(e.message) }));
-          }
-        });
-
-        group.appendChild(btn);
-      });
-
-      picker.appendChild(group);
-    });
+    picker.appendChild(buildModelList(async (providerId, modelId, modelName) => {
+      try {
+        await applyModel(providerId, modelId);
+        messageDiv.remove();
+        addBotMessage(t('모델이 변경되었습니다: {name}', { name: modelName }));
+      } catch (e) {
+        addErrorMessage(t('모델 변경 실패: {error}', { error: t(e.message) }));
+      }
+    }));
 
     content.appendChild(picker);
     messageDiv.appendChild(avatar);
@@ -852,19 +939,8 @@ I18N.ready.then(function() {
       const found = findModelByName(args);
       if (!found) { addBotMessage(t('모델을 찾을 수 없습니다: {name}', { name: args })); sendBtn.disabled = false; return; }
       try {
-        await sendMessageToBackground('set-model', { providerId: found.providerID, modelName: found.modelID });
+        await applyModel(found.providerID, found.modelID);
         addBotMessage(t('모델이 변경되었습니다: {name}', { name: found.modelID }));
-        for (const option of modelSelect.options) {
-          if (!option.value) continue;
-          try {
-            const info = JSON.parse(option.value);
-            if (info.providerId === found.providerID && info.modelName === found.modelID) {
-              modelSelect.value = option.value;
-              selectedModel = info;
-              break;
-            }
-          } catch {}
-        }
       } catch (e) {
         addErrorMessage(t('모델 변경 실패: {error}', { error: t(e.message) }));
       } finally {
@@ -1069,6 +1145,7 @@ I18N.ready.then(function() {
     const isConnecting = status === 'connecting';
     mcpBtn.disabled = isConnecting;
     settingsBtn.disabled = isConnecting;
+    if (status !== 'connected') closeModelDropdown();
     if (isConnecting) {
       mcpDropdown.classList.add('hidden');
       settingsDropdown.classList.add('hidden');
@@ -1455,7 +1532,8 @@ I18N.ready.then(function() {
     updateConnectionStatus(connectionStatus);
     updateAgentBar();
     updateWorkingFolderDisplay(currentWorkingDir || defaultWorkingDir, !currentWorkingDir);
-    if (modelSelect.options[0]?.value === '') modelSelect.options[0].textContent = t('모델 선택');
+    updateModelButton();
+    if (!modelDropdown.classList.contains('hidden')) openModelDropdown();
     if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
     renderSettingsDropdown();
   }
