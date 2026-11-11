@@ -102,7 +102,7 @@ async function build() {
       });
 
     // GitHub 배포용 (native-host 포함)
-    const bytes1 = await createZip(zipPath, '**/*', { cwd: distDir });
+    const bytes1 = await createZip(zipPath, '**/*', { cwd: distDir, ignore: [zipName] });
     console.log(`   ✓ Created: ${zipName} (${bytes1} bytes)`);
 
     // Chrome Web Store용 (native-host 제외, key 필드 제거)
@@ -116,7 +116,7 @@ async function build() {
       output.on('close', () => resolve(archive.pointer()));
       archive.on('error', reject);
       archive.pipe(output);
-      archive.glob('**/*', { cwd: distDir, ignore: ['native-host/**', zipName, '*.exe', 'manifest.json'] });
+      archive.glob('**/*', { cwd: distDir, ignore: ['native-host/**', zipName, webstoreZipName, '*.exe', 'manifest.json'] });
       archive.append(JSON.stringify(webstoreManifest, null, 2), { name: 'manifest.json' });
       archive.finalize();
     });
