@@ -57,12 +57,8 @@
     "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data:; media-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
   },
   "commands": {
-    "toggle-side-panel": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+O",
-        "mac": "Command+Shift+O"
-      },
-      "description": "OpenCode 사이드패널 토글"
+    "_execute_action": {
+      "description": "__MSG_command_open_panel__"
     }
   }
 }

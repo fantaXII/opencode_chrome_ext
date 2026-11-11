@@ -6,5 +6,9 @@
   "extension_description": {
     "message": "Chrome extension to use OpenCode in the side panel",
     "description": "Extension description"
+  },
+  "command_open_panel": {
+    "message": "Open the OpenCode side panel",
+    "description": "Shortcut description"
   }
 }
