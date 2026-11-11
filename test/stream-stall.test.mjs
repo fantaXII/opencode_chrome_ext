@@ -165,6 +165,49 @@ test('작업 폴더를 지정한 상태에서 SSE가 재연결돼도 진행 중�
   assert.equal(complete().content, 'part1 part2', '재연결 직후 응답이 잘리면 안 된다');
 });
 
+test('하위 에이전트(task)가 오래 일하면 진행 상황이 task 카드로 전달된다', async (t) => {
+  const { server, bg, forSession, complete, done } = await setup();
+  t.after(done);
+  const CHILD = 'ses_child';
+  const task = (status, metadata) => ({ type: 'message.part.updated', properties: { part: {
+    id: 'prt_task', sessionID: SID, messageID: 'msg_a', type: 'tool', tool: 'task',
+    state: { status, input: { subagent_type: 'explore', description: 'Extract pricing' }, ...(metadata && { metadata }) }
+  } } });
+  const child = (part) => ({ type: 'message.part.updated', properties: { part: { sessionID: CHILD, messageID: 'msg_c', ...part } } });
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(async () => {
+      startAnswering(server);
+      server.emit(task('running'));
+      server.emit({ type: 'session.created', properties: { info: { id: CHILD, parentID: SID, agent: 'explore', title: 'Extract pricing (@explore subagent)' } } });
+      server.emit(task('running', { parentSessionId: SID, sessionId: CHILD }));
+      // 하위 에이전트가 무응답 제한(300ms)보다 오래 일한다: 단계·도구가 이어진다
+      for (let i = 1; i <= 4; i++) {
+        await sleep(IDLE_MS / 2);
+        server.emit(child({ id: `step${i}`, type: 'step-start' }));
+        server.emit(child({ id: `tool${i}`, type: 'tool', tool: 'bash', state: { status: 'running' } }));
+        server.emit(child({ id: `tool${i}`, type: 'tool', tool: 'bash', state: { status: 'completed' } }));
+      }
+      server.emit(task('completed', { parentSessionId: SID, sessionId: CHILD }));
+      server.emit(ev.delta(SID, 'done'));
+      server.emit(ev.idle(SID));
+    }, 20);
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => complete(), IDLE_MS * 10, 'message-complete');
+  assert.equal(complete().error, undefined, '하위 에이전트가 일하는 동안 타임아웃되면 안 된다');
+
+  const parts = forSession('message-part').map((m) => m.part);
+  const taskCardAt = parts.findIndex((p) => p.kind === 'tool' && p.id === 'prt_task');
+  const progress = parts.filter((p) => p.kind === 'subagent');
+  assert.ok(taskCardAt >= 0);
+  assert.ok(parts.findIndex((p) => p.kind === 'subagent') > taskCardAt, '카드가 먼저 그려진 뒤에 진행 상황이 온다');
+  assert.ok(progress.every((p) => p.toolId === 'prt_task' && p.agent === 'explore'));
+  assert.equal(progress.at(-1).steps, 4);
+  assert.ok(progress.some((p) => p.activity?.type === 'tool' && p.activity.tool === 'bash'));
+});
+
 test('정상 흐름: 느리지만 계속 delta가 오면 무응답 제한을 넘겨도 완료된다', async (t) => {
   const { server, bg, complete, done } = await setup();
   t.after(done);

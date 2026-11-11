@@ -10,6 +10,7 @@
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit, PENDING_MAX_AGE_MS } from './lib/sw-resilience.mjs';
+import { createSubagentTracker } from './lib/subagent-progress.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -1397,6 +1398,9 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     // 이 프롬프트에 속한 세션들: 본 세션 + task 도구가 만든 하위(subagent) 세션.
     // 하위 세션의 이벤트는 화면에 그리지 않지만, 진행 신호(타임아웃 리셋)와 권한/질문 요청은 처리해야 한다.
     const relatedSessions = new Set([sessionId]);
+    // 하위 세션 진행 상황(단계 수·현재 활동)을 task 도구 카드에 붙여 보여 준다. 안 보이면 수 분간 멈춘 것처럼 보인다.
+    const subagents = createSubagentTracker({ rootSessionId: sessionId });
+    const emitSubagent = (progress) => { if (progress) onPart?.(progress); };
     // 사용자 응답을 기다리는 권한/질문 요청 id. 남아 있는 동안에는 무응답 타임아웃을 걸지 않는다.
     const pendingAsks = new Set();
 
@@ -1639,7 +1643,10 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
               // 하위(subagent) 세션 추적: task 도구가 만든 세션은 parentID가 관련 세션을 가리킨다.
               if (evt.type === 'session.created' || evt.type === 'session.updated') {
                 const sInfo = evt.properties?.info;
-                if (sInfo?.id && sInfo.parentID && relatedSessions.has(sInfo.parentID)) relatedSessions.add(sInfo.id);
+                if (sInfo?.id && sInfo.parentID && relatedSessions.has(sInfo.parentID)) {
+                  relatedSessions.add(sInfo.id);
+                  emitSubagent(subagents.onSessionInfo(sInfo));
+                }
               }
 
               // 세션 ID 필터
@@ -1656,6 +1663,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                 const childStatus = evt.type === 'session.status' ? evt.properties?.status : null;
                 if (childStatus?.type === 'retry') { noteRetry(childStatus, evtSession); continue; }
                 if (childStatus?.type === 'busy' || evt.type === 'message.part.delta') clearRetry();
+                if (evt.type === 'message.updated') subagents.onChildMessage(evt.properties?.info);
+                if (evt.type === 'message.part.updated') emitSubagent(subagents.onChildPart(evt.properties?.part));
                 resetTimeout();
                 continue;
               }
@@ -1690,6 +1699,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                   } else if (routed?.action === 'debug') {
                     debugLog('INFO', `Non-text part for assistant message - sessionId=${sessionId}, messageId=${assistantMessageId}, partId=${part.id}, partType=${routed.partType}`);
                   }
+                  // 카드(routed.part)가 먼저 그려진 뒤에 진행 상황을 붙인다
+                  if (part?.sessionID === sessionId) emitSubagent(subagents.onRootPart(part));
                   break;
                 }
                 case 'message.part.delta': {

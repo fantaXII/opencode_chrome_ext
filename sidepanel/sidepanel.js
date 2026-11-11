@@ -2498,6 +2498,10 @@ I18N.ready.then(function() {
           <span class="tool-target"></span>
           <span class="tool-status"></span>
         </div>
+        <div class="tool-subagent hidden">
+          <span class="tool-subagent-text"></span>
+          <span class="tool-subagent-elapsed"></span>
+        </div>
         <div class="tool-card-body"></div>
       `;
       makeCollapsible(el, '.tool-card-header');
@@ -2539,11 +2543,54 @@ I18N.ready.then(function() {
         bodyParts.push(`${t('결과:\n')}${typeof block.output === 'string' ? block.output : JSON.stringify(block.output, null, 2)}`);
       }
       el.querySelector('.tool-card-body').textContent = bodyParts.join('\n\n').slice(0, 2000);
+      updateSubagentLine(el, block);
       return;
     }
     // reasoning
     el.querySelector('.reasoning-block-body').textContent = block.text;
   }
+
+  // task 카드의 하위 에이전트 진행 줄: "explore · bash 실행 중 · 12단계 · 3:42"
+  // 하위 에이전트는 수 분간 일할 수 있는데, 이 줄이 없으면 카드가 "실행 중…"으로만 남아 멈춘 것처럼 보인다.
+  function subagentActivityLabel(activity) {
+    if (!activity) return '';
+    if (activity.type === 'tool') return t('{tool} 실행 중', { tool: activity.tool });
+    if (activity.type === 'writing') return t('응답 작성 중');
+    return t('생각 중');
+  }
+
+  function formatElapsed(ms) {
+    const sec = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  }
+
+  function updateSubagentLine(el, block) {
+    const line = el.querySelector('.tool-subagent');
+    const sub = block.subagent;
+    if (!sub) { line.classList.add('hidden'); return; }
+    line.classList.remove('hidden');
+    const running = block.status === 'running' || block.status === 'pending';
+    const parts = [sub.agent || t('하위 에이전트')];
+    if (running && sub.activity) parts.push(subagentActivityLabel(sub.activity));
+    if (sub.steps) parts.push(t('{n}단계', { n: sub.steps }));
+    el.querySelector('.tool-subagent-text').textContent = parts.join(' · ');
+    const elapsed = el.querySelector('.tool-subagent-elapsed');
+    elapsed.dataset.started = String(sub.startedAt || Date.now());
+    // 끝난 카드는 경과 시간을 멈춘다(끝난 시점을 한 번만 기록)
+    if (!running && !elapsed.dataset.ended) elapsed.dataset.ended = String(Date.now());
+    if (running) delete elapsed.dataset.ended;
+    tickSubagentElapsed(elapsed);
+  }
+
+  function tickSubagentElapsed(elapsed) {
+    const end = Number(elapsed.dataset.ended) || Date.now();
+    elapsed.textContent = formatElapsed(end - Number(elapsed.dataset.started));
+  }
+
+  // 진행 중인 카드의 경과 시간만 1초마다 갱신한다(하위 에이전트가 긴 bash를 돌리면 이벤트가 한동안 없다)
+  setInterval(() => {
+    document.querySelectorAll('.tool-subagent:not(.hidden) .tool-subagent-elapsed:not([data-ended])').forEach(tickSubagentElapsed);
+  }, 1000);
 
   function renderBlocks(blocks, container) {
     blocks.forEach((block, i) => {
@@ -2632,6 +2679,8 @@ I18N.ready.then(function() {
         upsertReasoningStart(activeBlocks, part.id);
       } else if (part.kind === 'reasoning-delta') {
         appendReasoningDelta(activeBlocks, part.id, part.delta);
+      } else if (part.kind === 'subagent') {
+        setSubagentProgress(activeBlocks, part);
       }
       blockRenderScheduler.request();
     } else if (message.action === 'server-runtime-updated') {

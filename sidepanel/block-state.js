@@ -57,6 +57,20 @@ function appendReasoningDelta(blocks, id, delta) {
   return blocks;
 }
 
+// task 도구가 띄운 하위 에이전트의 진행 상황을 해당 tool 블록에 붙인다(background의 kind:'subagent').
+// 카드가 아직 없으면 무시한다 — background는 카드를 그린 뒤에 보내고, 이후 변화 때마다 다시 보낸다.
+function setSubagentProgress(blocks, progress) {
+  const block = blocks.find((b) => b.type === 'tool' && b.id === progress.toolId);
+  if (!block) return blocks;
+  block.subagent = {
+    agent: progress.agent ?? block.subagent?.agent ?? null,
+    steps: progress.steps ?? 0,
+    activity: progress.activity ?? null,
+    startedAt: block.subagent?.startedAt ?? progress.startedAt,
+  };
+  return blocks;
+}
+
 function finalizeRunning(blocks, finalStatus) {
   for (const b of blocks) {
     if (b.type === 'tool' && (b.status === 'pending' || b.status === 'running')) {
@@ -74,5 +88,6 @@ if (typeof module !== 'undefined') {
     upsertReasoningStart,
     appendReasoningDelta,
     finalizeRunning,
+    setSubagentProgress,
   };
 }
