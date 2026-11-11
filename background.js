@@ -861,10 +861,43 @@ function runtimeFromDirectory(directory) {
   return directory.startsWith('/') ? 'wsl' : null;
 }
 
+/**
+ * cwd 프로브가 실패하거나 SW가 재시작돼 실행 환경을 모를 때의 폴백.
+ * host의 server-info가 포트 리스너가 있는 쪽(windows/wsl)을 알려준다. powershell/wsl.exe를
+ * 실행해 느리므로 백그라운드로만 호출하고, 동시에 여러 번 돌지 않게 한다.
+ * 프로브 등으로 이미 확정된 값은 덮어쓰지 않는다.
+ */
+let _runtimeDetect = null;
+function detectRuntimeFromHost(port) {
+  if (_runtimeDetect) return _runtimeDetect;
+  _runtimeDetect = (async () => {
+    try {
+      const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port });
+      const side = info?.status === 'success' ? info.listener?.side : null;
+      const runtime = side === 'wsl' || side === 'windows' ? side : null;
+      if (!runtime) {
+        debugLog('WARN', `detectRuntimeFromHost: listener side unknown - port=${port}`);
+        return;
+      }
+      if (serverState.runtime || serverState.port !== port) return; // 그 사이 확정/변경됨
+      serverState.runtime = runtime;
+      chrome.storage.local.set({ serverIsWSL: runtime === 'wsl' }).catch(() => {});
+      chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime }).catch(() => {});
+      debugLog('INFO', `detectRuntimeFromHost: server runtime detected via host - ${runtime}`);
+    } catch (e) {
+      debugLog('WARN', `detectRuntimeFromHost: failed - ${e.message}`);
+    } finally {
+      _runtimeDetect = null;
+    }
+  })();
+  return _runtimeDetect;
+}
+
 async function refreshServerCwd(port) {
   const directory = await probeServerDirectory(port);
   if (!directory) {
     debugLog('WARN', `refreshServerCwd: probe failed or timed out - port=${port}`);
+    if (!serverState.runtime) detectRuntimeFromHost(port);
     return;
   }
   // 서버가 보고한 cwd 형식으로 실제 실행 환경을 확정한다(C:\ → Windows, / → WSL).
@@ -2006,6 +2039,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // 설정 화면용: 저장된 우선순위 + 마지막으로 확인된 실행 환경(WSL 여부)
         case 'get-runtime-info': {
+          // SW 재시작 등으로 환경을 모르면 host에 물어 확정한다(끝나면 server-runtime-updated로 배지 갱신).
+          if (serverState.available && serverState.port && !serverState.runtime) detectRuntimeFromHost(serverState.port);
           const { serverIsWSL } = await chrome.storage.local.get('serverIsWSL');
           sendResponse({
             success: true,
@@ -2110,6 +2145,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (info?.status === 'success') {
               result.managed = info.managed === true;
               result.proxyEnv = info.proxyEnv || null;
+              result.proxyEnvSource = info.proxyEnvSource || null;
+              result.proxyEnvReason = info.proxyEnvReason || null;
             }
           } catch {}
           try {
@@ -2145,8 +2182,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true; // 비동기 응답
-              result.proxyEnvSource = info.proxyEnvSource || null;
-              result.proxyEnvReason = info.proxyEnvReason || null;
 });
 
 // ============================================
