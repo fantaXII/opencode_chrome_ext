@@ -139,6 +139,8 @@
     '응답 완료': 'Answered',
     '요청이 만료되었습니다.': 'This request has expired.',
     '페이지 컨텍스트': 'Page context',
+    '응답 복구에 실패했습니다': 'Failed to recover the response',
+    '메시지 전송 시간 초과 (15s)': 'Message send timed out (15s)',
     '이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.': 'Ask for a summary, explanation or search about this page.',
     '페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.': 'The page changed. This session continues the conversation from the previous page.',
     '보내기': 'Send',
@@ -240,8 +242,26 @@
 
   let lang = 'ko';
 
+  // background가 상태 코드 등을 붙여 보내는 오류 문구('세션 생성 실패: 500')는 사전 키와 정확히 맞지 않으므로
+  // 앞부분 패턴으로 번역한다. $1 = 뒤에 붙은 상세 내용(그대로 둔다).
+  const EN_PATTERNS = [
+    [/^세션 생성 실패: (.*)$/s, 'Failed to create session: $1'],
+    [/^세션 목록 조회 실패: (.*)$/s, 'Failed to list sessions: $1'],
+    [/^메시지 전송 실패: (.*)$/s, 'Failed to send message: $1'],
+    [/^응답 전송 실패: (.*)$/s, 'Failed to send response: $1'],
+    [/^dispose 실패: (.*)$/s, 'Dispose failed: $1'],
+  ];
+
   function t(ko, params) {
-    let s = lang === 'en' && Object.prototype.hasOwnProperty.call(EN, ko) ? EN[ko] : ko;
+    let s = ko;
+    if (lang === 'en') {
+      if (Object.prototype.hasOwnProperty.call(EN, ko)) s = EN[ko];
+      else if (typeof ko === 'string') {
+        for (const [re, en] of EN_PATTERNS) {
+          if (re.test(ko)) { s = ko.replace(re, en); break; }
+        }
+      }
+    }
     if (params) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in params ? params[k] : m));
     return s;
   }
@@ -256,8 +276,9 @@
       el.dataset.i18nKey = el.dataset.i18nKey || el.innerHTML.trim();
       el.innerHTML = t(el.dataset.i18nKey);
     });
-    ['title', 'placeholder'].forEach((attr) => {
-      const data = 'i18n' + attr[0].toUpperCase() + attr.slice(1);
+    ['title', 'placeholder', 'aria-label'].forEach((attr) => {
+      // data-i18n-aria-label → dataset.i18nAriaLabel
+      const data = 'i18n' + attr.split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join('');
       root.querySelectorAll(`[data-i18n-${attr}]`).forEach((el) => {
         const keyName = data + 'Key';
         el.dataset[keyName] = el.dataset[keyName] || el.getAttribute(attr);

@@ -1022,6 +1022,20 @@ async function deleteSession(sessionId) {
  *              페이지를 읽으려면 선택적 호스트 권한(<all_urls>)이 필요하고, 사이드패널 설정에서 사용자가 허용한다.
  */
 const PAGE_CONTEXT_MODES = ['off', 'basic', 'full'];
+
+// 프롬프트 앞에 붙이는 페이지 정보 머리말. sidepanel.js PAGE_CONTEXT_* 패턴과 반드시 같이 고친다.
+const PAGE_CONTEXT_LABELS = {
+  ko: { header: '현재 페이지 정보:', title: '제목:', headings: '제목들:', paragraphs: '내용 요약:', selection: '선택한 텍스트:' },
+  en: { header: 'Current page:', title: 'Title:', headings: 'Headings:', paragraphs: 'Content excerpt:', selection: 'Selected text:' }
+};
+
+async function getUiLang() {
+  try {
+    return (await chrome.storage.local.get('lang')).lang === 'en' ? 'en' : 'ko';
+  } catch {
+    return 'ko';
+  }
+}
 async function getPageContextMode() {
   try {
     const { pageContext } = await chrome.storage.local.get('pageContext');
@@ -1132,25 +1146,28 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onP
     }
     let fullMessage = message;
     if (tabInfo?.url || tabInfo?.pageContent) {
+      // 머리말 언어가 모델의 답변 언어에 영향을 주므로 사이드패널 언어 설정을 따른다.
+      // 형식은 sidepanel.js의 stripPageContext()가 히스토리 복원 때 벗겨내는 패턴과 짝이다(양쪽 언어 모두 인식).
+      const L = (await getUiLang()) === 'en' ? PAGE_CONTEXT_LABELS.en : PAGE_CONTEXT_LABELS.ko;
       let pageContext = '';
       if (tabInfo.url) {
         pageContext += `
 ---
-현재 페이지 정보:
-- 제목: ${tabInfo.title}
+${L.header}
+- ${L.title} ${tabInfo.title}
 - URL: ${tabInfo.url}
 `;
       }
       if (tabInfo.pageContent) {
         const content = tabInfo.pageContent;
         if (content.headings?.length) {
-          pageContext += `제목들:\n${content.headings.join('\n')}\n\n`;
+          pageContext += `${L.headings}\n${content.headings.join('\n')}\n\n`;
         }
         if (content.paragraphs?.length) {
-          pageContext += `내용 요약:\n${content.paragraphs.join('\n')}\n\n`;
+          pageContext += `${L.paragraphs}\n${content.paragraphs.join('\n')}\n\n`;
         }
         if (content.selectedText) {
-          pageContext += `선택한 텍스트:\n${content.selectedText}\n\n`;
+          pageContext += `${L.selection}\n${content.selectedText}\n\n`;
         }
       }
       fullMessage = pageContext + message;

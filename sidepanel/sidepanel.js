@@ -329,8 +329,9 @@ I18N.ready.then(function() {
   // 선택적 제목들/내용 요약/선택한 텍스트 섹션). 실시간 전송 시 addUserMessage는
   // 사용자가 타이핑한 원문만 보여주므로(pageContext는 화면에 노출된 적이 없음),
   // 히스토리 복원 시에도 동일하게 이 프리픽스를 벗겨내 일관성을 맞춘다.
-  const PAGE_CONTEXT_HEADER_RE = /^\n---\n현재 페이지 정보:\n- 제목: .*\n- URL: .*\n/;
-  const PAGE_CONTEXT_SECTION_LABELS = ['제목들:\n', '내용 요약:\n', '선택한 텍스트:\n'];
+  // 머리말은 보낼 때의 언어 설정에 따라 한국어/영어 중 하나다(background.js PAGE_CONTEXT_LABELS와 짝).
+  const PAGE_CONTEXT_HEADER_RE = /^\n---\n(?:현재 페이지 정보:\n- 제목: |Current page:\n- Title: ).*\n- URL: .*\n/;
+  const PAGE_CONTEXT_SECTION_LABELS = ['제목들:\n', '내용 요약:\n', '선택한 텍스트:\n', 'Headings:\n', 'Content excerpt:\n', 'Selected text:\n'];
 
   function stripPageContext(raw) {
     const headerMatch = raw.match(PAGE_CONTEXT_HEADER_RE);
