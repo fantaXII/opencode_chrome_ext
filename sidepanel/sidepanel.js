@@ -1317,6 +1317,7 @@ I18N.ready.then(function() {
       setMcpActionStatus(t('실패: {error}', { error: t(error.message) }), 'error');
     } finally {
       restartBusy = false;
+      invalidateAppliedProxy(); // 재시작하면 서버 프로세스의 프록시 환경변수가 바뀔 수 있다
       // 목록/실행 환경이 바뀌었을 수 있으므로 열려 있는 드롭다운을 다시 그린다
       // (상태 문구는 재렌더 후 복원된다).
       if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
@@ -1428,6 +1429,49 @@ I18N.ready.then(function() {
     renderSettingsDropdown();
   }
 
+  // 서버 프로세스가 실제로 가진 프록시(WSL만 조회 가능). host가 powershell/wsl.exe를 여러 번 띄워 느리므로
+  // 패널 렌더를 막지 않고 백그라운드로 조회한다. null=미조회, 'loading', { env }=조회 결과.
+  let appliedProxyState = null;
+  let appliedProxyGen = 0;
+  let settingsServerPort = null;
+
+  function appliedProxyText() {
+    if (!settingsServerPort) return '';
+    if (appliedProxyState === null || appliedProxyState === 'loading') return t('서버에 적용된 프록시: 확인 중…');
+    const env = appliedProxyState.env;
+    if (!env) return t('서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)');
+    return ['http', 'https', 'noProxy'].some(k => env[k])
+      ? t('서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}', {
+          http: env.http || '-', https: env.https || '-', noProxy: env.noProxy || '-'
+        })
+      : t('서버에 적용된 프록시: 없음');
+  }
+
+  function refreshAppliedProxyLine() {
+    const el = document.getElementById('proxy-applied');
+    if (!el) return;
+    const text = appliedProxyText();
+    el.textContent = text;
+    el.classList.toggle('hidden', !text);
+  }
+
+  function invalidateAppliedProxy() {
+    appliedProxyState = null;
+    appliedProxyGen++;
+  }
+
+  async function loadAppliedProxy() {
+    if (appliedProxyState !== null || !settingsServerPort) return;
+    const gen = ++appliedProxyGen;
+    appliedProxyState = 'loading';
+    refreshAppliedProxyLine();
+    let env = null;
+    try { env = (await sendMessageToBackground('get-server-origin')).proxyEnv || null; } catch {}
+    if (gen !== appliedProxyGen) return; // 그 사이 무효화됨(패널을 다시 열었거나 재시작)
+    appliedProxyState = { env };
+    refreshAppliedProxyLine();
+  }
+
   async function renderSettingsDropdown() {
     let info;
     try {
@@ -1451,18 +1495,7 @@ I18N.ready.then(function() {
       };
     }
     const proxy = proxyDraft || proxyCache;
-    // 서버 프로세스가 실제로 가진 프록시(WSL만 조회 가능). 저장값과 다를 수 있어 따로 보여준다.
-    let appliedProxy = null;
-    if (info.port) {
-      try { appliedProxy = (await sendMessageToBackground('get-server-origin')).proxyEnv || null; } catch {}
-    }
-    const appliedText = !info.port ? ''
-      : !appliedProxy ? t('서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)')
-      : (['http', 'https', 'noProxy'].some(k => appliedProxy[k])
-        ? t('서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}', {
-            http: appliedProxy.http || '-', https: appliedProxy.https || '-', noProxy: appliedProxy.noProxy || '-'
-          })
-        : t('서버에 적용된 프록시: 없음'));
+    settingsServerPort = info.port || null;
     const pref = info.preferredRuntime || 'auto';
     const currentRuntime = info.serverIsWSL === true ? 'wsl' : info.serverIsWSL === false ? 'windows' : null;
     const currentText = !info.port
@@ -1509,7 +1542,7 @@ I18N.ready.then(function() {
         <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
           <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
         </label>
-        ${appliedText ? `<div class="settings-current">${escapeHtml(appliedText)}</div>` : ''}
+        <div id="proxy-applied" class="settings-current"></div>
         <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
         <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
         <div class="settings-buttons">
@@ -1544,6 +1577,10 @@ I18N.ready.then(function() {
     });
 
     document.getElementById('proxy-details')?.addEventListener('toggle', (e) => { proxyOpen = e.target.open; });
+    refreshAppliedProxyLine();
+    // 패널을 그린 뒤 백그라운드로 조회를 시작한다(기다리지 않음). 사용자가 프록시 섹션을 펼칠 때
+    // 아직 끝나지 않았으면 "확인 중…"이 보이고, 끝나면 그 줄만 갱신된다. 이미 조회했으면 무시된다.
+    loadAppliedProxy();
 
     document.getElementById('host-update-btn')?.addEventListener('click', () => {
       hostGuideDismissed = false;
@@ -1639,6 +1676,7 @@ I18N.ready.then(function() {
       await sendMessageToBackground('set-proxy', { proxy: values });
       proxyCache = values;
       proxyDraft = null;
+      invalidateAppliedProxy();
     } catch (e) {
       setMcpActionStatus(t('실패: {error}', { error: t(e.message) }), 'error');
       renderSettingsDropdown();
@@ -1696,6 +1734,7 @@ I18N.ready.then(function() {
       // 저장된 값을 읽는 동안에는 입력칸을 보여주지 않아(=입력 불가) 입력이 덮어써지는 일을 막는다.
       proxyCache = null;
       proxyDraft = null;
+      invalidateAppliedProxy();
       settingsDropdown.innerHTML = `<div class="settings-section"><span class="settings-muted">${t('확인 중…')}</span></div>`;
       renderSettingsDropdown();
     } else {

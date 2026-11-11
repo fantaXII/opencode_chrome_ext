@@ -31,6 +31,7 @@
     // ---- 연결 상태 ----
     '서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)': 'Proxy applied to the server: unavailable (only WSL servers can be inspected)',
     '서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}': 'Proxy applied to the server — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}',
+    '서버에 적용된 프록시: 확인 중…': 'Proxy applied to the server: checking…',
     '서버에 적용된 프록시: 없음': 'Proxy applied to the server: none',
     '로그 보기': 'View log',
     '확장 디버그 로그 표시·복사 (문제 신고 시 첨부)': 'Show and copy the extension debug log (attach when reporting issues)',
