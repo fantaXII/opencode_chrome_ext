@@ -34,9 +34,25 @@ if (extensionId) {
 console.log(`Version      : ${version}`);
 console.log(`Extension ID : ${extensionId}`);
 
+// yarn v1은 자기 설정을 npm_config_* 환경변수로 자식 프로세스에 넘기는데, 이 중 npm이 모르는
+// 이름이 있어 npm이 "Unknown env config" 경고를 낸다. yarn 전용 변수만 걸러서 npm에 넘긴다.
+// (사용자가 환경변수로 준 registry/proxy 같은 유효한 npm_config_*는 그대로 유지한다.)
+const YARN_ONLY_NPM_CONFIG = new Set([
+  'npm_config_argv',
+  'npm_config_ignore_path',
+  'npm_config_version_tag_prefix',
+  'npm_config_version_git_tag',
+  'npm_config_version_git_sign',
+  'npm_config_version_git_message',
+  'npm_config_version_commit_hooks'
+]);
+const npmEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !YARN_ONLY_NPM_CONFIG.has(key.toLowerCase()))
+);
+
 // native-host node_modules 준비 (번들용)
 console.log('\nnative-host npm install...');
-execSync('npm install', { cwd: path.join(ROOT, 'native-host'), stdio: 'inherit' });
+execSync('npm install', { cwd: path.join(ROOT, 'native-host'), stdio: 'inherit', env: npmEnv });
 
 // makensis 가용성 확인
 try {
