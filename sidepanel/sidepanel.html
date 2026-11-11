@@ -10,9 +10,17 @@
   <div class="app-container">
     <header class="header">
       <div class="header-left">
-        <span class="connection-indicator">●</span>
-        <span class="connection-text" id="connection-text">연결 안됨</span>
-        <span class="runtime-badge hidden" id="runtime-badge" title="OpenCode 서버 실행 환경" data-i18n-title></span>
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3"/></svg>
+        </span>
+        <div class="header-titles">
+          <span class="brand-name">OpenCode</span>
+          <span class="header-status">
+            <span class="connection-indicator" aria-hidden="true"></span>
+            <span class="connection-text" id="connection-text">연결 안됨</span>
+            <span class="runtime-badge hidden" id="runtime-badge" title="OpenCode 서버 실행 환경" data-i18n-title></span>
+          </span>
+        </div>
       </div>
       <div class="header-right">
         <div class="mcp-wrapper">
@@ -22,7 +30,7 @@
           <div id="mcp-dropdown" class="mcp-dropdown hidden"></div>
         </div>
         <div class="mcp-wrapper">
-          <button id="settings-btn" class="mcp-btn" title="설정">⚙</button>
+          <button id="settings-btn" class="mcp-btn icon-only" title="설정" aria-label="설정" data-i18n-title><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></button>
           <div id="settings-dropdown" class="mcp-dropdown settings-dropdown hidden"></div>
         </div>
       </div>
@@ -31,12 +39,9 @@
     <div id="messages-container" class="messages-container">
       <div class="welcome-section">
         <div class="welcome-logo">
-          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect width="48" height="48" rx="12" fill="var(--accent)" opacity="0.15"/>
-            <path d="M12 16h24M12 24h16M12 32h20" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/>
-            <circle cx="36" cy="32" r="5" fill="var(--accent)" opacity="0.8"/>
-            <path d="M34 32l1.5 1.5L38 30" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <span class="brand-mark lg" aria-hidden="true">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3"/></svg>
+          </span>
         </div>
         <h2 class="welcome-title">OpenCode</h2>
         <p class="welcome-subtitle" data-i18n>웹 페이지 AI 어시스턴트</p>
@@ -46,20 +51,10 @@
     </div>
     <div class="input-area" id="input-area">
       <div id="attachments-bar" class="attachments-bar hidden"></div>
-      <div class="input-wrapper">
-        <div id="command-dropdown" class="command-dropdown hidden"></div>
-        <button id="attach-btn" class="attach-btn" title="첨부파일" data-i18n-title>+</button>
-        <textarea
-          id="message-input"
-          placeholder="메시지를 입력하세요..." data-i18n-placeholder
-          rows="1"
-        ></textarea>
-        <button id="send-btn" class="send-btn" disabled>↑</button>
-      </div>
       <div class="selectors-wrapper">
         <div class="agent-model-row">
           <div class="agent-bar" id="agent-bar" title="Shift+Tab으로 에이전트 변경" data-i18n-title>
-            <span class="agent-dot" id="agent-dot">●</span>
+            <span class="agent-dot" id="agent-dot" aria-hidden="true"></span>
             <span class="agent-name" id="agent-name">에이전트</span>
             <span class="agent-hint">⇧Tab</span>
           </div>
@@ -68,11 +63,21 @@
           </select>
         </div>
         <div class="working-folder-wrapper" id="working-folder-wrapper">
-          <span class="folder-icon" id="folder-icon">📁</span>
+          <span class="folder-icon" id="folder-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
           <span id="working-folder-display" class="working-folder-display">폴더 없음</span>
           <input id="working-folder-input" class="working-folder-input hidden" type="text" placeholder="/path/to/folder">
-          <button id="working-folder-edit-btn" class="working-folder-edit-btn" title="edit">✎</button>
+          <button id="working-folder-edit-btn" class="working-folder-edit-btn" title="edit" aria-label="edit"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/></svg></button>
         </div>
+      </div>
+      <div class="input-wrapper">
+        <div id="command-dropdown" class="command-dropdown hidden"></div>
+        <button id="attach-btn" class="attach-btn" title="첨부파일" aria-label="첨부파일" data-i18n-title><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        <textarea
+          id="message-input"
+          placeholder="메시지를 입력하세요..." data-i18n-placeholder
+          rows="1"
+        ></textarea>
+        <button id="send-btn" class="send-btn" aria-label="보내기" disabled><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
       </div>
     </div>
   </div>
@@ -133,7 +138,7 @@
       </ol>
 
       <div class="guide-internal-note" data-i18n-html>
-        🏢 <strong>사내 사용자:</strong> <code>config.private.json</code> 파일을 <code>.exe</code>와 같은 폴더에 두고 실행하세요. (proxy/MCP 자동 설정)
+        <strong>사내 사용자:</strong> <code>config.private.json</code> 파일을 <code>.exe</code>와 같은 폴더에 두고 실행하세요. (proxy/MCP 자동 설정)
       </div>
 
       <a id="guide-download-btn" class="guide-download-btn" href="#" target="_blank" data-i18n>⬇ 인스톨러 다운로드</a>

