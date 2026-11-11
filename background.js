@@ -2188,17 +2188,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // 컨텍스트 메뉴 (우클릭 → 선택 텍스트 전송)
 // ============================================
 
-async function createContextMenus() {
-  // 사이드패널 언어 설정(storage.local.lang)을 따른다. 기본은 한국어.
-  let lang = 'ko';
-  try { lang = (await chrome.storage.local.get('lang')).lang === 'en' ? 'en' : 'ko'; } catch {}
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: 'send-to-opencode',
-      title: lang === 'en' ? 'Send to OpenCode' : 'OpenCode로 보내기',
-      contexts: ['selection']
+// onInstalled / onStartup / 언어 변경이 겹쳐 호출될 수 있다. removeAll→create를 병렬로 돌리면
+// removeAll 둘이 먼저 처리된 뒤 create가 두 번 실행되어 "duplicate id" 오류가 나므로 한 번에 하나씩만 실행한다.
+let _contextMenuChain = Promise.resolve();
+
+function createContextMenus() {
+  _contextMenuChain = _contextMenuChain.then(async () => {
+    // 사이드패널 언어 설정(storage.local.lang)을 따른다. 기본은 한국어.
+    let lang = 'ko';
+    try { lang = (await chrome.storage.local.get('lang')).lang === 'en' ? 'en' : 'ko'; } catch {}
+    await new Promise((resolve) => {
+      chrome.contextMenus.removeAll(() => {
+        void chrome.runtime.lastError;
+        chrome.contextMenus.create({
+          id: 'send-to-opencode',
+          title: lang === 'en' ? 'Send to OpenCode' : 'OpenCode로 보내기',
+          contexts: ['selection']
+        }, () => {
+          // lastError를 읽지 않으면 "Unchecked runtime.lastError"가 콘솔에 남는다.
+          const err = chrome.runtime.lastError;
+          if (err) debugLog('WARN', `contextMenus.create: ${err.message}`);
+          resolve();
+        });
+      });
     });
-  });
+  }).catch(() => {});
+  return _contextMenuChain;
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
