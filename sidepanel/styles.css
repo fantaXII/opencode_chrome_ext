@@ -1758,6 +1758,14 @@ button, select, input, textarea {
   display: none;
 }
 
+/* 제공자 재시도 대기 중 (sidepanel.js showRetryStatus) */
+.loading-indicator.retrying {
+  background-color: var(--warn-bg);
+  color: var(--warn);
+  cursor: help;
+  white-space: nowrap;
+}
+
 .spinner {
   width: 14px;
   height: 14px;

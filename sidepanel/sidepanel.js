@@ -44,6 +44,7 @@ I18N.ready.then(function() {
   const header = document.querySelector('.header');
   const connectionText = document.getElementById('connection-text');
   const loadingIndicator = document.getElementById('loading-indicator');
+  const loadingText = document.getElementById('loading-text');
   const attachBtn = document.getElementById('attach-btn');
   const inputArea = document.getElementById('input-area');
   const connectingIndicator = document.getElementById('connecting-indicator');
@@ -2083,7 +2084,37 @@ I18N.ready.then(function() {
       sendBtn.classList.remove('cancel-mode');
       updateSendButtonState();
       loadingIndicator.classList.add('hidden');
+      clearRetryStatus();
     }
+  }
+
+  // 제공자 재시도(레이트 리밋·과부하) 대기 표시. background가 session.status retry를 kind:'retry'로 넘긴다.
+  // 대기 중에는 서버 이벤트가 없어 멈춘 것처럼 보이므로, 몇 번째 시도인지와 다음 시도까지 남은 시간을 보여 준다.
+  let retryTicker = null;
+  function showRetryStatus(part) {
+    clearInterval(retryTicker);
+    const render = () => {
+      const secs = part.next ? Math.ceil((part.next - Date.now()) / 1000) : 0;
+      const params = { attempt: part.attempt ?? '?', secs };
+      loadingText.textContent = secs > 0
+        ? t('재시도 대기 ({attempt}회차) · {secs}초 후', params)
+        : t('재시도 중 ({attempt}회차)...', params);
+      if (secs <= 0) { clearInterval(retryTicker); retryTicker = null; }
+    };
+    render();
+    if (part.next && part.next > Date.now()) retryTicker = setInterval(render, 1000);
+    // 제공자 오류 문구(예: "Rate limited")는 길 수 있어 툴팁으로 둔다
+    loadingIndicator.title = part.message || '';
+    loadingIndicator.classList.add('retrying');
+  }
+
+  function clearRetryStatus() {
+    clearInterval(retryTicker);
+    retryTicker = null;
+    if (!loadingIndicator.classList.contains('retrying')) return;
+    loadingIndicator.classList.remove('retrying');
+    loadingIndicator.title = '';
+    loadingText.textContent = t('응답 대기 중...');
   }
 
   async function cancelMessage() {
@@ -2588,6 +2619,10 @@ I18N.ready.then(function() {
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId
                && ['permission', 'question', 'interaction-resolved'].includes(message.part?.kind)) {
       handleInteractionPart(message.part);
+    } else if (message.action === 'message-part' && message.sessionId === currentSessionId
+               && ['retry', 'retry-cleared'].includes(message.part?.kind)) {
+      if (message.part.kind === 'retry' && isLoading) showRetryStatus(message.part);
+      else clearRetryStatus();
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
       ensureActiveBlockMessage();
       const part = message.part || {};

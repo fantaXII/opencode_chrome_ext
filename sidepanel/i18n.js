@@ -145,6 +145,8 @@
     '페이지 컨텍스트': 'Page context',
     '응답 복구에 실패했습니다': 'Failed to recover the response',
     '메시지 전송 시간 초과 (15s)': 'Message send timed out (15s)',
+    '재시도 대기 ({attempt}회차) · {secs}초 후': 'Retry #{attempt} · in {secs}s',
+    '재시도 중 ({attempt}회차)...': 'Retrying (attempt {attempt})...',
     '이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.': 'Ask for a summary, explanation or search about this page.',
     '페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.': 'The page changed. This session continues the conversation from the previous page.',
     '보내기': 'Send',

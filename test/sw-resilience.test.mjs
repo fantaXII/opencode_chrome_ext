@@ -59,6 +59,34 @@ test('복구: busy 동안 폴링하다 idle이 되면 REST 내용으로 완료 �
   assert.deepEqual(out, [['답변', null]]);
 });
 
+test('복구: 작업 폴더로 보낸 프롬프트는 그 디렉터리 instance의 상태로 판단한다', async () => {
+  // opencode는 세션 상태를 디렉터리 instance별로 둔다. 헤더 없이 물으면 {}(= idle)로 보여 응답 도중 끊는다.
+  let t = 0; const out = []; const seen = [];
+  const fetchFn = async (url, init = {}) => {
+    const dir = init.headers?.['x-opencode-directory'] || null;
+    seen.push(dir);
+    const busy = dir === '/work' && t < 6000;   // 이 instance에서만 busy가 보인다
+    return { ok: true, json: async () => (busy ? { s1: { type: 'busy' } } : {}) };
+  };
+  await recoverPendingPrompt({
+    sessionId: 's1', port: 4096, startedAt: 0, directory: '/work', fetchFn,
+    fetchContent: async () => ({ content: t >= 6000 ? '완성된 답변' : '잘린 답' }),
+    onComplete: (c, e) => out.push([c, e]),
+    now: () => t, sleep: async (ms) => { t += ms; }
+  });
+  assert.deepEqual(out, [['완성된 답변', null]]);
+  assert.ok(seen.every((d) => d === '/work'));
+});
+
+test('pending store: 디렉터리를 함께 저장한다', async () => {
+  const store = createPendingStore(memStorage(), () => 5);
+  await store.add('s1', 4096, '/work'); await store.add('s2', 4096);
+  assert.deepEqual(await store.list(), [
+    { sessionId: 's1', port: 4096, startedAt: 5, directory: '/work' },
+    { sessionId: 's2', port: 4096, startedAt: 5 }
+  ]);
+});
+
 test('복구: idle인데 내용이 없으면 UI가 풀리도록 오류로 완료 처리', async () => {
   const out = [];
   await recoverPendingPrompt({
