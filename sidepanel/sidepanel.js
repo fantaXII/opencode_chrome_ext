@@ -761,7 +761,7 @@ I18N.ready.then(function() {
   }
 
   async function cycleAgent() {
-    if (!availableAgents.length) return;
+    if (!availableAgents.length || isServerTransitioning()) return;
     currentAgentIndex = (currentAgentIndex + 1) % availableAgents.length;
     updateAgentBar();
     if (!currentSessionId) return;
@@ -995,7 +995,7 @@ I18N.ready.then(function() {
 
   async function sendMessage() {
     const message = messageInput.value.trim();
-    if (isLoading) return;
+    if (isLoading || isServerTransitioning()) return;
     if (!message && attachedFiles.length === 0) return;
 
     if (message.startsWith('/')) {
@@ -1136,15 +1136,23 @@ I18N.ready.then(function() {
   }
 
   let connectionStatus = 'connecting';
+  // 서버가 아직(또는 잠시) 없어서 요청을 보내면 안 되는 상태
+  function isServerTransitioning(status = connectionStatus) {
+    return status === 'connecting' || status === 'restarting';
+  }
+
   function updateConnectionStatus(status) {
     connectionStatus = status;
     if (status !== 'connected') setRuntimeBadge(null);
     header.classList.remove('connected', 'connecting');
     inputArea.classList.remove('disabled');
-    // 연결 중에는 MCP/설정 메뉴를 막고, 연결 완료·실패 후 다시 활성화한다
-    const isConnecting = status === 'connecting';
+    // 연결·하드 재시작 중에는 MCP/설정 메뉴와 입력을 막고, 끝나면 다시 활성화한다.
+    // (연결 실패 상태에서는 /ext-log를 입력할 수 있도록 입력칸은 막지 않는다)
+    const isConnecting = isServerTransitioning(status);
     mcpBtn.disabled = isConnecting;
     settingsBtn.disabled = isConnecting;
+    messageInput.disabled = isConnecting;
+    if (isConnecting) hideCommandDropdown();
     if (status !== 'connected') closeModelDropdown();
     if (isConnecting) {
       mcpDropdown.classList.add('hidden');
@@ -1165,6 +1173,13 @@ I18N.ready.then(function() {
         connectionText.textContent = t('연결 중...');
         inputArea.classList.add('disabled');
         connectingMessage.textContent = 'OpenCode server connecting...';
+        connectingIndicator.classList.remove('hidden');
+        break;
+      case 'restarting':
+        header.classList.add('connecting');
+        connectionText.textContent = t('재시작 중...');
+        inputArea.classList.add('disabled');
+        connectingMessage.textContent = 'OpenCode server restarting...';
         connectingIndicator.classList.remove('hidden');
         break;
       case 'disconnected':
@@ -1402,14 +1417,25 @@ I18N.ready.then(function() {
     // 먼저 취소해 UI를 정리한다.
     if (isLoading) await cancelMessage();
 
+    // 하드 재시작은 서버 프로세스가 사라지므로 처음 연결할 때처럼 입력을 막고 진행 상태를 보여준다.
+    // (소프트 재시작은 1~2초이고 프로세스가 유지되므로 막지 않는다)
+    if (isHard) updateConnectionStatus('restarting');
+
+    const fail = (error) => {
+      setMcpActionStatus(t('실패: {error}', { error: t(error || '알 수 없는 오류') }), 'error');
+      if (isHard) {
+        updateConnectionStatus('disconnected');
+        addErrorMessage(t('서버 재시작 실패: {error}', { error: t(error || '알 수 없는 오류') }));
+      }
+    };
+
     try {
       const res = await sendMessageToBackground(
         isHard ? 'restart-server' : 'restart-instance',
         isHard && runtime ? { preferredRuntime: runtime } : {}
       );
       if (!res?.success) {
-        setMcpActionStatus(t('실패: {error}', { error: t(res?.error || '알 수 없는 오류') }), 'error');
-        if (isHard) updateConnectionStatus('disconnected');
+        fail(res?.error);
         return;
       }
 
@@ -1418,9 +1444,12 @@ I18N.ready.then(function() {
       await refreshServerCatalogs();
 
       const suffix = isHard && res.portChanged ? t(' (포트 {port})', { port: res.port }) : '';
-      setMcpActionStatus(isHard ? t('서버 재시작 완료{suffix}', { suffix }) : t('설정을 다시 읽었습니다'), 'ok');
+      const doneText = isHard ? t('서버 재시작 완료{suffix}', { suffix }) : t('설정을 다시 읽었습니다');
+      setMcpActionStatus(doneText, 'ok');
+      // 하드 재시작 중에는 설정 메뉴가 닫혀 있으므로 결과를 채팅에도 남긴다
+      if (isHard) addBotMessage(doneText);
     } catch (error) {
-      setMcpActionStatus(t('실패: {error}', { error: t(error.message) }), 'error');
+      fail(error.message);
     } finally {
       restartBusy = false;
       invalidateAppliedProxy(); // 재시작하면 서버 프로세스의 프록시 환경변수가 바뀔 수 있다
@@ -2572,6 +2601,21 @@ I18N.ready.then(function() {
       blockRenderScheduler.request();
     } else if (message.action === 'server-runtime-updated') {
       setRuntimeBadge(message.runtime);
+    } else if (message.action === 'server-restart-state' && !restartBusy) {
+      // 다른 창의 사이드패널이 하드 재시작을 시작했다. 이 패널도 입력을 막고 결과에 맞춰 복귀한다.
+      // (재시작을 직접 시작한 패널은 runServerRestart가 처리한다)
+      if (message.restarting) {
+        if (isLoading) cancelMessage().catch(() => {});
+        updateConnectionStatus('restarting');
+      } else if (connectionStatus === 'restarting') {
+        if (message.success) {
+          updateConnectionStatus('connected');
+          refreshRuntimeBadge();
+          refreshServerCatalogs().catch(() => {});
+        } else {
+          updateConnectionStatus('disconnected');
+        }
+      }
     } else if (message.action === 'default-directory-updated' && !currentWorkingDir) {
       defaultWorkingDir = message.directory;
       updateWorkingFolderDisplay(message.directory, true);

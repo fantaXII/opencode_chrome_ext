@@ -79,6 +79,8 @@ MCP/skill/agent를 새로 등록하면 opencode는 이를 자동 반영하지 �
 | 프로세스/포트 | 유지 | 재생성, **포트가 바뀔 수 있음** |
 | 용도 | MCP/skill/agent 등록 반영 | 서버가 응답하지 않을 때 |
 
+하드 재시작 중에는 사이드패널이 `restarting` 상태(처음 연결할 때와 같은 오버레이 + 입력/에이전트 전환/MCP·설정 메뉴 차단)가 되고, background는 `server-restart-state`를 모든 패널에 broadcast한다. `ensureOpenCodeServer`는 `_hardRestartPromise`가 있으면 새 서버를 띄우지 않고 재시작이 끝나기를 기다린다(두 번째 서버가 뜨는 레이스 방지). 소프트 재시작은 막지 않는다.
+
 dispose는 열려 있는 SSE 스트림을 끊고 `server.instance.disposed` 이벤트를 내보낸다. `subscribeToEvents()`의 Last-Event-ID 재연결 경로가 자동으로 다시 붙지만, 진행 중이던 프롬프트는 instance와 함께 사라진다(사이드패널이 재시작 전에 `cancel-message`로 UI를 정리한다).
 
 ### 페이지 컨텍스트 / 렌더링 보안 (Web Store 심사 관련)

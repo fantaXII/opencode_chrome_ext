@@ -52,6 +52,8 @@
     '모델 선택': 'Select model',
     '모델을 선택하세요:': 'Select a model:',
     '최근 사용': 'Recent',
+    '재시작 중...': 'Restarting...',
+    '서버 재시작 실패: {error}': 'Server restart failed: {error}',
     '제공자': 'Providers',
     '디렉토리를 찾을 수 없습니다: {path}': 'Directory not found: {path}',
     '작업 디렉토리가 변경되어 새 세션을 시작합니다.': 'The working directory changed, so a new session is starting.',

@@ -409,6 +409,14 @@ let _ensureServerPromise = null;
  * OpenCode 서버 초기화
  */
 async function ensureOpenCodeServer() {
+  // 하드 재시작 중에는 서버가 잠시 사라진다. 여기서 새 서버를 띄우면 재시작이 띄운 서버와
+  // 겹쳐 두 개가 되므로, 재시작이 끝날 때까지 기다렸다가 그 결과를 쓴다.
+  if (_hardRestartPromise) {
+    debugLog('INFO', 'ensureOpenCodeServer: waiting for hard restart to finish');
+    await _hardRestartPromise.catch(() => {});
+    return serverState.available ? serverState.port : null;
+  }
+
   if (_ensureServerPromise) {
     console.log(`[ensureOpenCodeServer] 진행 중인 확인 작업에 합류`);
     return _ensureServerPromise;
@@ -542,6 +550,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 //     서버가 응답하지 않거나 상태가 깨졌을 때 쓴다. 포트가 바뀔 수 있다.
 
 let _restartInProgress = false;
+// 하드 재시작이 진행 중이면 그 Promise. ensureOpenCodeServer가 기다리는 데 쓴다.
+let _hardRestartPromise = null;
 
 function abortAllEventSources(reason) {
   const sessionIds = [...eventSources.keys()];
@@ -611,6 +621,26 @@ async function restartServerInstance() {
  * (B) 하드 재시작 - Native Host를 통해 서버 프로세스를 종료하고 다시 시작한다.
  */
 async function hardRestartServer(requestedRuntime) {
+  if (_restartInProgress) {
+    return { success: false, error: '이미 재시작이 진행 중입니다' };
+  }
+
+  // 열려 있는 모든 사이드패널(다른 창 포함)이 입력을 막고 "재시작 중"을 표시하도록 알린다.
+  const notify = (data) => chrome.runtime.sendMessage({ action: 'server-restart-state', ...data }).catch(() => {});
+  const promise = runHardRestart(requestedRuntime);
+  _hardRestartPromise = promise;
+  notify({ restarting: true });
+  let result;
+  try {
+    result = await promise;
+    return result;
+  } finally {
+    _hardRestartPromise = null;
+    notify({ restarting: false, success: !!result?.success, port: result?.port ?? null });
+  }
+}
+
+async function runHardRestart(requestedRuntime) {
   if (_restartInProgress) {
     return { success: false, error: '이미 재시작이 진행 중입니다' };
   }
