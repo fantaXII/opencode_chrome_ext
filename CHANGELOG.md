@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.19.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.18.0...v2.19.0) (2026-11-11)
+
+
+### Features
+
+* 하위 에이전트(task) 진행 상황을 task 카드에 표시 ([3bd9ef7](https://github.com/fantaXII/opencode_chrome_ext/commit/3bd9ef7160e338097728ee1218388f71bf83f125))
+
 # [2.18.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.17.0...v2.18.0) (2026-11-11)
 
 
