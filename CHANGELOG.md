@@ -1,5 +1,34 @@
 # Changelog
 
+# [2.18.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.17.0...v2.18.0) (2026-11-11)
+
+
+### Bug Fixes
+
+* Chrome 북마크 관리자와 겹치던 단축키를 사용자 지정 방식으로 변경 ([4293a58](https://github.com/fantaXII/opencode_chrome_ext/commit/4293a5894a015acbbbd087474017f2c8540d3865))
+* 빌드 zip에 자기 자신(webstore zip)이 포함되던 문제 수정 ([dbddc63](https://github.com/fantaXII/opencode_chrome_ext/commit/dbddc6367d319f76dd01a318090f1f1d2e781920))
+* 빌드 시 npm의 Unknown env config 경고 제거 ([f0f35a0](https://github.com/fantaXII/opencode_chrome_ext/commit/f0f35a0fe8a5563cb53abc4044a645f0bcf89af5))
+* 서버 강제 재시작 중 입력을 막고 재시작 중 상태 표시 ([e9280da](https://github.com/fantaXII/opencode_chrome_ext/commit/e9280daf6b49ba36c6c3bdb97899c7e3012af0d1))
+* 실행 환경(WSL/Windows) 배지가 안 보이는 경우 host 조회로 보완 ([3280d9e](https://github.com/fantaXII/opencode_chrome_ext/commit/3280d9ec21736eca5671e065de76c65cf987aa12))
+* 영어 설정에서 한국어로 남던 UI 문구와 프롬프트 머리말 번역 ([50b091d](https://github.com/fantaXII/opencode_chrome_ext/commit/50b091d2e6ead398da542a1aab8a89a1f7ebc29c))
+* 작업 폴더 경로 칸이 좁아 전체 경로를 볼 수 없던 문제 수정 ([ac73eca](https://github.com/fantaXII/opencode_chrome_ext/commit/ac73ecace558397abfaeb3e10c5ad25993b7875e))
+* 제공자 재시도·지연·중단 시 응답 스트림 처리 보강 ([018c3a9](https://github.com/fantaXII/opencode_chrome_ext/commit/018c3a9b8ca4eb1b011a513bfb24a2d04ec703c1))
+* 취소/타임아웃 시 서버 세션도 abort해 hang된 tool로 인한 교착 방지 ([96d30d8](https://github.com/fantaXII/opencode_chrome_ext/commit/96d30d8d084f188ca5221d9faad103caea8825f2))
+* 컨텍스트 메뉴 중복 생성으로 인한 duplicate id 오류 수정 ([011c912](https://github.com/fantaXII/opencode_chrome_ext/commit/011c912b7f053ef1d5837a578439c3dabfdfcd7c))
+
+
+### Features
+
+* 모델 선택을 최근 사용 + provider별 접기 목록으로 개편 ([cd79449](https://github.com/fantaXII/opencode_chrome_ext/commit/cd7944928db42edac85e4a6c979ea35b8ac152f4))
+* 사이드패널 UI를 부드럽고 친근한 테마로 개편 ([b399d32](https://github.com/fantaXII/opencode_chrome_ext/commit/b399d3208409427f3371de995c74af01e0c9347c))
+* 서버 적용 프록시를 Windows에서도 조회하고 표시·사유 안내 개선 ([1c2decb](https://github.com/fantaXII/opencode_chrome_ext/commit/1c2decbd1e77db6e8a2dc07325bbda8bbd63364b))
+* 페이지 컨텍스트 선택·응답 정화·권한/질문 요청 처리 및 SSE 안정화 ([d3386cc](https://github.com/fantaXII/opencode_chrome_ext/commit/d3386cc7c53979bb7623bd86585084de827a264c))
+
+
+### Performance Improvements
+
+* 설정 패널 렌더를 서버 적용 프록시 조회와 분리 ([baeb6a7](https://github.com/fantaXII/opencode_chrome_ext/commit/baeb6a77b0317a1b0c65cbf499d95797c1628398))
+
 # [2.17.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.16.0...v2.17.0) (2026-11-08)
 
 
