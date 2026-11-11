@@ -1435,24 +1435,43 @@ I18N.ready.then(function() {
   let appliedProxyGen = 0;
   let settingsServerPort = null;
 
-  function appliedProxyText() {
+  // 조회할 수 없는 사유(host의 proxyEnvReason)를 짧게 안내한다.
+  const APPLIED_PROXY_REASONS = {
+    'no-listener': '서버 프로세스를 찾지 못했습니다.',
+    'wsl-read-failed': 'WSL 프로세스의 환경변수를 읽지 못했습니다 (다른 사용자·다른 WSL 배포판에서 실행 중일 수 있음).',
+    'unmanaged': '확장이 시작하지 않은 Windows 서버는 환경변수를 조회할 수 없습니다. 확장으로 재시작하면 확인할 수 있습니다.',
+    'legacy-record': '이전 버전 확장이 시작한 서버라 조회할 수 없습니다. 재시작하면 확인할 수 있습니다.'
+  };
+
+  function appliedProxyHtml() {
     if (!settingsServerPort) return '';
-    if (appliedProxyState === null || appliedProxyState === 'loading') return t('서버에 적용된 프록시: 확인 중…');
-    const env = appliedProxyState.env;
-    if (!env) return t('서버에 적용된 프록시: 확인할 수 없음 (WSL 서버만 조회 가능)');
-    return ['http', 'https', 'noProxy'].some(k => env[k])
-      ? t('서버에 적용된 프록시 — HTTP: {http} · HTTPS: {https} · NO_PROXY: {noProxy}', {
-          http: env.http || '-', https: env.https || '-', noProxy: env.noProxy || '-'
-        })
-      : t('서버에 적용된 프록시: 없음');
+    const title = t('서버에 적용된 프록시');
+    if (appliedProxyState === null || appliedProxyState === 'loading') {
+      return `<div class="applied-title">${title} <span class="applied-badge loading">${t('확인 중…')}</span></div>`;
+    }
+    const { env, source, reason } = appliedProxyState;
+    if (!env) {
+      const why = APPLIED_PROXY_REASONS[reason] || '서버에서 프록시 정보를 받지 못했습니다.';
+      return `<div class="applied-title">${title} <span class="applied-badge na">${t('확인할 수 없음')}</span></div>
+        <div class="applied-reason">${escapeHtml(t(why))}</div>`;
+    }
+    const fromRecord = source === 'record';
+    const row = (label, value) => `<div class="applied-row"><span class="applied-label">${label}</span>` +
+      (value ? `<span class="applied-value">${escapeHtml(value)}</span>` : `<span class="applied-value none">${t('없음')}</span>`) + '</div>';
+    const empty = !env.http && !env.https && !env.noProxy;
+    return `<div class="applied-title">${title} <span class="applied-badge ok">✓ ${t('서버에서 읽어 옴')}</span></div>
+      ${empty
+        ? `<div class="applied-reason">${t('적용된 프록시가 없습니다.')}</div>`
+        : row('HTTP', env.http) + row('HTTPS', env.https) + row('NO_PROXY', env.noProxy)}
+      ${fromRecord ? `<div class="applied-note">${t('확장이 서버를 시작할 때 전달한 값입니다.')}</div>` : ''}`;
   }
 
   function refreshAppliedProxyLine() {
     const el = document.getElementById('proxy-applied');
     if (!el) return;
-    const text = appliedProxyText();
-    el.textContent = text;
-    el.classList.toggle('hidden', !text);
+    const html = appliedProxyHtml();
+    el.innerHTML = html;
+    el.classList.toggle('hidden', !html);
   }
 
   function invalidateAppliedProxy() {
@@ -1465,10 +1484,13 @@ I18N.ready.then(function() {
     const gen = ++appliedProxyGen;
     appliedProxyState = 'loading';
     refreshAppliedProxyLine();
-    let env = null;
-    try { env = (await sendMessageToBackground('get-server-origin')).proxyEnv || null; } catch {}
+    let result = { env: null, source: null, reason: null };
+    try {
+      const res = await sendMessageToBackground('get-server-origin');
+      result = { env: res.proxyEnv || null, source: res.proxyEnvSource || null, reason: res.proxyEnvReason || null };
+    } catch {}
     if (gen !== appliedProxyGen) return; // 그 사이 무효화됨(패널을 다시 열었거나 재시작)
-    appliedProxyState = { env };
+    appliedProxyState = result;
     refreshAppliedProxyLine();
   }
 
@@ -1542,7 +1564,7 @@ I18N.ready.then(function() {
         <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
           <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
         </label>
-        <div id="proxy-applied" class="settings-current"></div>
+        <div id="proxy-applied" class="proxy-applied hidden"></div>
         <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
         <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
         <div class="settings-buttons">

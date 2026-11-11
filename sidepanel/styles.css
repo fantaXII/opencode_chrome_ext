@@ -349,6 +349,66 @@ body {
   color: var(--error);
 }
 
+.proxy-applied {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0;
+  padding: 7px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.applied-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.applied-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.applied-badge.ok { color: var(--success); border: 1px solid var(--success); }
+.applied-badge.na { color: var(--error); border: 1px solid var(--error); }
+.applied-badge.loading { color: var(--text-secondary); border: 1px solid var(--border); }
+
+.applied-row {
+  display: flex;
+  gap: 8px;
+}
+
+.applied-label {
+  flex: 0 0 64px;
+  color: var(--text-secondary);
+}
+
+.applied-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.applied-value.none {
+  color: var(--text-secondary);
+}
+
+.applied-reason,
+.applied-note {
+  font-size: 10px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;

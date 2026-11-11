@@ -2104,7 +2104,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: true, connected: false });
             break;
           }
-          const result = { success: true, connected: true, port: serverState.port, managed: null, busy: null, proxyEnv: null };
+          const result = { success: true, connected: true, port: serverState.port, managed: null, busy: null, proxyEnv: null, proxyEnvSource: null, proxyEnvReason: null };
           try {
             const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port: serverState.port });
             if (info?.status === 'success') {
@@ -2145,6 +2145,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true; // 비동기 응답
+              result.proxyEnvSource = info.proxyEnvSource || null;
+              result.proxyEnvReason = info.proxyEnvReason || null;
 });
 
 // ============================================

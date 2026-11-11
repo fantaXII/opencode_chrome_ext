@@ -280,7 +280,7 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
       const available = await checkOpenCodeServer(port);
       if (available) {
         fileLog('INFO', `startOpenCodeServer: Server ready on port ${port} after ${attempts + 1}s`);
-        recordServerListener(port);
+        recordServerListener(port, spawnEnv);
         return port;
       }
       attempts++;
@@ -459,13 +459,19 @@ function getListener(port) {
   return wsl ? { side: 'wsl', ...wsl } : null;
 }
 
-/** 방금 띄운 서버의 리스너 pid를 기록한다. 실패해도 서버 기동은 막지 않는다. */
-function recordServerListener(port) {
+/**
+ * 방금 띄운 서버의 리스너 pid와, 서버에 넘긴 프록시 환경변수(계정 마스킹)를 기록한다.
+ * Windows는 다른 프로세스의 환경변수를 읽을 수 없어 이 기록이 유일한 조회 수단이다.
+ * 실패해도 서버 기동은 막지 않는다.
+ */
+function recordServerListener(port, spawnEnv = null) {
   try {
     const l = getListener(port);
     if (!l) return;
     fs.mkdirSync(path.dirname(SERVER_RECORD_FILE), { recursive: true });
-    fs.writeFileSync(SERVER_RECORD_FILE, JSON.stringify({ port, side: l.side, pid: l.pid, startedAt: Date.now() }));
+    const record = { port, side: l.side, pid: l.pid, startedAt: Date.now() };
+    if (spawnEnv) record.proxyEnv = effectiveProxyEnv(spawnEnv);
+    fs.writeFileSync(SERVER_RECORD_FILE, JSON.stringify(record));
     fileLog('INFO', `recordServerListener: port=${port} side=${l.side} pid=${l.pid}`);
   } catch (error) {
     fileLog('DEBUG', `recordServerListener: ${error.message}`);
@@ -513,25 +519,57 @@ function parseProxyEnviron(raw) {
   return out;
 }
 
-/** 실행 중인 서버 프로세스가 실제로 가진 프록시 환경변수. 읽을 수 없으면 null (WSL만 지원). */
-function readListenerProxyEnv(listener) {
-  if (!listener || listener.side !== 'wsl' || !listener.pid) return null;
-  try {
-    const r = spawnSync('wsl.exe', ['cat', `/proc/${listener.pid}/environ`], { encoding: 'utf8', timeout: 5000 });
-    if (r.status !== 0) return null;
-    return parseProxyEnviron(r.stdout);
-  } catch (error) {
-    fileLog('DEBUG', `readListenerProxyEnv: ${error.message}`);
-    return null;
+/** spawn에 넘긴 환경변수에서 프록시 3종의 유효값을 뽑는다(계정 마스킹, 대문자 우선). */
+function effectiveProxyEnv(env) {
+  const out = { http: '', https: '', noProxy: '' };
+  const lower = { http: '', https: '', noProxy: '' };
+  for (const [key, value] of Object.entries(env || {})) {
+    const field = PROXY_FIELDS.find(([, n]) => n === key.toUpperCase())?.[0];
+    if (!field || typeof value !== 'string') continue;
+    const v = maskProxyValue(value.replace(/[\u0000-\u001f\u007f]/g, '').trim());
+    if (key === key.toUpperCase()) out[field] = v; else lower[field] = v;
   }
+  for (const k of Object.keys(out)) if (!out[k]) out[k] = lower[k];
+  return out;
+}
+
+/**
+ * 서버가 실제로 가진 프록시를 조회한다. 결과: { env, source, reason }
+ *  - env: { http, https, noProxy } | null
+ *  - source: 'process'(/proc에서 직접 읽음) | 'record'(확장이 서버를 띄울 때 기록한 값)
+ *  - reason: env가 null일 때 사유 코드
+ *      no-listener      포트의 서버 프로세스를 찾지 못함
+ *      wsl-read-failed  WSL 프로세스의 환경변수를 읽지 못함(권한·다른 배포판 등)
+ *      unmanaged        확장이 시작하지 않은 Windows 서버(타 프로세스 환경변수 조회 불가)
+ *      legacy-record    이 기능 이전 버전이 시작한 Windows 서버(기록에 프록시 없음)
+ */
+function readAppliedProxy(listener, record, managed) {
+  if (!listener) return { env: null, source: null, reason: 'no-listener' };
+  if (listener.side === 'wsl') {
+    try {
+      const r = spawnSync('wsl.exe', ['cat', `/proc/${listener.pid}/environ`], { encoding: 'utf8', timeout: 5000 });
+      if (r.status === 0) return { env: parseProxyEnviron(r.stdout), source: 'process', reason: null };
+    } catch (error) {
+      fileLog('DEBUG', `readAppliedProxy: ${error.message}`);
+    }
+    return { env: null, source: null, reason: 'wsl-read-failed' };
+  }
+  if (!managed) return { env: null, source: null, reason: 'unmanaged' };
+  if (!record?.proxyEnv) return { env: null, source: null, reason: 'legacy-record' };
+  return { env: record.proxyEnv, source: 'record', reason: null };
 }
 
 function getServerInfo(port) {
   const listener = getListener(port);
+  const record = readServerRecord();
+  const managed = isManagedListener(record, listener, port);
+  const applied = readAppliedProxy(listener, record, managed);
   return {
     listener: listener ? { side: listener.side, pid: listener.pid, name: listener.name } : null,
-    managed: isManagedListener(readServerRecord(), listener, port),
-    proxyEnv: readListenerProxyEnv(listener)
+    managed,
+    proxyEnv: applied.env,
+    proxyEnvSource: applied.source,
+    proxyEnvReason: applied.reason
   };
 }
 
