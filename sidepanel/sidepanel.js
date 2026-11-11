@@ -145,9 +145,11 @@ I18N.ready.then(function() {
       workingFolderDisplay.classList.remove('default');
       return;
     }
-    const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
-    const short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : dir;
-    workingFolderDisplay.textContent = short;
+    // 전체 경로를 보여주고, 넘치면 CSS(direction: rtl + 말줄임)가 앞부분을 줄여 끝(폴더 이름)이 보이게 한다.
+    // <bdi>로 감싸야 rtl 문맥에서도 '/'·'\' 같은 기호 순서가 뒤집히지 않는다.
+    const bdi = document.createElement('bdi');
+    bdi.textContent = dir;
+    workingFolderDisplay.replaceChildren(bdi);
     workingFolderWrapper.title = isDefault ? t('기본값: {dir}', { dir }) : dir;
     workingFolderDisplay.classList.toggle('default', isDefault);
   }

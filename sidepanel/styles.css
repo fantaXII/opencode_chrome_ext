@@ -1559,13 +1559,14 @@ button, select, input, textarea {
   box-shadow: 0 0 0 2px var(--accent);
 }
 
+/* 경로는 길어서 칩 줄과 나누지 않고 한 줄을 다 쓴다 */
 .working-folder-wrapper {
-  flex: 1 1 120px;
+  flex: 1 1 100%;
   min-width: 0;
   height: 28px;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   padding: 0 6px 0 10px;
   border-radius: var(--radius-pill);
   font-size: 12px;
@@ -1596,6 +1597,11 @@ button, select, input, textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  /* 말줄임을 앞쪽에 붙여 경로 끝(폴더 이름)을 남긴다. 글자 순서는 JS의 <bdi>가 지킨다. */
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 
 .working-folder-display.default {
