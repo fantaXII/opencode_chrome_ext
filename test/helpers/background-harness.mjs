@@ -35,6 +35,7 @@ function noopApi() {
 function createChromeStub({ local = {} } = {}) {
   const sent = [];       // background → 사이드패널로 보낸 메시지 (chrome.runtime.sendMessage)
   const sidePanelCalls = []; // chrome.sidePanel.setOptions 호출 인자
+  const tabRemovedListeners = [];
   let onMessage = null;
   const runtime = {
     id: 'test-extension',
@@ -50,11 +51,12 @@ function createChromeStub({ local = {} } = {}) {
   const chrome = new Proxy({
     runtime,
     storage: { local: createStorageArea(local), session: createStorageArea(), onChanged: noopApi() },
-    tabs: new Proxy({ query: async () => [] }, { get: (t, k) => t[k] ?? noopApi() }),
+    tabs: new Proxy({ query: async () => [], onRemoved: { addListener: (fn) => tabRemovedListeners.push(fn) } },
+      { get: (t, k) => t[k] ?? noopApi() }),
     sidePanel: new Proxy({ setOptions: (o) => { sidePanelCalls.push(o); return Promise.resolve(); } },
       { get: (t, k) => t[k] ?? noopApi() })
   }, { get: (t, k) => t[k] ?? noopApi() });
-  return { chrome, sent, sidePanelCalls, getOnMessage: () => onMessage };
+  return { chrome, sent, sidePanelCalls, tabRemovedListeners, getOnMessage: () => onMessage };
 }
 
 /**
@@ -100,6 +102,8 @@ export async function loadBackground({ port, constants = {}, local = {}, sourceP
     send,
     sent: stub.sent,
     sidePanelCalls: stub.sidePanelCalls,
+    /** 탭이 닫힌 것처럼 chrome.tabs.onRemoved 리스너를 부른다. */
+    closeTab: (tabId) => { for (const fn of stub.tabRemovedListeners) fn(tabId); },
     sessionStorage: stub.chrome.storage.session.data,
     internals: mod.__test,
     /** 다음 SW 로그를 읽는다 (debugLog는 chrome.storage.local.debugLogs에 쌓인다). */

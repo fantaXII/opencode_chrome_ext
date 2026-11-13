@@ -28,3 +28,18 @@ test('exit-panel: 패널을 닫고 탭-세션 연결을 끊되 서버 세션은 
   assert.equal(again.isNew, true);
   assert.notEqual(again.sessionId, first.sessionId);
 });
+
+test('탭을 닫아도 서버 세션(대화 기록)은 지우지 않는다(TUI와 같은 개념)', async (t) => {
+  const server = await startMockOpencode();
+  const bg = await loadBackground({ port: server.port, local: { selectedModel: { providerID: 'mock', modelID: 'model' } } });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  const s = await bg.send({ action: 'get-tab-session', tabId: TAB, title: 't' });
+  bg.closeTab(TAB);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(server.state.deleted, [], '세션을 삭제하면 /sessions로 이어갈 수 없다');
+  assert.ok(!(bg.sessionStorage.tabSessions || []).some(([id]) => id === TAB), '탭-세션 연결은 끊는다');
+  // /sessions로 다시 불러올 수 있다
+  const sw = await bg.send({ action: 'switch-session', sessionId: s.sessionId, tabId: 99 });
+  assert.equal(sw.success, true);
+});

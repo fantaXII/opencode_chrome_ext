@@ -42,7 +42,8 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - SSE 청크는 background가 push하면 `chrome.runtime.onMessage`로 수신해 실시간 렌더링
 - 초기화 순서: `init-server` → `get-models` → `create-session`
 
-- `exit`/`/exit`/`quit`(입력 전체가 일치할 때만): 응답 중이면 `cancel-message` 후 `exit-panel`을 보낸다. background는 이 탭의 `tabSessions`·`activeTabs` 연결을 끊고 `sidePanel.setOptions({tabId, enabled:false})`로 패널을 닫는다. 서버 세션은 지우지 않는다(탭을 닫을 때와 다르다). 그래서 `/sessions`로 이어갈 수 있고, 다시 열면 `get-tab-session`이 새 세션을 만든다. 패널이 남아 있으면 사이드패널이 `window.close()`로 닫는다.
+- **세션은 지우지 않는다(TUI와 같은 개념)**: 탭 닫기·`exit`·작업 폴더 변경 모두 탭-세션 연결만 끊는다. 서버의 세션은 남아 `/sessions`로 원래 폴더 그대로 이어갈 수 있다. 응답 중이었다면 `releaseSession`이 구독을 끝내고 서버 세션을 `abort`한다. `DELETE /session`은 쓰지 않는다.
+- `exit`/`/exit`/`quit`(입력 전체가 일치할 때만): 응답 중이면 `cancel-message` 후 `exit-panel`을 보낸다. background는 이 탭의 `tabSessions`·`activeTabs` 연결을 끊고 `sidePanel.setOptions({tabId, enabled:false})`로 패널을 닫는다. 서버 세션은 지우지 않는다. 그래서 `/sessions`로 이어갈 수 있고, 다시 열면 `get-tab-session`이 새 세션을 만든다. 패널이 남아 있으면 사이드패널이 `window.close()`로 닫는다.
 - 디버그 로그: 입력창 `/ext-log`(또는 연결 실패 화면의 "로그 보기" 버튼)로 SW 로그(`debugLogs`, 최대 500건) + host 파일 로그(`read-log`)를 다이얼로그로 표시·자동 복사한다. 새 오류 경로는 `debugLog(level, msg)`로 남긴다. `/debug`는 OpenCode 예약어와 충돌해 `/ext-log`로 바꿨다.
 
 ### native-host/host.js
@@ -60,7 +61,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - **작업 폴더는 세션별**: opencode는 세션을 만든 폴더(`session.directory`)에 세션을 고정한다. 다른 `x-opencode-directory`로 프롬프트를 보내도 원래 폴더에서 실행하고, 세션 상태도 원래 폴더 instance에만 보인다(1.19.5 실측, git/비git 모두). 그래서:
   - `chrome.storage.local.workingDirectory`는 **새 세션의 기본 폴더**일 뿐이다.
   - 기존 세션에 보내는 요청(프롬프트·`/session/status`·권한/질문 조회·응답)은 `getSessionDirectory(sessionId)`로 보낸다. 값은 `sessionDirectories`(`storage.session`)에 있고, 없으면 `GET /session/{id}`로 확인한다.
-  - 폴더를 바꾸면 그 탭의 세션만 새로 만든다. 다른 탭의 세션은 원래 폴더로 계속 동작하다가, 새 세션(`/new`, exit 후 다시 열기 등)부터 새 기본값을 쓴다.
+  - 폴더를 바꾸면 그 탭의 세션만 새로 만든다(이전 세션은 지우지 않는다). 다른 탭의 세션은 원래 폴더로 계속 동작하다가, 새 세션(`/new`, exit 후 다시 열기 등)부터 새 기본값을 쓴다.
   - 사이드패널은 여러 탭이 한 화면을 같이 쓰므로, 세션이 바뀔 때마다 `refreshWorkingDirectory()`로 현재 세션의 폴더를 표시한다.
   - 예전에는 전역 값으로 보내서, 다른 탭에서 폴더를 바꾸면 화면엔 새 폴더가 보이는데 실제로는 원래 폴더로 동작했다. 상태 확인이 다른 instance로 가서 응답 중인 세션을 idle로 오인할 수도 있었다.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
@@ -70,7 +71,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 |-----------|------|
 | `GET /global/health` | 서버 상태 확인 |
 | `POST /session` | 세션 생성 |
-| `DELETE /session/{id}` | 세션 삭제 |
+| `GET /session/{id}` | 세션 존재·작업 폴더(`directory`) 확인 |
 | `POST /session/{id}/prompt` | 메시지 전송 |
 | `GET /event?session={id}` | SSE 스트림 구독 |
 | `GET /config/providers` | 모델 목록 |

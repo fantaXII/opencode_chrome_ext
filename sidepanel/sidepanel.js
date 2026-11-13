@@ -232,14 +232,14 @@ I18N.ready.then(function() {
     }
   }
 
-  // opencode 세션은 첫 prompt 요청 시의 디렉토리로 고정되므로, 작업 디렉토리를
-  // 바꾸면 background가 세션을 새로 만들어 준다. 새 세션 ID로 갈아끼우고
-  // 채팅 화면을 초기화해 사용자에게 알린다.
+  // opencode 세션은 만들 때의 디렉토리로 고정되므로, 작업 디렉토리를 바꾸면 background가 세션을 새로
+  // 만들어 준다(이전 세션은 서버에 남아 /sessions로 이어갈 수 있다 — TUI와 같은 개념). 새 세션 ID로
+  // 갈아끼우고 채팅 화면을 초기화해 사용자에게 알린다.
   function applyWorkingDirSessionReset(result) {
     if (!result?.newSessionId) return;
     currentSessionId = result.newSessionId;
     messagesContainer.innerHTML = '';
-    addBotMessage(t('작업 디렉토리가 변경되어 새 세션을 시작합니다.'));
+    addBotMessage(t('작업 디렉토리가 변경되어 새 세션을 시작합니다. 이전 대화는 /sessions로 다시 열 수 있습니다.'));
   }
 
   workingFolderInput.addEventListener('keydown', async (e) => {

@@ -56,7 +56,7 @@
     '서버 재시작 실패: {error}': 'Server restart failed: {error}',
     '제공자': 'Providers',
     '디렉토리를 찾을 수 없습니다: {path}': 'Directory not found: {path}',
-    '작업 디렉토리가 변경되어 새 세션을 시작합니다.': 'The working directory changed, so a new session is starting.',
+    '작업 디렉토리가 변경되어 새 세션을 시작합니다. 이전 대화는 /sessions로 다시 열 수 있습니다.': 'The working directory changed, so a new session was started. Reopen the previous conversation with /sessions.',
     '모델 목록을 불러오지 못했습니다. 서버 연결 상태를 확인하세요.': 'Could not load the model list. Check the server connection.',
 
     // ---- 커맨드 ----

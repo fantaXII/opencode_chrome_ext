@@ -171,13 +171,14 @@ async function recoverInterruptedPrompts() {
 
 debugLog('INFO', `Service Worker started - ${new Date().toISOString()} | extensionId=${chrome.runtime.id}`);
 
-// 탭 닫힐 때 세션 및 활성 탭 정리
+// 탭 닫힐 때 활성 탭·탭-세션 연결 정리. TUI를 종료해도 세션이 남는 것처럼 서버의 세션(대화 기록)은 지우지 않는다
+// → /sessions로 이어갈 수 있다.
 chrome.tabs.onRemoved.addListener((tabId) => {
   activeTabs.delete(tabId);
   tabLastShownInfo.delete(tabId);
   const sessionId = tabSessions.get(tabId);
   if (sessionId) {
-    deleteSession(sessionId).catch(() => {});
+    releaseSession(sessionId, 'tab-closed').catch(() => {});
     tabSessions.delete(tabId);
   }
   persistState();
@@ -1115,30 +1116,18 @@ async function createSession(title = 'New Chat') {
 }
 
 /**
- * 세션 삭제
+ * 탭과의 연결이 끝난 세션을 정리한다(탭 닫기·작업 폴더 변경). TUI처럼 서버의 세션(대화 기록)은 지우지 않으므로
+ * /sessions로 이어갈 수 있고, 불러오면 그 세션의 원래 폴더가 적용된다. 응답 중이었다면 중단한다
+ * (TUI를 종료하면 진행 중인 작업도 멈춘다. 아무도 보지 않는 응답이 서버에서 계속 돌지 않게).
  */
-async function deleteSession(sessionId) {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-
-  try {
-    await fetch(`http://127.0.0.1:${session.port}/session/${sessionId}`, {
-      method: 'DELETE'
-    });
-  } catch (error) {
-    console.error('세션 삭제 오류:', error);
+async function releaseSession(sessionId, reason) {
+  if (eventSources.has(sessionId)) {
+    stopPromptStream(sessionId);
+    const port = sessions.get(sessionId)?.port ?? serverState.port;
+    if (port) await abortServerSession(port, sessionId);
   }
-
-  sessions.delete(sessionId);
-  if (sessionNotices.delete(sessionId)) persistNotices();
-  forgetSessionDirectory(sessionId);
-
-  // SSE 연결 정리 (eventSources는 fetch 기반 AbortController를 담는다)
-  const controller = eventSources.get(sessionId);
-  if (controller) {
-    controller.abort();
-    eventSources.delete(sessionId);
-  }
+  pendingInteractions.delete(sessionId);
+  debugLog('INFO', `Session released (${reason}) - sessionId=${sessionId}, kept on server`);
 }
 
 /**
@@ -2561,7 +2550,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const effective = normalized || await getDefaultDirectory();
           if (oldSessionId && !sameDirectory(effective, previous)) {
             try {
-              await deleteSession(oldSessionId);
+              // 이전 대화는 서버에 남긴다(/sessions로 다시 불러오면 원래 폴더로 이어진다)
+              await releaseSession(oldSessionId, 'working-directory-changed');
               newSessionId = await createSession('Chrome Extension Chat');
               if (tabId) tabSessions.set(tabId, newSessionId);
               persistState();
