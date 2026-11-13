@@ -1284,6 +1284,7 @@ I18N.ready.then(function() {
       <div class="message-avatar">👤</div>
       <div class="message-content">${escapeHtml(content)}</div>
     `;
+    messageDiv.dataset.prompt = content; // ↑/↓ 입력 기록(현재 세션 화면의 사용자 입력)
     if (attachments.length > 0) {
       const contentDiv = messageDiv.querySelector('.message-content');
       const list = document.createElement('div');
@@ -2269,7 +2270,62 @@ I18N.ready.then(function() {
     });
   }
 
+  // ============================================
+  // 입력 기록 (↑/↓) — TUI처럼 현재 세션에서 보낸 입력을 다시 불러온다.
+  // ============================================
+  // 기록은 화면의 사용자 말풍선(data-prompt)에서 읽는다. 세션을 바꾸거나 탭을 전환하면 화면이 그 세션의
+  // 대화 기록으로 다시 그려지므로, 따로 저장하지 않아도 항상 현재 세션 기준이 된다.
+  // historyIndex: -1이면 기록을 넘기는 중이 아님. 넘기기 시작할 때 작성 중이던 내용은 historyDraft에 둔다.
+  let historyIndex = -1;
+  let historyDraft = '';
+
+  function getPromptHistory() {
+    const list = [];
+    for (const el of messagesContainer.querySelectorAll('.user-message[data-prompt]')) {
+      const text = el.dataset.prompt;
+      if (text && text.trim() && list[list.length - 1] !== text) list.push(text); // 연속 중복은 하나로
+    }
+    return list;
+  }
+
+  function setInputFromHistory(text) {
+    messageInput.value = text;
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+    const end = text.length;
+    messageInput.setSelectionRange(end, end);
+    updateSendButtonState();
+  }
+
+  // 기록을 불러온 뒤 고치지 않았으면 커서 위치와 상관없이 넘긴다. 직접 입력 중이면 여러 줄 편집을 깨지 않도록
+  // ↑는 커서가 첫 줄에 있을 때, ↓는 마지막 줄에 있을 때만 기록을 넘긴다.
+  function navigatePromptHistory(direction) {
+    const { selectionStart, selectionEnd, value } = messageInput;
+    if (historyIndex === -1) {
+      if (direction > 0) return false; // 최신보다 아래는 없다
+      if (selectionStart !== selectionEnd || value.slice(0, selectionStart).includes('\n')) return false;
+    }
+    const history = getPromptHistory();
+    if (history.length === 0) return false;
+    if (historyIndex === -1) {
+      historyDraft = value;
+      historyIndex = history.length - 1;
+    } else {
+      const next = Math.min(historyIndex, history.length) + direction;
+      if (next < 0) return true; // 가장 오래된 기록에서 멈춤
+      if (next >= history.length) {
+        historyIndex = -1;
+        setInputFromHistory(historyDraft);
+        return true;
+      }
+      historyIndex = next;
+    }
+    setInputFromHistory(history[historyIndex]);
+    return true;
+  }
+
   messageInput.addEventListener('input', () => {
+    historyIndex = -1; // 직접 고치면 기록 넘기기를 끝낸다(고친 내용이 새 입력이 된다)
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
     updateSendButtonState();
@@ -2321,8 +2377,14 @@ I18N.ready.then(function() {
         return;
       }
     }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.isComposing
+        && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (navigatePromptHistory(e.key === 'ArrowUp' ? -1 : 1)) e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      historyIndex = -1;
       sendMessage();
     }
   });

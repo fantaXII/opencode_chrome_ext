@@ -44,6 +44,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 
 - **세션은 지우지 않는다(TUI와 같은 개념)**: 탭 닫기·`exit`·작업 폴더 변경 모두 탭-세션 연결만 끊는다. 서버의 세션은 남아 `/sessions`로 원래 폴더 그대로 이어갈 수 있다. 응답 중이었다면 `releaseSession`이 구독을 끝내고 서버 세션을 `abort`한다. `DELETE /session`은 쓰지 않는다.
 - `exit`/`/exit`/`quit`(입력 전체가 일치할 때만): 응답 중이면 `cancel-message` 후 `exit-panel`을 보낸다. background는 이 탭의 `tabSessions`·`activeTabs` 연결을 끊고 `sidePanel.setOptions({tabId, enabled:false})`로 패널을 닫는다. 서버 세션은 지우지 않는다. 그래서 `/sessions`로 이어갈 수 있고, 다시 열면 `get-tab-session`이 새 세션을 만든다. 패널이 남아 있으면 사이드패널이 `window.close()`로 닫는다.
+- **입력 기록(↑/↓, TUI와 같은 개념)**: 현재 세션에서 보낸 입력을 다시 불러온다. 따로 저장하지 않고 화면의 사용자 말풍선(`addUserMessage`가 붙이는 `data-prompt`)에서 읽으므로, 세션·탭이 바뀌어 화면이 다시 그려지면 자동으로 그 세션 기준이 된다(서버 기록에서 복원한 입력은 페이지 컨텍스트·첨부 블록을 벗긴 원문). 불러온 뒤 고치지 않았으면 커서 위치와 무관하게 넘기고, 직접 입력 중이면 ↑는 첫 줄·↓는 마지막 줄에서만 동작한다. 한글 조합 중(`isComposing`)이나 명령 드롭다운이 열려 있으면 동작하지 않으며, 최신보다 더 내려가면 작성 중이던 내용(`historyDraft`)을 되돌린다.
 - 디버그 로그: 입력창 `/ext-log`(또는 연결 실패 화면의 "로그 보기" 버튼)로 SW 로그(`debugLogs`, 최대 500건) + host 파일 로그(`read-log`)를 다이얼로그로 표시·자동 복사한다. 새 오류 경로는 `debugLog(level, msg)`로 남긴다. `/debug`는 OpenCode 예약어와 충돌해 `/ext-log`로 바꿨다.
 
 ### native-host/host.js
