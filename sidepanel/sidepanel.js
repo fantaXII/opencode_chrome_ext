@@ -239,6 +239,7 @@ I18N.ready.then(function() {
     // 이전 탭의 실제 대화 메시지만 즉시 제거한다(탭 전환 시 잔상 방지).
     // welcome 화면은 신규 세션 판정 전까지 그대로 두어 깜빡임을 피한다.
     clearStaleTranscript();
+    const myRestore = beginStreamRestore();
 
     try {
       const result = await sendMessageToBackground('get-tab-session', {
@@ -265,6 +266,8 @@ I18N.ready.then(function() {
     } catch (e) {
       console.error('세션 초기화 실패:', e);
     }
+    // 그 사이 다른 탭으로 바뀌었거나 reinit이 다시 왔으면 나중 것이 복원을 끝낸다
+    endStreamRestore(myRestore);
 
     // 세션 준비 완료 후 입력 내용이 있으면 전송 버튼 활성화
     updateSendButtonState();
@@ -368,20 +371,58 @@ I18N.ready.then(function() {
       messagesContainer.innerHTML = ''; // 이중 안전장치
 
       const messages = (res.success && res.messages) || [];
-      if (messages.length === 0) {
+      const notices = (res.success && res.notices) || [];
+      const stream = (res.success && res.stream) || null;
+      if (messages.length === 0 && notices.length === 0 && !stream) {
         if (tab.title) addPageContextMessage(tab.title, tab.url);
         return;
       }
 
-      for (const m of messages) {
-        if (!m.text || !m.text.trim()) continue; // tool-only 턴 등 텍스트 없는 메시지는 건너뜀
-        if (m.role === 'user') {
-          // 저장 순서는 pageContext + attachmentBlock + 원문이므로 이 순서대로 벗겨낸다.
-          const { text, attachments } = splitAttachmentBlock(stripPageContext(m.text));
-          addUserMessage(text, attachments);
-        } else if (m.role === 'assistant') {
-          addBotMessage(m.text);
+      // 오류 안내는 그 직전 메시지 뒤에 넣는다(직전 메시지가 텍스트 없이 건너뛰어져도 그 위치에).
+      const noticesAfter = new Map();
+      const knownIds = new Set(messages.map((m) => m.id));
+      const trailingNotices = [];
+      for (const n of notices) {
+        if (n.afterId && knownIds.has(n.afterId)) {
+          if (!noticesAfter.has(n.afterId)) noticesAfter.set(n.afterId, []);
+          noticesAfter.get(n.afterId).push(n);
+        } else {
+          trailingNotices.push(n);
         }
+      }
+
+      // 진행 중인 턴 = 응답 중인 user 메시지(turnParentId). 아직 응답이 시작되기 전이면 마지막 user 메시지.
+      const turnId = stream
+        ? (stream.turnParentId || [...messages].reverse().find((m) => m.role === 'user')?.id || null)
+        : null;
+      let streamAnchorEl = null;
+      let afterTurnStart = false;
+      const userElsAfterTurn = [];
+      for (const m of messages) {
+        // 진행 중인 턴의 응답은 스냅샷으로 이어 그린다(기록의 텍스트는 그 시점까지만 있다).
+        const inProgress = !!turnId && m.role === 'assistant' && m.parentID === turnId;
+        if (!inProgress && m.text && m.text.trim()) { // tool-only 턴 등 텍스트 없는 메시지는 건너뜀
+          if (m.role === 'user') {
+            // 저장 순서는 pageContext + attachmentBlock + 원문이므로 이 순서대로 벗겨낸다.
+            const { text, attachments } = splitAttachmentBlock(stripPageContext(m.text));
+            const el = addUserMessage(text, attachments);
+            if (afterTurnStart) userElsAfterTurn.push(el);
+            if (turnId && m.id === turnId) {
+              streamAnchorEl = el;
+              afterTurnStart = true;
+            }
+          } else if (m.role === 'assistant') {
+            addBotMessage(m.text);
+          }
+        }
+        for (const n of noticesAfter.get(m.id) || []) addErrorMessage(t(n.text));
+      }
+      for (const n of trailingNotices) addErrorMessage(t(n.text));
+
+      if (stream && myToken === reinitToken && tab.id === currentTabId) {
+        // 이 턴 이후에 들어온 user 메시지 중 마지막 queuedOutstanding개는 아직 처리되지 않은 대기 메시지다
+        const queuedEls = stream.queuedOutstanding > 0 ? userElsAfterTurn.slice(-stream.queuedOutstanding) : [];
+        restoreActiveStream(stream, streamAnchorEl, queuedEls);
       }
     } catch (e) {
       console.error('히스토리 복원 실패:', e);
@@ -2980,8 +3021,80 @@ I18N.ready.then(function() {
     else sendMessage();
   });
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (deferStreamEvent(message)) return;
+    handleRuntimeMessage(message);
+  });
+
+  // ============================================
+  // 탭 전환·재오픈 후 진행 중인 응답 복원
+  // ============================================
+  // 사이드패널은 탭이 바뀔 때마다 서버 대화 기록으로 화면을 다시 그린다. 응답이 진행 중이면 background가
+  // 기록과 함께 스냅샷(현재 턴 텍스트·청크 순번·시작/마지막 활동 시각·재시도·대기 메시지)을 주고, 여기서
+  // 진행 표시·중단 버튼·응답 말풍선을 이어 그린다. 다시 그리는 동안 도착한 응답 이벤트는 모아 두었다가
+  // 복원 뒤에 재생한다(스냅샷에 이미 들어 있는 청크는 seq로 거른다).
+  let restoringStream = false;
+  let restoreToken = 0;
+  let deferredStreamEvents = [];
+  let restoredChunkSeq = 0; // 이 값 이하의 청크는 스냅샷에 포함돼 있다
+  const STREAM_EVENT_ACTIONS = ['message-chunk', 'message-part', 'message-complete'];
+
+  function deferStreamEvent(message) {
+    if (!restoringStream || !STREAM_EVENT_ACTIONS.includes(message.action)) return false;
+    if (!currentSessionId || message.sessionId !== currentSessionId) return false;
+    deferredStreamEvents.push(message);
+    return true;
+  }
+
+  function beginStreamRestore() {
+    restoringStream = true;
+    deferredStreamEvents = [];
+    restoredChunkSeq = 0;
+    return ++restoreToken;
+  }
+
+  // 나중에 시작한 복원이 있으면(같은 탭에 reinit이 연달아 온 경우) 그쪽이 끝낸다.
+  function endStreamRestore(token) {
+    if (token !== restoreToken) return;
+    restoringStream = false;
+    const events = deferredStreamEvents;
+    deferredStreamEvents = [];
+    for (const m of events) {
+      if (m.sessionId !== currentSessionId) continue;
+      handleRuntimeMessage(m);
+    }
+  }
+
+  // stream: get-session-history의 스냅샷. anchorEl: 이 턴을 시작한 user 메시지 말풍선(없으면 맨 끝).
+  function restoreActiveStream(stream, anchorEl, queuedEls) {
+    restoredChunkSeq = stream.seq || 0;
+    earlierSegments = [];
+    activeBlocks = null;
+    activeBlocksContainer = null;
+    setLoadingState(true);
+    progress.startedAt = stream.turnStartedAt || Date.now();
+    progress.lastActivityAt = stream.lastActivityAt || Date.now();
+    queueConsumed = stream.queuedConsumed || 0;
+    // 아직 처리되지 않은 대기 메시지(서버 큐) 말풍선에 배지를 다시 붙여 turn-start와 맞춘다
+    pendingQueue = queuedEls.map((el) => ({ el, payload: '', state: 'queued' }));
+    for (const entry of pendingQueue) setQueueBadge(entry, 'queued');
+    removeTypingIndicator();
+    addTypingIndicator(anchorEl);
+    if (stream.text) {
+      ensureActiveBlockMessage(); // typing indicator 자리에 말풍선을 연다
+      appendTextDelta(activeBlocks, stream.text);
+      renderBlocks(activeBlocks, activeBlocksContainer);
+      progress.phase = 'writing';
+    }
+    if (stream.retry) showRetryStatus(stream.retry);
+    renderProgress();
+    scrollToBottom();
+  }
+
+  function handleRuntimeMessage(message) {
     if (message.action === 'message-chunk' && message.sessionId === currentSessionId) {
+      // 탭 복원 스냅샷에 이미 들어간 청크는 건너뛴다
+      if (message.seq != null && message.seq <= restoredChunkSeq) return;
       ensureActiveBlockMessage();
       appendTextDelta(activeBlocks, message.chunk);
       blockRenderScheduler.request();
@@ -3103,7 +3216,7 @@ I18N.ready.then(function() {
       settleQueue({ recovered: !!message.recovered });
       flushLocalQueue();
     }
-  });
+  }
 
   function showToast(message) {
     const toast = document.getElementById('toast');

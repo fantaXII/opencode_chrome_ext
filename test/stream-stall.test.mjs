@@ -419,3 +419,62 @@ test('대기 메시지: 진행 중인 응답이 없으면 queued:false를 돌려
   assert.deepEqual(res, { success: true, queued: false });
   assert.equal(server.state.prompts.length, 0);
 });
+
+// ---- 탭 전환·재오픈 후 복원 ----
+
+test('복원: 응답 중에 기록을 요청하면 현재 턴 스냅샷(텍스트·청크 순번·부모)을 함께 준다', async (t) => {
+  const { server, bg, forSession, complete, done } = await setup({ timeoutMin: null });
+  t.after(done);
+  let finish;
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(async () => {
+      startAnswering(server);
+      server.emit(ev.delta(SID, 'abc'));
+      server.emit(ev.delta(SID, 'def'));
+      await new Promise((r) => { finish = r; });
+      server.emit(ev.delta(SID, 'ghi'));
+      server.emit(ev.idle(SID));
+    }, 20);
+  };
+  server.state.messages[SID] = [
+    { info: { id: 'msg_u', role: 'user' }, parts: [{ type: 'text', text: 'hi' }] },
+    { info: { id: 'msg_a', role: 'assistant', parentID: 'msg_u' }, parts: [{ type: 'text', text: 'abc' }] }
+  ];
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => forSession('message-chunk').length === 2, 2000, 'two chunks');
+  assert.deepEqual(forSession('message-chunk').map((m) => m.seq), [1, 2], '청크에 순번이 붙는다');
+
+  const hist = await bg.send({ action: 'get-session-history', sessionId: SID });
+  assert.equal(hist.success, true);
+  assert.equal(hist.messages[1].parentID, 'msg_u', '기록에 부모 id가 포함된다');
+  assert.equal(hist.stream.text, 'abcdef');
+  assert.equal(hist.stream.seq, 2);
+  assert.equal(hist.stream.turnParentId, 'msg_u');
+  assert.equal(typeof hist.stream.turnStartedAt, 'number');
+
+  finish();
+  await waitFor(() => complete(), 2000, 'message-complete');
+  assert.equal(forSession('message-chunk').at(-1).seq, 3);
+  const after = await bg.send({ action: 'get-session-history', sessionId: SID });
+  assert.equal(after.stream, null, '완료 뒤에는 스냅샷이 없다');
+});
+
+test('복원: 응답 오류(시간 초과)는 세션에 기록돼 화면을 다시 그려도 같은 자리에 남는다', async (t) => {
+  const { server, bg, complete, done } = await setup();
+  t.after(done);
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(() => { startAnswering(server); server.emit(ev.delta(SID, 'partial')); }, 20); // 이후 멈춤
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => complete(), IDLE_MS * 6, 'timeout');
+  assert.match(complete().error, /응답 시간 초과/);
+  const hist = await bg.send({ action: 'get-session-history', sessionId: SID });
+  assert.equal(hist.notices.length, 1);
+  assert.equal(hist.notices[0].afterId, 'msg_a', '오류 직전 메시지(응답 중이던 assistant) 뒤에 표시한다');
+  assert.match(hist.notices[0].text, /응답 시간 초과/);
+  assert.deepEqual(bg.sessionStorage.sessionNotices?.[0]?.[0], SID, 'SW 재시작에 대비해 storage.session에도 저장한다');
+});

@@ -93,6 +93,26 @@ chrome.storage.local.get('selectedModel').then(({ selectedModel: saved }) => {
   if (saved) selectedModel = saved;
 }).catch(() => {});
 
+// 세션별 오류 안내(응답 시간 초과 등). 사이드패널은 탭 전환·재오픈 때 서버 대화 기록으로 화면을 다시 그리는데,
+// 오류 문구는 서버 기록에 없어 사라졌다(다른 탭에 있는 동안 난 오류는 아예 표시되지 않았다).
+// → SW가 { afterId: 오류 직전 메시지 id, text }로 보관하고 get-session-history가 함께 돌려준다.
+const SESSION_NOTICES_KEY = 'sessionNotices';
+const MAX_NOTICES_PER_SESSION = 20;
+let sessionNotices = new Map(); // sessionId -> [{ afterId, text, at }]
+chrome.storage.session.get(SESSION_NOTICES_KEY).then((data) => {
+  if (data?.[SESSION_NOTICES_KEY]) sessionNotices = new Map(data[SESSION_NOTICES_KEY]);
+}).catch(() => {});
+function persistNotices() {
+  chrome.storage.session.set({ [SESSION_NOTICES_KEY]: [...sessionNotices] }).catch(() => {});
+}
+function addSessionNotice(sessionId, afterId, text) {
+  if (!sessionId || !text) return;
+  const list = sessionNotices.get(sessionId) || [];
+  list.push({ afterId: afterId || null, text, at: Date.now() });
+  sessionNotices.set(sessionId, list.slice(-MAX_NOTICES_PER_SESSION));
+  persistNotices();
+}
+
 // SW 재시작 시 탭/세션 상태를 storage.session에서 복원
 function persistState() {
   chrome.storage.session.set({
@@ -136,6 +156,7 @@ async function recoverInterruptedPrompts() {
       },
       onComplete: (content, error) => {
         debugLog(error ? 'ERROR' : 'INFO', `Interrupted prompt recovery done - sessionId=${sessionId}, chars=${content?.length || 0}, error=${error || 'none'}`);
+        if (error) addSessionNotice(sessionId, null, error);
         chrome.runtime.sendMessage({ action: 'message-complete', sessionId, content, error, recovered: true }).catch(() => {});
       }
     }).catch((e) => {
@@ -1052,6 +1073,7 @@ async function deleteSession(sessionId) {
   }
 
   sessions.delete(sessionId);
+  if (sessionNotices.delete(sessionId)) persistNotices();
 
   // SSE 연결 정리 (eventSources는 fetch 기반 AbortController를 담는다)
   const controller = eventSources.get(sessionId);
@@ -1392,13 +1414,17 @@ async function getSessionHistory(sessionId) {
       .map(m => ({
         role: m.info.role,
         id: m.info.id,
+        parentID: m.info.parentID || null,
         text: (m.parts || [])
           .filter(p => p.type === 'text' && typeof p.text === 'string')
           .map(p => p.text)
           .join('')
       }));
 
-    return { success: true, messages };
+    // 진행 중인 응답이 있으면 사이드패널이 이어 그릴 수 있게 상태를 함께 준다(기록을 읽은 뒤에 찍어 더 최신이다).
+    const ctrl = eventSources.get(sessionId);
+    const stream = ctrl && !ctrl.signal.aborted && ctrl.snapshot ? ctrl.snapshot() : null;
+    return { success: true, messages, notices: sessionNotices.get(sessionId) || [], stream };
   } catch (e) {
     debugLog('ERROR', `getSessionHistory: failed - sessionId=${sessionId}, error=${e.message}`);
     return { success: false, messages: [], error: e.message };
@@ -1450,6 +1476,14 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     let resolved = false;
     let buffer = '';
     let completed = false;
+    // 청크 순번. 사이드패널이 탭 전환 후 스냅샷(snapshot().text)으로 말풍선을 다시 그릴 때, 스냅샷에 이미 포함된
+    // 청크(seq ≤ snapshot.seq)를 걸러 중복을 막는다.
+    let chunkSeq = 0;
+    const emitChunk = (delta) => onChunk(delta, ++chunkSeq);
+    // 완료 콜백에 오류 위치(직전 메시지 id)를 붙인다 → send-message가 오류 안내를 세션에 기록한다.
+    const complete = (content, error) => onComplete(content, error, {
+      anchorId: assistantMessageId || turnParentId || userMessageIds.at(-1) || null
+    });
     let assistantMessageId = null;
     let routerState = createRouterState();
     // 이 프롬프트에 속한 세션들: 본 세션 + task 도구가 만든 하위(subagent) 세션.
@@ -1473,6 +1507,17 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     let queuedSent = 0;      // 접수 요청한 대기 메시지 수
     let queuedConsumed = 0;  // 서버가 처리를 시작한 대기 메시지 수
     let queueGraceTimer = null;
+    // 사이드패널이 탭 전환·재오픈 후 진행 중인 응답을 이어 그리기 위한 현재 상태(get-session-history의 stream).
+    controller.snapshot = () => ({
+      turnParentId,
+      text: buffer,
+      seq: chunkSeq,
+      turnStartedAt,
+      lastActivityAt,
+      retry: retryUntil && retryUntil > Date.now() ? lastRetry : null,
+      queuedConsumed,
+      queuedOutstanding: queuedSent - queuedConsumed
+    });
     controller.queue = {
       port,
       add() { if (completed || controller.signal.aborted) return false; queuedSent++; return true; },
@@ -1482,6 +1527,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
 
     let timeoutId = null;
     let lastActivityAt = Date.now();
+    let turnStartedAt = Date.now();
+    let lastRetry = null; // 사이드패널 복원용 마지막 retry 파트
     // 스트림이 어떤 경로로든 끝나면(cancel-message, 전송 실패, 새 프롬프트가 기존 구독을 대체 등) 타이머도 끝낸다.
     // 안 그러면 남은 타이머가 뒤늦게 "응답 시간 초과"를 보내고 서버 세션을 abort해 다음 프롬프트까지 죽인다.
     controller.signal.addEventListener('abort', () => {
@@ -1529,7 +1576,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
           // 타임아웃 = 설정한 시간 동안 이벤트 없음. 서버에 busy 세션이 남지 않도록 항상 abort한다
           // (이미 idle인 세션에는 무해). 안 하면 다음 프롬프트가 큐에서 영원히 대기한다.
           await abortServerSession(port, sessionId);
-          onComplete(finalContent, errMsg);
+          complete(finalContent, errMsg);
         }
       }, limitMs);
     }
@@ -1544,13 +1591,14 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       const next = Number(st.next);
       retryUntil = Number.isFinite(next) ? next : 0;
       debugLog('WARN', `Session retry - sessionId=${evtSessionId}${evtSessionId !== sessionId ? ` (subagent of ${sessionId})` : ''}, attempt=${st.attempt}, next=${retryUntil ? new Date(retryUntil).toISOString() : 'none'}, message=${st.message || ''}`);
-      onPart?.({
+      lastRetry = {
         kind: 'retry',
         attempt: st.attempt,
         message: st.message || '',
         next: retryUntil || null,
         fromSubagent: evtSessionId !== sessionId
-      });
+      };
+      onPart?.(lastRetry);
       resetTimeout();
     }
 
@@ -1602,8 +1650,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
           }
         }
       }
-      if (idleError) { onComplete(null, idleError); return; }
-      onComplete(finalContent);
+      if (idleError) { complete(null, idleError); return; }
+      complete(finalContent);
     }
 
     // 새 assistant 메시지가 시작됐다. 부모(user 메시지)가 바뀌었으면 대기 메시지의 응답이 시작된 것이다.
@@ -1618,7 +1666,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       queuedConsumed = Math.max(queuedConsumed, consumed);
       // 첫 응답이 곧바로 대기 메시지에 대한 것(서버가 둘을 한 번에 처리)이면 새 말풍선 없이 배지만 정리한다
       const newBubble = !first;
-      if (newBubble) buffer = ''; // buffer = 현재 턴의 텍스트(완료 시 마지막 말풍선의 REST 폴백 판단에 쓴다)
+      if (newBubble) { buffer = ''; turnStartedAt = Date.now(); } // buffer = 현재 턴의 텍스트(완료 시 마지막 말풍선의 REST 폴백 판단에 쓴다)
       debugLog('INFO', `Queued message turn started - sessionId=${sessionId}, parentId=${parentId}, consumed=${queuedConsumed}/${queuedSent}, newBubble=${newBubble}`);
       onPart?.({ kind: 'turn-start', consumed: queuedConsumed, newBubble });
     }
@@ -1688,7 +1736,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       completed = true;
       controller.abort();
       detach();
-      onComplete(buffer || null, errMsg);
+      complete(buffer || null, errMsg);
     }
 
     function emitAsk(part) {
@@ -1763,7 +1811,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
           clearTimeout(timeoutId);
           controller.abort();
           detach();
-          onComplete('', `SSE 연결 실패: ${response.status}`);
+          complete('', `SSE 연결 실패: ${response.status}`);
           return;
         }
 
@@ -1895,7 +1943,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                   if (routed?.action === 'chunk') {
                     clearRetry();
                     buffer += routed.delta;
-                    onChunk(routed.delta);
+                    emitChunk(routed.delta);
                     resetTimeout();
                   } else if (routed?.action === 'part') {
                     clearRetry();
@@ -1939,7 +1987,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                     || evt.properties?.error?.name
                     || '오류가 발생했습니다';
                   debugLog('ERROR', `Session error - sessionId=${sessionId}, error=${errMsg}`);
-                  onComplete(null, errMsg);
+                  complete(null, errMsg);
                   return;
                 }
               }
@@ -2272,14 +2320,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               sid,
               message.message,
               tabInfo,
-              (chunk) => {
+              (chunk, seq) => {
                 chrome.runtime.sendMessage({
                   action: 'message-chunk',
                   sessionId: message.sessionId,
-                  chunk: chunk
+                  chunk: chunk,
+                  seq
                 }).catch(() => {});
               },
-              (final, error) => {
+              (final, error, meta) => {
+                // 오류는 화면을 다시 그려도 남도록 세션에 기록한다(다른 탭에 있는 동안 난 오류도 돌아오면 보인다).
+                if (error) addSessionNotice(sid, meta?.anchorId, error);
                 chrome.runtime.sendMessage({
                   action: 'message-complete',
                   sessionId: message.sessionId,
