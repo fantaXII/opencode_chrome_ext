@@ -84,6 +84,7 @@ I18N.ready.then(function() {
     { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),       hasArg: true  },
     { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),    hasArg: true  },
     { id: 'local.extlog', slash: '/ext-log', title: 'Extension Log', description: t('확장 디버그 로그 표시·복사 (문제 신고 시 첨부)'), hasArg: false },
+    { id: 'local.exit',  slash: '/exit',  title: 'Exit',        description: t('사이드패널 닫기 (대화는 /sessions로 다시 열 수 있음)'), hasArg: false },
   ];
   let isDropdownOpen = false;
   let selectedDropdownIndex = -1;
@@ -94,6 +95,8 @@ I18N.ready.then(function() {
   let reinitToken = 0; // 탭 전환 레이스 컨디션 방지용 토큰
 
   function updateSendButtonState() {
+    // 응답 중에는 전송 버튼이 ■ 중단 버튼이다. 입력창이 비어도(대기 메시지를 보낸 직후 등) 누를 수 있어야 한다.
+    if (isLoading) { sendBtn.disabled = false; return; }
     sendBtn.disabled = !messageInput.value.trim() && attachedFiles.length === 0;
   }
 
@@ -641,6 +644,7 @@ I18N.ready.then(function() {
       { id: 'local.resume', slash: '/resume', title: 'Resume',    description: t('/sessions와 동일'),              hasArg: false },
       { id: 'local.model', slash: '/model', title: 'Model',       description: t('모델 변경 <model-name>'),         hasArg: true  },
       { id: 'local.wd',    slash: '/wd',    title: 'Working Dir', description: t('작업 디렉토리 변경 <path>'),      hasArg: true  },
+      { id: 'local.exit',  slash: '/exit',  title: 'Exit',        description: t('사이드패널 닫기 (대화는 /sessions로 다시 열 수 있음)'), hasArg: false },
     ];
     try {
       const res = await sendMessageToBackground('get-commands', {});
@@ -996,6 +1000,11 @@ I18N.ready.then(function() {
 
   async function sendMessage() {
     const message = messageInput.value.trim();
+    // TUI처럼 exit를 입력하면 패널을 닫는다(응답 중이거나 서버 재시작 중이어도 동작).
+    if (isExitCommand(message)) {
+      await exitPanel();
+      return;
+    }
     if (isServerTransitioning()) return;
     if (!message && attachedFiles.length === 0) return;
 
@@ -1031,6 +1040,32 @@ I18N.ready.then(function() {
     const { payload, attachments } = takeComposedMessage(message);
     addUserMessage(message, attachments);
     await startPrompt(payload);
+  }
+
+  // 문장 속의 exit에는 반응하지 않도록 입력 전체가 정확히 일치할 때만 종료로 본다.
+  const EXIT_COMMANDS = ['exit', '/exit', 'quit', '/quit'];
+  function isExitCommand(message) {
+    return EXIT_COMMANDS.includes(message.trim().toLowerCase());
+  }
+
+  // 패널을 닫고 이 탭의 세션 연결을 끊는다. 서버의 세션(대화 기록)은 지우지 않으므로 /sessions로 이어갈 수 있고,
+  // 다음에 이 탭에서 패널을 열면 새 세션으로 시작한다(TUI의 exit와 같은 동작).
+  async function exitPanel() {
+    messageInput.value = '';
+    messageInput.style.height = 'auto';
+    attachedFiles = [];
+    renderAttachments();
+    hideCommandDropdown();
+    if (isLoading) {
+      try { await cancelMessage(); } catch {}
+    }
+    try {
+      await sendMessageToBackground('exit-panel', { tabId: currentTabId, sessionId: currentSessionId });
+    } catch (e) {
+      console.warn('exit-panel 실패:', e.message);
+    }
+    // background가 이 탭의 패널을 비활성화하면 여기까지 오기 전에 닫힌다. 남아 있으면 직접 닫는다.
+    setTimeout(() => window.close(), 300);
   }
 
   // 입력창의 메시지와 첨부를 꺼내(입력창은 비운다) 서버로 보낼 본문을 만든다.
@@ -1151,6 +1186,7 @@ I18N.ready.then(function() {
     if (part.newBubble) {
       // 이전 턴의 말풍선을 마무리하고, 새 응답은 처리 중인 대기 메시지 바로 아래에 연다
       blockRenderScheduler.flush();
+      settleEarlierSegments('interrupted');
       if (activeBlocks) {
         finalizeRunning(activeBlocks, 'interrupted');
         renderBlocks(activeBlocks, activeBlocksContainer);
@@ -2361,6 +2397,7 @@ I18N.ready.then(function() {
   async function cancelMessage() {
     if (!isLoading || !currentSessionId) return;
     await sendMessageToBackground('cancel-message', { sessionId: currentSessionId });
+    settleEarlierSegments('cancelled');
     if (activeBlocks) {
       finalizeRunning(activeBlocks, 'cancelled');
       renderBlocks(activeBlocks, activeBlocksContainer);
@@ -2453,6 +2490,46 @@ I18N.ready.then(function() {
 
   let activeBlocks = null;
   let activeBlocksContainer = null;
+  // 권한/질문 카드에서 끊긴, 같은 응답의 앞 말풍선들 [{ blocks, container }].
+  // 이미 그 안에 있는 도구·reasoning의 후속 갱신(예: 권한을 요청한 도구의 완료)은 원래 자리에서 갱신한다.
+  let earlierSegments = [];
+
+  // 현재 응답 말풍선을 여기서 마무리한다. 이후 내용은 ensureActiveBlockMessage가 맨 아래에 새로 연다.
+  function splitActiveMessage() {
+    blockRenderScheduler.flush();
+    if (activeBlocks && activeBlocksContainer && document.body.contains(activeBlocksContainer)) {
+      renderBlocks(activeBlocks, activeBlocksContainer);
+      enhanceCodeBlocks(activeBlocksContainer);
+      earlierSegments.push({ blocks: activeBlocks, container: activeBlocksContainer });
+    }
+    activeBlocks = null;
+    activeBlocksContainer = null;
+    removeTypingIndicator();
+  }
+
+  // 이 파트가 갱신할 블록이 앞 말풍선에 있으면 그 말풍선을 돌려준다.
+  function earlierSegmentFor(part) {
+    const id = part.kind === 'subagent' ? part.toolId : part.id;
+    const type = part.kind === 'tool' || part.kind === 'subagent' ? 'tool' : 'reasoning';
+    earlierSegments = earlierSegments.filter((seg) => document.body.contains(seg.container));
+    return earlierSegments.find((seg) => seg.blocks.some((b) => b.type === type && b.id === id)) || null;
+  }
+
+  // 응답이 끝나면(완료·오류·중단·다음 턴) 앞 말풍선들도 실행 중 표시가 남지 않게 정리한다.
+  function settleEarlierSegments(finalStatus) {
+    for (const seg of earlierSegments) {
+      if (!document.body.contains(seg.container)) continue;
+      finalizeRunning(seg.blocks, finalStatus);
+      renderBlocks(seg.blocks, seg.container);
+    }
+    earlierSegments = [];
+  }
+
+  function responseHasText() {
+    const hasText = (blocks) => blocks.some((b) => b.type === 'text' && b.raw.trim());
+    return (activeBlocks && hasText(activeBlocks))
+      || earlierSegments.some((seg) => document.body.contains(seg.container) && hasText(seg.blocks));
+  }
 
   // SSE delta는 화면 주사율보다 훨씬 빠르게 도착할 수 있어, state(activeBlocks) 갱신은
   // 매번 즉시 하되 실제 DOM 렌더(renderBlocks, 마크다운 재파싱 포함)는 프레임당 최대
@@ -2485,7 +2562,10 @@ I18N.ready.then(function() {
     if (existing && document.body.contains(existing.el)) return;
     const card = part.kind === 'permission' ? buildPermissionCard(part) : buildQuestionCard(part);
     interactionCards.set(part.id, { el: card, resolved: false });
+    // 응답 말풍선을 카드 앞에서 끊는다. 안 그러면 답한 뒤 이어지는 응답이 카드 위 말풍선에 쌓여 안 보인다.
+    splitActiveMessage();
     messagesContainer.appendChild(card);
+    if (isLoading) addTypingIndicator(); // 이어지는 응답은 카드 아래에 그려진다
     scrollToBottom();
   }
 
@@ -2922,8 +3002,24 @@ I18N.ready.then(function() {
                && message.part?.kind === 'turn-start') {
       if (isLoading) handleTurnStart(message.part);
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
-      ensureActiveBlockMessage();
       const part = message.part || {};
+      const earlier = ['tool', 'subagent', 'reasoning-start', 'reasoning-delta'].includes(part.kind)
+        ? earlierSegmentFor(part) : null;
+      if (earlier) {
+        // 카드 위 말풍선에 있는 블록의 후속 갱신: 원래 자리에서 바로 그린다
+        if (part.kind === 'tool') upsertToolPart(earlier.blocks, part);
+        else if (part.kind === 'subagent') setSubagentProgress(earlier.blocks, part);
+        else if (part.kind === 'reasoning-delta') appendReasoningDelta(earlier.blocks, part.id, part.delta);
+        renderBlocks(earlier.blocks, earlier.container);
+        if (part.kind === 'tool') {
+          const active = part.status === 'pending' || part.status === 'running';
+          noteProgress(active ? 'tool' : 'waiting', active ? (part.tool || '') : '');
+        } else {
+          noteProgress(part.kind === 'subagent' ? (part.activity ? 'subagent' : null) : 'thinking', part.agent || '');
+        }
+        return;
+      }
+      ensureActiveBlockMessage();
       if (part.kind === 'tool') {
         upsertToolPart(activeBlocks, part);
         const active = part.status === 'pending' || part.status === 'running';
@@ -2970,6 +3066,7 @@ I18N.ready.then(function() {
       if (message.error) {
         // 진행 중이던 tool/reasoning 카드를 지우지 않고 'error'로 고정해 남긴다
         // (§6: 실패 시에도 "무엇을 하고 있었는지"는 보여야 함).
+        settleEarlierSegments('error');
         if (activeBlocks) {
           finalizeRunning(activeBlocks, 'error');
           renderBlocks(activeBlocks, activeBlocksContainer);
@@ -2978,19 +3075,24 @@ I18N.ready.then(function() {
           removeTypingIndicator();
         }
         addErrorMessage(t(message.error));
-      } else if (activeBlocks) {
+      } else if (activeBlocks || earlierSegments.length > 0) {
         // SSE가 idle까지 갔는데 텍스트 delta가 하나도 안 쌓인 경우(§6 REST 폴백,
         // background.js의 fetchFallbackContent) message.content로 복구된 텍스트를
         // 블록에 반영하지 않으면 tool 카드만 보이고 실제 답변이 사라진다.
-        const hasText = activeBlocks.some((b) => b.type === 'text' && b.raw.trim());
-        if (!hasText && message.content && message.content.trim()) {
+        // 카드로 끊긴 앞 말풍선에 이미 텍스트가 있으면 그 텍스트(= message.content)를 다시 붙이지 않는다.
+        if (!responseHasText() && message.content && message.content.trim()) {
+          ensureActiveBlockMessage();
           appendTextDelta(activeBlocks, message.content.trim());
         }
         // running/pending으로 남은 파트가 있으면(타임아웃 등) 무한 스피너로
         // 남지 않도록 강제 정리 (§6).
-        finalizeRunning(activeBlocks, 'interrupted');
-        renderBlocks(activeBlocks, activeBlocksContainer);
-        enhanceCodeBlocks(activeBlocksContainer);
+        settleEarlierSegments('interrupted');
+        if (activeBlocks) {
+          finalizeRunning(activeBlocks, 'interrupted');
+          renderBlocks(activeBlocks, activeBlocksContainer);
+          enhanceCodeBlocks(activeBlocksContainer);
+        }
+        removeTypingIndicator();
       } else if (message.content && message.content.trim()) {
         addBotMessage(message.content.trim());
       } else {

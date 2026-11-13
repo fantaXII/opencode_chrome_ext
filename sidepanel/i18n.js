@@ -172,6 +172,7 @@
     '처리되지 않음 — 다시 보내 주세요': 'Not processed — please send again',
     '서버 기록에는 남아 있어 다음 대화의 맥락에 포함될 수 있습니다.': 'It remains in the server history and may be included as context in the next turn.',
     '전송 실패': 'Send failed',
+    '사이드패널 닫기 (대화는 /sessions로 다시 열 수 있음)': 'Close the side panel (reopen the conversation with /sessions)',
     '대기 메시지 전송에 실패했습니다: {error}': 'Failed to queue the message: {error}',
     '이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.': 'Ask for a summary, explanation or search about this page.',
     '페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.': 'The page changed. This session continues the conversation from the previous page.',

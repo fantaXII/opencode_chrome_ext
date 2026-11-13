@@ -2325,6 +2325,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        // 사이드패널의 exit: 이 탭의 패널을 닫고 세션 연결을 끊는다. 서버 세션(대화 기록)은 지우지 않는다
+        // (탭을 닫을 때와 다름) → /sessions로 이어갈 수 있고, 다음에 패널을 열면 get-tab-session이 새 세션을 만든다.
+        case 'exit-panel': {
+          const { tabId, sessionId } = message;
+          if (sessionId) {
+            stopPromptStream(sessionId); // 응답 중이었다면 사이드패널이 cancel-message로 이미 중단했다
+            pendingInteractions.delete(sessionId);
+          }
+          if (tabId != null) {
+            tabSessions.delete(tabId);
+            activeTabs.delete(tabId);
+            tabLastShownInfo.delete(tabId);
+            persistState();
+          }
+          debugLog('INFO', `exit-panel: tabId=${tabId ?? 'none'}, sessionId=${sessionId || 'none'} (session kept on server)`);
+          sendResponse({ success: true });
+          // 이 탭 전용 패널을 비활성화하면 패널이 닫힌다(탭 전환 때와 같은 방식). 응답을 먼저 보낸 뒤 닫는다.
+          if (tabId != null && chrome.sidePanel) {
+            chrome.sidePanel.setOptions({ tabId, enabled: false }).catch((e) => {
+              debugLog('WARN', `exit-panel: sidePanel.setOptions failed - ${e.message}`);
+            });
+          }
+          break;
+        }
+
         // 응답 중에 보낸 메시지: 진행 중인 구독을 유지한 채 서버 큐에 넣는다(queueMessage 참고).
         case 'queue-message': {
           const tabInfo = await getCurrentTabInfo({ forPrompt: true });

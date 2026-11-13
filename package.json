@@ -10,7 +10,7 @@
     "build:all": "node scripts/build-installer.js && yarn build",
     "release": "release-it",
     "release-it": "release-it",
-    "test": "node --test test/sw-resilience.test.mjs test/host-dir.test.mjs test/stream-stall.test.mjs test/subagent-progress.test.mjs"
+    "test": "node --test test/sw-resilience.test.mjs test/host-dir.test.mjs test/stream-stall.test.mjs test/subagent-progress.test.mjs test/exit-panel.test.mjs"
   },
   "keywords": [
     "chrome-extension",

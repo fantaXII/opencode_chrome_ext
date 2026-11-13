@@ -34,6 +34,7 @@ function noopApi() {
 
 function createChromeStub({ local = {} } = {}) {
   const sent = [];       // background → 사이드패널로 보낸 메시지 (chrome.runtime.sendMessage)
+  const sidePanelCalls = []; // chrome.sidePanel.setOptions 호출 인자
   let onMessage = null;
   const runtime = {
     id: 'test-extension',
@@ -49,9 +50,11 @@ function createChromeStub({ local = {} } = {}) {
   const chrome = new Proxy({
     runtime,
     storage: { local: createStorageArea(local), session: createStorageArea(), onChanged: noopApi() },
-    tabs: new Proxy({ query: async () => [] }, { get: (t, k) => t[k] ?? noopApi() })
+    tabs: new Proxy({ query: async () => [] }, { get: (t, k) => t[k] ?? noopApi() }),
+    sidePanel: new Proxy({ setOptions: (o) => { sidePanelCalls.push(o); return Promise.resolve(); } },
+      { get: (t, k) => t[k] ?? noopApi() })
   }, { get: (t, k) => t[k] ?? noopApi() });
-  return { chrome, sent, getOnMessage: () => onMessage };
+  return { chrome, sent, sidePanelCalls, getOnMessage: () => onMessage };
 }
 
 /**
@@ -96,6 +99,8 @@ export async function loadBackground({ port, constants = {}, local = {}, sourceP
   return {
     send,
     sent: stub.sent,
+    sidePanelCalls: stub.sidePanelCalls,
+    sessionStorage: stub.chrome.storage.session.data,
     internals: mod.__test,
     /** 다음 SW 로그를 읽는다 (debugLog는 chrome.storage.local.debugLogs에 쌓인다). */
     logs: () => (stub.chrome.storage.local.data.debugLogs || []).map((e) => `${e.level} ${e.msg}`),
