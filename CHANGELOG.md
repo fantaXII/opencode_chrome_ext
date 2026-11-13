@@ -1,5 +1,21 @@
 # Changelog
 
+# [2.20.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.19.0...v2.20.0) (2026-11-13)
+
+
+### Bug Fixes
+
+* 작업 폴더를 세션별로 적용 (다른 탭의 기존 세션은 원래 폴더 유지) ([0c5d8f5](https://github.com/fantaXII/opencode_chrome_ext/commit/0c5d8f5fd82838736626c7369ff2da63ece08d40))
+* 탭 전환·재오픈 후 진행 중 응답 표시와 오류 안내 복원 ([2025460](https://github.com/fantaXII/opencode_chrome_ext/commit/202546014c7f466a0b8fbc83b1dcfcba41e9ed6c))
+
+
+### Features
+
+* 권한·질문 카드 뒤 응답을 카드 아래에 표시, exit로 사이드패널 닫기 ([9e8d079](https://github.com/fantaXII/opencode_chrome_ext/commit/9e8d07908c60966783465ece2240bdaf53f7ee23))
+* 응답 제한 시간 설정(기본 없음)·진행 표시와 응답 중 대기 메시지 전송 ([f820489](https://github.com/fantaXII/opencode_chrome_ext/commit/f820489784c214d5e4c1d7249662535741e59d69))
+* 입력창 ↑/↓로 현재 세션의 이전 입력 불러오기 (TUI와 같은 개념) ([e91e66e](https://github.com/fantaXII/opencode_chrome_ext/commit/e91e66e2a21ef2554d1bc398102b4d6f5c862145))
+* 탭 닫기·작업 폴더 변경 시 세션을 삭제하지 않음 (TUI와 같은 개념) ([488263f](https://github.com/fantaXII/opencode_chrome_ext/commit/488263f6f96b995e09c4100a9752ad1419da0692))
+
 # [2.19.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.18.0...v2.19.0) (2026-11-11)
 
 
