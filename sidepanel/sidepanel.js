@@ -145,6 +145,25 @@ I18N.ready.then(function() {
     } catch (e) {}
   }
 
+  // 작업 폴더는 세션마다 다르다(opencode가 세션을 만든 폴더에 고정). 사이드패널은 탭들이 한 화면을 같이 쓰므로
+  // 세션이 바뀔 때마다(탭 전환, /new, /sessions, 폴더 변경) 현재 세션의 폴더로 다시 표시한다.
+  // 다른 탭에서 폴더를 바꿔도 이 탭의 세션은 원래 폴더로 동작하므로 표시도 그대로다.
+  async function refreshWorkingDirectory() {
+    const sid = currentSessionId;
+    if (!sid) return;
+    try {
+      const res = await sendMessageToBackground('get-working-directory', { sessionId: sid });
+      if (sid !== currentSessionId) return; // 그 사이 세션이 바뀜
+      if (res.defaultDirectory) defaultWorkingDir = res.defaultDirectory;
+      if (res.isDefault || !res.directory) {
+        currentWorkingDir = '';
+        updateWorkingFolderDisplay(res.directory || defaultWorkingDir, true);
+      } else {
+        updateWorkingFolderDisplay(res.directory);
+      }
+    } catch (e) {}
+  }
+
   function updateWorkingFolderDisplay(dir, isDefault = false) {
     if (!isDefault) currentWorkingDir = dir;
     if (!dir) {
@@ -191,10 +210,10 @@ I18N.ready.then(function() {
   folderIcon.addEventListener('click', async () => {
     const res = await sendMessageToBackground('browse-for-folder');
     if (res?.directory) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: res.directory, tabId: currentTabId });
+      const result = await sendMessageToBackground('set-working-directory', { directory: res.directory, tabId: currentTabId, sessionId: currentSessionId });
       if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
-      updateWorkingFolderDisplay(result.directory || res.directory);
       applyWorkingDirSessionReset(result);
+      await refreshWorkingDirectory();
       if (res.warning) {
         addErrorMessage(t(res.warning));
       }
@@ -204,11 +223,12 @@ I18N.ready.then(function() {
   async function commitWorkingFolder() {
     const newPath = workingFolderInput.value.trim();
     exitEditMode();
-    if (newPath !== currentWorkingDir) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: newPath, tabId: currentTabId });
+    // 편집칸은 표시 중인 폴더(기본값이면 서버 cwd)로 채워지므로 그것과 비교한다. 안 바꾸고 나가면 아무것도 하지 않는다.
+    if (newPath !== (currentWorkingDir || defaultWorkingDir)) {
+      const result = await sendMessageToBackground('set-working-directory', { directory: newPath, tabId: currentTabId, sessionId: currentSessionId });
       if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
-      updateWorkingFolderDisplay(result.directory || newPath);
       applyWorkingDirSessionReset(result);
+      await refreshWorkingDirectory();
     }
   }
 
@@ -268,6 +288,7 @@ I18N.ready.then(function() {
     }
     // 그 사이 다른 탭으로 바뀌었거나 reinit이 다시 왔으면 나중 것이 복원을 끝낸다
     endStreamRestore(myRestore);
+    if (tab.id === currentTabId) await refreshWorkingDirectory(); // 이 탭 세션의 작업 폴더
 
     // 세션 준비 완료 후 입력 내용이 있으면 전송 버튼 활성화
     updateSendButtonState();
@@ -867,6 +888,7 @@ I18N.ready.then(function() {
           if (!sw?.success) throw new Error(sw?.error || 'switch failed');
           currentSessionId = s.id;
           messageDiv.remove();
+          refreshWorkingDirectory(); // 불러온 세션의 원래 폴더
           await loadAndRenderHistory(s.id, { id: currentTabId, title: '' });
           addBotMessage(t('세션을 불러왔습니다: {title}', { title: s.title || s.id }));
         } catch (e) {
@@ -946,9 +968,11 @@ I18N.ready.then(function() {
     if (slash === '/clear') {
       messagesContainer.innerHTML = '';
       try {
-        const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat' });
+        // tabId를 넘겨야 이 탭이 새 세션에 연결된다(안 넘기면 탭 전환 후 이전 세션으로 돌아갔다)
+        const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
         if (result.success) currentSessionId = result.sessionId;
         else currentSessionId = null;
+        await refreshWorkingDirectory();
       } catch {
         currentSessionId = null;
         addErrorMessage(t('세션 재생성에 실패했습니다.'));
@@ -964,6 +988,7 @@ I18N.ready.then(function() {
       try {
         const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
         currentSessionId = result.success ? result.sessionId : null;
+        await refreshWorkingDirectory(); // 새 세션은 마지막으로 고른 폴더로 시작한다
         addBotMessage(t('새 세션을 시작했습니다.'));
       } catch {
         currentSessionId = null;
@@ -998,10 +1023,10 @@ I18N.ready.then(function() {
     if (slash === '/wd') {
       if (!args) { addBotMessage(t('사용법: /wd <path>')); sendBtn.disabled = false; return; }
       try {
-        const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId });
+        const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId, sessionId: currentSessionId });
         if (result?.success === false) throw new Error(workingDirError(result));
-        updateWorkingFolderDisplay(result.directory || args);
         applyWorkingDirSessionReset(result);
+        await refreshWorkingDirectory();
         addBotMessage(t('작업 디렉토리가 변경되었습니다: {dir}', { dir: result.directory || args }));
       } catch (e) {
         addErrorMessage(t('디렉토리 변경 실패: {error}', { error: t(e.message) }));
@@ -3171,6 +3196,7 @@ I18N.ready.then(function() {
     } else if (message.action === 'message-complete' && message.sessionId === currentSessionId) {
       if (message.newSessionId) {
         currentSessionId = message.newSessionId;
+        refreshWorkingDirectory();
       }
       setLoadingState(false);
       blockRenderScheduler.flush(); // pending 프레임을 즉시 반영해 마지막 delta 누락 방지

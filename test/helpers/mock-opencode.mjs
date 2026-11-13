@@ -16,6 +16,9 @@ export async function startMockOpencode() {
     statusRequests: [],  // /session/status 요청의 x-opencode-directory 값
     messages: {},        // GET /session/{id}/message 응답
     created: [],         // POST /session으로 만든 sessionID
+    // 세션별 directory. opencode처럼 생성 때의 x-opencode-directory(없으면 서버 cwd '/mock')로 고정한다
+    sessionDirs: {},
+    promptDirs: [],      // prompt_async 요청의 x-opencode-directory 값
     deleted: [],         // DELETE /session/{id}를 받은 sessionID
     // (req, res, sessionId) => void. 기본은 즉시 204
     onPrompt: (req, res) => { res.writeHead(204); res.end(); }
@@ -47,6 +50,7 @@ export async function startMockOpencode() {
     }
     if ((m = p.match(/^\/session\/([^/]+)\/prompt_async$/))) {
       state.prompts.push(m[1]);
+      state.promptDirs.push(req.headers['x-opencode-directory'] || null);
       req.resume();
       return state.onPrompt(req, res, m[1]);
     }
@@ -59,11 +63,13 @@ export async function startMockOpencode() {
       req.resume();
       const id = `ses_mock${state.created.length + 1}`;
       state.created.push(id);
-      return json(res, 200, { id, title: 'mock' });
+      const dir = req.headers['x-opencode-directory'];
+      state.sessionDirs[id] = dir ? decodeURIComponent(dir) : '/mock';
+      return json(res, 200, { id, title: 'mock', directory: state.sessionDirs[id] });
     }
     if ((m = p.match(/^\/session\/([^/]+)$/))) {
       if (req.method === 'DELETE') { state.deleted.push(m[1]); return json(res, 200, true); }
-      return json(res, 200, { id: m[1] });
+      return json(res, 200, { id: m[1], directory: state.sessionDirs[m[1]] || '/mock' });
     }
     json(res, 404, {});
   });

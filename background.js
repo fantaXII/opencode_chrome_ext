@@ -751,6 +751,11 @@ async function runHardRestart(requestedRuntime) {
   }
 }
 
+/**
+ * 새 세션에 쓸 기본 작업 폴더(chrome.storage.local.workingDirectory, 마지막으로 고른 폴더). 비어 있으면 서버 cwd.
+ * 이미 있는 세션의 폴더는 getSessionDirectory로 구한다 — opencode는 세션을 만든 폴더에 세션을 고정하고,
+ * 다른 x-opencode-directory 헤더로 보내도 원래 폴더에서 실행한다(1.19.5 실측, git/비git 모두).
+ */
 async function getWorkingDirectory() {
   try {
     const result = await chrome.storage.local.get('workingDirectory');
@@ -758,6 +763,57 @@ async function getWorkingDirectory() {
   } catch {
     return '';
   }
+}
+
+// 세션별 작업 폴더(서버가 세션 생성 때 고정한 session.directory). sessionId -> directory.
+// 탭 A에서 폴더를 바꿔도 탭 B의 세션은 원래 폴더로 동작하므로, 프롬프트·상태 확인·권한 응답은 이 값으로 보낸다.
+// (전역 값으로 보내면 상태가 다른 instance에서 조회돼 응답 중인 세션이 idle로 보인다.)
+const SESSION_DIRS_KEY = 'sessionDirectories';
+let sessionDirectories = new Map();
+chrome.storage.session.get(SESSION_DIRS_KEY).then((data) => {
+  if (data?.[SESSION_DIRS_KEY]) sessionDirectories = new Map([...data[SESSION_DIRS_KEY], ...sessionDirectories]);
+}).catch(() => {});
+function persistSessionDirectories() {
+  chrome.storage.session.set({ [SESSION_DIRS_KEY]: [...sessionDirectories] }).catch(() => {});
+}
+function rememberSessionDirectory(sessionId, directory) {
+  if (!sessionId || !directory || sessionDirectories.get(sessionId) === directory) return;
+  sessionDirectories.set(sessionId, directory);
+  persistSessionDirectories();
+}
+function forgetSessionDirectory(sessionId) {
+  if (sessionDirectories.delete(sessionId)) persistSessionDirectories();
+}
+
+/** 세션의 작업 폴더. 모르면 GET /session/{id}의 directory로 확인하고, 그것도 안 되면 기본 폴더. */
+async function getSessionDirectory(sessionId, port = null) {
+  if (!sessionId) return getWorkingDirectory();
+  if (sessionDirectories.has(sessionId)) return sessionDirectories.get(sessionId);
+  const p = port ?? sessions.get(sessionId)?.port ?? serverState.port;
+  if (p) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${p}/session/${encodeURIComponent(sessionId)}`, { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const directory = (await res.json())?.directory;
+        if (directory) {
+          rememberSessionDirectory(sessionId, directory);
+          return directory;
+        }
+      }
+    } catch (e) {
+      debugLog('WARN', `getSessionDirectory: lookup failed - sessionId=${sessionId}, error=${e.message}`);
+    }
+  }
+  return getWorkingDirectory();
+}
+
+/** 두 경로가 같은 폴더인지(구분자·끝 슬래시 차이 무시, 드라이브 경로는 대소문자 무시). */
+function sameDirectory(a, b) {
+  const norm = (p) => {
+    const v = (p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^[A-Za-z]:/.test(v) ? v.toLowerCase() : v;
+  };
+  return norm(a) === norm(b);
 }
 
 /**
@@ -1047,6 +1103,7 @@ async function createSession(title = 'New Chat') {
       port: port,
       active: true
     });
+    rememberSessionDirectory(sessionId, sessionData.directory || workingDir);
 
     console.log(`세션 생성 완료: ${sessionId}`);
     return sessionId;
@@ -1074,6 +1131,7 @@ async function deleteSession(sessionId) {
 
   sessions.delete(sessionId);
   if (sessionNotices.delete(sessionId)) persistNotices();
+  forgetSessionDirectory(sessionId);
 
   // SSE 연결 정리 (eventSources는 fetch 기반 AbortController를 담는다)
   const controller = eventSources.get(sessionId);
@@ -1205,7 +1263,7 @@ async function ensureSelectedModel(port) {
 
 /** 프롬프트 요청(헤더·본문)을 만든다. 작업 폴더 헤더와 페이지 정보 머리말을 붙인다. */
 async function buildPromptRequest(sessionId, message, tabInfo) {
-  const workingDir = await getWorkingDirectory();
+  const workingDir = await getSessionDirectory(sessionId);
   const headers = { 'Content-Type': 'application/json' };
   const dirHeader = buildDirectoryHeader(workingDir);
   if (dirHeader) {
@@ -2242,7 +2300,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const items = [];
           if (sid && listPort) {
             const headers = {};
-            const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
+            const dirHeader = buildDirectoryHeader(await getSessionDirectory(sid, listPort));
             if (dirHeader) headers['x-opencode-directory'] = dirHeader;
             const list = async (path) => {
               try {
@@ -2272,7 +2330,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!replyPort) throw new Error('OpenCode 서버 연결 실패');
           const requestId = encodeURIComponent(message.requestId || '');
           const headers = { 'Content-Type': 'application/json' };
-          const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
+          const dirHeader = buildDirectoryHeader(await getSessionDirectory(message.sessionId, replyPort));
           if (dirHeader) headers['x-opencode-directory'] = dirHeader;
           const post = (path, body) => fetch(`http://127.0.0.1:${replyPort}${path}`, {
             method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(5000)
@@ -2454,9 +2512,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
-        case 'get-working-directory':
-          sendResponse({ directory: await getWorkingDirectory() });
+        // sessionId가 있으면 그 세션의 폴더(탭마다 다를 수 있다), 없으면 새 세션의 기본 폴더.
+        // isDefault: 서버 cwd와 같은 폴더(사이드패널이 "기본값"으로 흐리게 표시).
+        case 'get-working-directory': {
+          if (!message.sessionId) {
+            sendResponse({ directory: await getWorkingDirectory() });
+            break;
+          }
+          const directory = await getSessionDirectory(message.sessionId);
+          const defaultDirectory = await getDefaultDirectory();
+          sendResponse({ directory, isDefault: !directory || sameDirectory(directory, defaultDirectory), defaultDirectory });
           break;
+        }
 
         case 'get-default-directory':
           sendResponse({ directory: await getDefaultDirectory() });
@@ -2480,26 +2547,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             }
           }
-          const previous = await getWorkingDirectory();
+          // 바꾼 폴더는 새 세션의 기본값이 된다. 다른 탭의 기존 세션은 원래 폴더로 계속 동작하고,
+          // 그 탭에서 새 세션을 시작할 때(/new, exit 후 다시 열기 등)부터 이 폴더가 적용된다.
           await chrome.storage.local.set({ workingDirectory: normalized });
 
           // opencode 세션은 생성 시점의 x-opencode-directory 헤더로 디렉토리가
-          // 고정되며, 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 디렉토리가
-          // 실제로 바뀐 경우, 기존 세션을 버리고 새 세션을 만들어야 새 디렉토리가 적용된다.
+          // 고정되며, 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 이 탭 세션의 폴더와
+          // 다르면, 기존 세션을 버리고 새 세션을 만들어야 새 디렉토리가 적용된다.
           let newSessionId = null;
-          if (normalized !== previous) {
-            const tabId = message.tabId;
-            const oldSessionId = tabId ? tabSessions.get(tabId) : null;
-            if (oldSessionId) {
-              try {
-                await deleteSession(oldSessionId);
-                newSessionId = await createSession('Chrome Extension Chat');
-                tabSessions.set(tabId, newSessionId);
-                persistState();
-                debugLog('INFO', `Working directory changed - session recreated (old=${oldSessionId}, new=${newSessionId}, dir=${normalized})`);
-              } catch (e) {
-                debugLog('ERROR', `Working directory changed but session recreate failed - ${e.message}`);
-              }
+          const tabId = message.tabId;
+          const oldSessionId = message.sessionId || (tabId ? tabSessions.get(tabId) : null);
+          const previous = oldSessionId ? await getSessionDirectory(oldSessionId) : '';
+          const effective = normalized || await getDefaultDirectory();
+          if (oldSessionId && !sameDirectory(effective, previous)) {
+            try {
+              await deleteSession(oldSessionId);
+              newSessionId = await createSession('Chrome Extension Chat');
+              if (tabId) tabSessions.set(tabId, newSessionId);
+              persistState();
+              debugLog('INFO', `Working directory changed - session recreated (old=${oldSessionId} @ ${previous}, new=${newSessionId} @ ${effective})`);
+            } catch (e) {
+              debugLog('ERROR', `Working directory changed but session recreate failed - ${e.message}`);
             }
           }
 

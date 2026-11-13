@@ -157,6 +157,7 @@ test('작업 폴더를 지정한 상태에서 SSE가 재연결돼도 진행 중�
   // 재연결은 끊긴 뒤 0.5초 후에 일어나므로 무응답 제한을 그보다 넉넉히 둔다
   const { server, bg, complete, done } = await setup({ local: { workingDirectory: WORK }, idleMs: 3000 });
   t.after(done);
+  server.state.sessionDirs[SID] = WORK;              // 세션은 작업 폴더에서 만들어졌다
   server.state.statusDirectory = WORK;               // 상태는 이 디렉터리 instance에만 있다
   server.state.statusMap = { [SID]: { type: 'busy' } };
   server.state.onPrompt = (req, res) => {

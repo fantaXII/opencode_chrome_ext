@@ -57,6 +57,12 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - **config.private.json 프록시 가져오기**: 인스톨러(`install.ps1`)는 config.private.json을 설치 끝에 삭제하므로, 삭제 전에 `proxy` 섹션만 `%LOCALAPPDATA%\OpenCodeChrome\proxy.json`에 남긴다. `get-proxy`는 `chrome.storage.local.proxy`가 한 번도 저장된 적 없을 때만 host의 `get-installed-proxy`로 이 값을 가져와 저장한다(이미 저장된 값이 있으면 덮어쓰지 않는다). 사이드패널은 ⚙를 열 때마다 값을 새로 읽고, 읽는 동안에는 입력칸 대신 "확인 중…"만 보여 입력이 불가능하며, 재렌더 시 저장하지 않은 입력(`proxyDraft`)은 유지한다.
 - **확장이 띄운 서버 식별**: host가 서버 기동 후 포트의 리스너 pid를 `%LOCALAPPDATA%\OpenCodeChrome\server.json`에 기록하고, `server-info` 액션이 현재 리스너와 대조해 `managed`를 돌려준다. 프록시를 저장하면 사이드패널이 `get-server-origin`(= `server-info` + `GET /session/status`의 응답 중 세션 수)으로 재시작 안내를 달리한다: 확장이 띄운 서버면 재시작 확인, 아니면(터미널/VS Code TUI가 띄웠거나 이 기능 이전 버전이 띄운 서버) "저장만"/"그래도 재시작" 선택.
 - **작업 디렉터리 검증**: 존재하지 않는 경로를 `x-opencode-directory`로 보내면 opencode는 오류 없이 파트 0개의 빈 응답만 돌려준다. 그래서 `set-working-directory`는 저장 전에 host의 `resolve-directory`(서버 환경에 맞게 변환 + `wsl.exe test -d`/`fs.statSync`로 존재 확인)를 거쳐, 없으면 저장하지 않고 `dir-not-found`를 돌려준다. `/mnt/z/...`처럼 WSL에 없는 마운트는 `Z:`가 `\\wsl$`를 가리키는 네트워크 드라이브면 `/home/...`으로 복구한다. 구버전 host(`Unknown action`)면 검증을 생략한다. 빈 응답이 오면 `session.idle` 폴백이 메시지의 `info.error` 또는 기본 문구를 오류로 표시한다.
+- **작업 폴더는 세션별**: opencode는 세션을 만든 폴더(`session.directory`)에 세션을 고정한다. 다른 `x-opencode-directory`로 프롬프트를 보내도 원래 폴더에서 실행하고, 세션 상태도 원래 폴더 instance에만 보인다(1.19.5 실측, git/비git 모두). 그래서:
+  - `chrome.storage.local.workingDirectory`는 **새 세션의 기본 폴더**일 뿐이다.
+  - 기존 세션에 보내는 요청(프롬프트·`/session/status`·권한/질문 조회·응답)은 `getSessionDirectory(sessionId)`로 보낸다. 값은 `sessionDirectories`(`storage.session`)에 있고, 없으면 `GET /session/{id}`로 확인한다.
+  - 폴더를 바꾸면 그 탭의 세션만 새로 만든다. 다른 탭의 세션은 원래 폴더로 계속 동작하다가, 새 세션(`/new`, exit 후 다시 열기 등)부터 새 기본값을 쓴다.
+  - 사이드패널은 여러 탭이 한 화면을 같이 쓰므로, 세션이 바뀔 때마다 `refreshWorkingDirectory()`로 현재 세션의 폴더를 표시한다.
+  - 예전에는 전역 값으로 보내서, 다른 탭에서 폴더를 바꾸면 화면엔 새 폴더가 보이는데 실제로는 원래 폴더로 동작했다. 상태 확인이 다른 instance로 가서 응답 중인 세션을 idle로 오인할 수도 있었다.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
 
 ### OpenCode REST API (background.js가 직접 호출)
