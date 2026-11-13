@@ -88,8 +88,11 @@ export const ev = {
   retry: (sessionID, { attempt, message, next }) =>
     ({ type: 'session.status', properties: { sessionID, status: { type: 'retry', attempt, message, next } } }),
   idle: (sessionID) => ({ type: 'session.status', properties: { sessionID, status: { type: 'idle' } } }),
-  assistant: (sessionID, id = 'msg_a') =>
-    ({ type: 'message.updated', properties: { info: { id, sessionID, role: 'assistant', providerID: 'mock', modelID: 'model' } } }),
+  // parentID = 이 응답이 답하는 user 메시지 id (opencode는 대기 메시지를 처리할 때 부모가 바뀐다, 1.19.5 실측)
+  assistant: (sessionID, id = 'msg_a', parentID = 'msg_u') =>
+    ({ type: 'message.updated', properties: { info: { id, sessionID, role: 'assistant', parentID, providerID: 'mock', modelID: 'model' } } }),
+  user: (sessionID, id = 'msg_u') =>
+    ({ type: 'message.updated', properties: { info: { id, sessionID, role: 'user' } } }),
   textPart: (sessionID, id = 'prt_t', messageID = 'msg_a') =>
     ({ type: 'message.part.updated', properties: { part: { id, sessionID, messageID, type: 'text', text: '' } } }),
   delta: (sessionID, delta, partID = 'prt_t', messageID = 'msg_a') =>

@@ -229,8 +229,8 @@ I18N.ready.then(function() {
   async function reinitForTab(tab, reason = 'unknown') {
     currentTabId = tab.id;
     currentSessionId = null;
-    isLoading = false;
-    loadingIndicator.classList.add('hidden');
+    setLoadingState(false);
+    pendingQueue = []; // 이전 탭 대화의 대기 메시지(말풍선은 아래에서 지워진다)
     sendBtn.disabled = true; // 세션 준비 완료 전까지 전송 차단
 
     // 이전 탭의 실제 대화 메시지만 즉시 제거한다(탭 전환 시 잔상 방지).
@@ -996,8 +996,19 @@ I18N.ready.then(function() {
 
   async function sendMessage() {
     const message = messageInput.value.trim();
-    if (isLoading || isServerTransitioning()) return;
+    if (isServerTransitioning()) return;
     if (!message && attachedFiles.length === 0) return;
+
+    // 응답 중: 서버 큐에 대기 메시지로 보낸다(현재 응답이 끝나면 모델이 이어서 처리). 명령은 응답이 끝난 뒤에만.
+    if (isLoading && message.trim().toLowerCase() !== '/ext-log') {
+      if (message.startsWith('/')) {
+        showToast(t('응답 중에는 명령을 실행할 수 없습니다. 끝난 뒤 다시 시도하세요.'));
+        return;
+      }
+      if (!currentSessionId) return;
+      await sendQueuedMessage(message);
+      return;
+    }
 
     if (message.startsWith('/')) {
       if (message.trim().toLowerCase() === '/ext-log') {
@@ -1017,30 +1028,151 @@ I18N.ready.then(function() {
 
     if (!currentSessionId) return;
 
-    const attachmentsForMessage = attachedFiles.slice();
-    const attachmentBlock = attachmentsForMessage.length > 0
-      ? `[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요]\n${attachmentsForMessage.map((f) => `- ${f}`).join('\n')}\n\n`
-      : '';
+    const { payload, attachments } = takeComposedMessage(message);
+    addUserMessage(message, attachments);
+    await startPrompt(payload);
+  }
 
-    addUserMessage(message, attachmentsForMessage);
+  // 입력창의 메시지와 첨부를 꺼내(입력창은 비운다) 서버로 보낼 본문을 만든다.
+  function takeComposedMessage(message) {
+    const attachments = attachedFiles.slice();
+    const attachmentBlock = attachments.length > 0
+      ? `[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요]\n${attachments.map((f) => `- ${f}`).join('\n')}\n\n`
+      : '';
     messageInput.value = '';
     messageInput.style.height = 'auto';
     attachedFiles = [];
     renderAttachments();
+    return { payload: attachmentBlock + message, attachments };
+  }
+
+  async function startPrompt(payload) {
     setLoadingState(true);
     addTypingIndicator();
-
     try {
       await sendMessageToBackground('send-message', {
         sessionId: currentSessionId,
-        message: attachmentBlock + message
+        message: payload
       });
     } catch (error) {
       console.error('메시지 전송 실패:', error);
       removeTypingIndicator();
       addErrorMessage(t('메시지 전송에 실패했습니다.'));
       setLoadingState(false);
+      return false;
     }
+    return true;
+  }
+
+  // ============================================
+  // 대기(pending) 메시지
+  // ============================================
+  // 응답 중에 보낸 메시지는 background의 queue-message로 서버 큐에 넣는다. 서버는 현재 응답이 끝나면
+  // 대기 메시지를 이어서 처리하고, background가 turn-start로 알려 주면 그 말풍선 아래에 새 응답을 연다.
+  // entry.state: 'sending'(접수 요청 중) | 'queued'(서버 큐) | 'local'(진행 중인 응답이 막 끝나 큐에 못 넣음 →
+  // 완료 후 일반 전송)
+  let pendingQueue = [];
+  let queueConsumed = 0; // 이번 응답에서 서버가 처리를 시작한 대기 메시지 수(turn-start의 consumed와 맞춘다)
+
+  function setQueueBadge(entry, state) {
+    entry.el.classList.toggle('queued', state === 'queued');
+    let badge = entry.el.querySelector('.queue-badge');
+    if (!state) { badge?.remove(); return; }
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'queue-badge';
+      entry.el.querySelector('.message-content')?.appendChild(badge);
+    }
+    badge.classList.toggle('warn', state !== 'queued');
+    if (state === 'queued') {
+      badge.textContent = t('⏳ 대기 중 — 현재 응답이 끝나면 처리됩니다');
+      badge.title = '';
+    } else if (state === 'unprocessed') {
+      badge.textContent = t('처리되지 않음 — 다시 보내 주세요');
+      badge.title = t('서버 기록에는 남아 있어 다음 대화의 맥락에 포함될 수 있습니다.');
+    } else if (state === 'failed') {
+      badge.textContent = t('전송 실패');
+      badge.title = '';
+    }
+  }
+
+  async function sendQueuedMessage(message) {
+    const { payload, attachments } = takeComposedMessage(message);
+    const entry = { el: addUserMessage(message, attachments), payload, state: 'sending' };
+    pendingQueue.push(entry);
+    setQueueBadge(entry, 'queued');
+    renderProgress();
+    await submitQueued(entry);
+  }
+
+  async function submitQueued(entry) {
+    entry.state = 'sending';
+    try {
+      const res = await sendMessageToBackground('queue-message', { sessionId: currentSessionId, message: entry.payload });
+      if (!pendingQueue.includes(entry)) return; // 그 사이 응답이 중단·완료돼 정리됨
+      entry.state = res.queued ? 'queued' : 'local';
+      if (!res.queued && !isLoading) flushLocalQueue();
+    } catch (error) {
+      if (!pendingQueue.includes(entry)) return;
+      pendingQueue = pendingQueue.filter((q) => q !== entry);
+      setQueueBadge(entry, 'failed');
+      showToast(t('대기 메시지 전송에 실패했습니다: {error}', { error: t(error.message) }));
+    }
+    renderProgress();
+  }
+
+  // 응답이 끝났는데 큐에 넣지 못한 메시지가 있으면 첫 번째는 일반 전송, 나머지는 그 응답의 대기 메시지로 보낸다.
+  async function flushLocalQueue() {
+    if (isLoading) return;
+    const locals = pendingQueue.filter((q) => q.state === 'local');
+    if (locals.length === 0) return;
+    const [first, ...rest] = locals;
+    pendingQueue = pendingQueue.filter((q) => q !== first);
+    setQueueBadge(first, null);
+    // 응답 말풍선(typing indicator)이 보낸 메시지 바로 아래에, 나머지 대기 메시지는 그 뒤에 오도록 옮긴다
+    messagesContainer.appendChild(first.el);
+    const started = startPrompt(first.payload); // typing indicator를 동기적으로 먼저 붙인다
+    for (const q of rest) messagesContainer.appendChild(q.el);
+    if (!(await started)) return;
+    for (const q of rest) await submitQueued(q);
+  }
+
+  // 서버가 대기 메시지 처리를 시작했다(background turn-start). consumed = 지금까지 처리 시작한 대기 메시지 수.
+  function handleTurnStart(part) {
+    const started = [];
+    while (queueConsumed < part.consumed) {
+      const entry = pendingQueue.find((q) => q.state === 'queued' || q.state === 'sending');
+      queueConsumed++;
+      if (!entry) continue;
+      pendingQueue = pendingQueue.filter((q) => q !== entry);
+      setQueueBadge(entry, null);
+      started.push(entry);
+    }
+    if (part.newBubble) {
+      // 이전 턴의 말풍선을 마무리하고, 새 응답은 처리 중인 대기 메시지 바로 아래에 연다
+      blockRenderScheduler.flush();
+      if (activeBlocks) {
+        finalizeRunning(activeBlocks, 'interrupted');
+        renderBlocks(activeBlocks, activeBlocksContainer);
+        enhanceCodeBlocks(activeBlocksContainer);
+        activeBlocks = null;
+        activeBlocksContainer = null;
+      }
+      removeTypingIndicator();
+      addTypingIndicator(started.at(-1)?.el || null);
+    }
+    noteProgress('waiting', '', { newTurn: part.newBubble });
+  }
+
+  // 응답이 끝났을 때 처리되지 않은 대기 메시지를 정리한다.
+  //  - recovered: SW 재시작 복구로 끝난 경우 처리 여부를 알 수 없어 배지만 지운다.
+  function settleQueue({ cancelled = false, recovered = false } = {}) {
+    for (const entry of pendingQueue) {
+      if (entry.state === 'local' && !cancelled) continue; // 완료 후 일반 전송
+      setQueueBadge(entry, recovered ? null : 'unprocessed');
+    }
+    pendingQueue = pendingQueue.filter((q) => q.state === 'local' && !cancelled);
+    queueConsumed = 0;
   }
 
   function addUserMessage(content, attachments = []) {
@@ -1065,6 +1197,7 @@ I18N.ready.then(function() {
     }
     messagesContainer.appendChild(messageDiv);
     scrollToBottom();
+    return messageDiv;
   }
 
   function addBotMessage(content) {
@@ -1086,7 +1219,7 @@ I18N.ready.then(function() {
     scrollToBottom();
   }
 
-  function addTypingIndicator() {
+  function addTypingIndicator(afterEl = null) {
     const typingDiv = document.createElement('div');
     typingDiv.className = 'message bot-message typing-indicator';
     typingDiv.id = 'typing-indicator';
@@ -1098,7 +1231,8 @@ I18N.ready.then(function() {
         <span></span>
       </div>
     `;
-    messagesContainer.appendChild(typingDiv);
+    if (afterEl && afterEl.parentNode === messagesContainer) afterEl.after(typingDiv);
+    else messagesContainer.appendChild(typingDiv);
     scrollToBottom();
   }
 
@@ -1508,6 +1642,8 @@ I18N.ready.then(function() {
   // ---- 설정(⚙) 드롭다운: 실행 환경(WSL/Windows) 선택 + 서버 강제 재시작 ----
   // '본문·선택 텍스트' 모드에서 탭 내용을 읽기 위한 선택적 호스트 권한(manifest optional_host_permissions)
   const PAGE_ACCESS_ORIGINS = ['<all_urls>'];
+  // 응답 제한 시간(분) 선택지. background.js RESPONSE_TIMEOUT_CHOICES_MIN과 같이 고친다. 0 = 없음(기본).
+  const RESPONSE_TIMEOUT_CHOICES_MIN = [0, 5, 10, 30];
   const RUNTIME_LABELS = { get auto() { return t('자동'); }, wsl: 'WSL', windows: 'Windows' };
 
   // 정보 섹션 상태: 패널을 여는 동안 유지한다.
@@ -1658,6 +1794,11 @@ I18N.ready.then(function() {
     const proxy = proxyDraft || proxyCache;
     let pageContextMode = 'basic';
     let pageAccessGranted = false;
+    let responseTimeoutMin = 0;
+    try {
+      const stored = Number((await chrome.storage.local.get('responseTimeoutMin')).responseTimeoutMin);
+      if (RESPONSE_TIMEOUT_CHOICES_MIN.includes(stored)) responseTimeoutMin = stored;
+    } catch {}
     try {
       const { pageContext } = await chrome.storage.local.get('pageContext');
       if (['off', 'basic', 'full'].includes(pageContext)) pageContextMode = pageContext;
@@ -1701,6 +1842,17 @@ I18N.ready.then(function() {
         ${pageContextMode === 'full' && !pageAccessGranted
           ? `<div class="settings-current warn">${t('⚠ 페이지 읽기 권한이 없어 제목·URL만 보냅니다. 다시 선택하면 권한을 요청합니다.')}</div>`
           : ''}
+      </div>
+      <div class="settings-section">
+        <label class="settings-row">
+          <span class="settings-title">${t('응답 제한 시간')}</span>
+          <select id="response-timeout-select" class="settings-select">
+            ${RESPONSE_TIMEOUT_CHOICES_MIN.map((m) => `<option value="${m}"${responseTimeoutMin === m ? ' selected' : ''}>${m === 0 ? t('없음') : t('{min}분', { min: m })}</option>`).join('')}
+          </select>
+        </label>
+        <div class="settings-current">${responseTimeoutMin === 0
+          ? t('응답이 오래 걸려도 끊지 않습니다. 서버가 처리 중인지 주기적으로 확인하고, 멈추면 ■로 중단하세요.')
+          : t('이 시간 동안 아무 진행이 없으면 응답을 중단합니다. 다음 메시지부터 적용됩니다.')}</div>
       </div>
       <div class="settings-section">
         <label class="settings-row">
@@ -1756,6 +1908,13 @@ I18N.ready.then(function() {
     document.getElementById('lang-select')?.addEventListener('change', (e) => {
       I18N.setLang(e.target.value);
       onLanguageChanged();
+    });
+
+    document.getElementById('response-timeout-select')?.addEventListener('change', async (e) => {
+      const value = Number(e.target.value);
+      if (!RESPONSE_TIMEOUT_CHOICES_MIN.includes(value)) return;
+      try { await chrome.storage.local.set({ responseTimeoutMin: value }); } catch {}
+      renderSettingsDropdown();
     });
 
     document.getElementById('page-context-select')?.addEventListener('change', (e) => {
@@ -2078,14 +2237,95 @@ I18N.ready.then(function() {
       sendBtn.setAttribute('aria-label', t('중단'));
       sendBtn.classList.add('cancel-mode');
       loadingIndicator.classList.remove('hidden');
+      messageInput.placeholder = t('응답 중 — 입력하면 대기 메시지로 보냅니다');
+      startProgress();
     } else {
       sendBtn.innerHTML = SEND_ICON_SVG;
       sendBtn.setAttribute('aria-label', t('보내기'));
       sendBtn.classList.remove('cancel-mode');
       updateSendButtonState();
       loadingIndicator.classList.add('hidden');
+      messageInput.placeholder = t('메시지를 입력하세요...');
       clearRetryStatus();
+      stopProgress();
     }
+  }
+
+  // 응답 진행 표시. 응답 제한 시간이 기본 "없음"이라 느린 모델은 수 분간 아무 이벤트가 없을 수 있다.
+  // 멈춘 건지 일하는 중인지 알 수 있게 현재 단계 · 경과 시간 · (조용하면) 마지막 활동과 서버 확인 결과를 1초마다 그린다.
+  const QUIET_HINT_MS = 30000;
+  const progress = { startedAt: 0, lastActivityAt: 0, phase: 'waiting', detail: '', server: null, serverAt: 0 };
+  let progressTicker = null;
+
+  function formatDuration(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = String(total % 60).padStart(2, '0');
+    return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+  }
+
+  function startProgress() {
+    const now = Date.now();
+    Object.assign(progress, { startedAt: now, lastActivityAt: now, phase: 'waiting', detail: '', server: null, serverAt: 0 });
+    clearInterval(progressTicker);
+    progressTicker = setInterval(renderProgress, 1000);
+    renderProgress();
+  }
+
+  function stopProgress() {
+    clearInterval(progressTicker);
+    progressTicker = null;
+    loadingText.textContent = t('응답 대기 중...');
+    loadingIndicator.classList.remove('stalled');
+  }
+
+  // 응답 이벤트가 올 때마다 단계를 갱신한다. phase가 null이면 단계는 그대로 두고 활동 시각만 갱신한다.
+  function noteProgress(phase, detail = '', { newTurn = false } = {}) {
+    if (!isLoading) return;
+    const now = Date.now();
+    progress.lastActivityAt = now;
+    if (newTurn) progress.startedAt = now;
+    if (phase) { progress.phase = phase; progress.detail = detail; }
+    renderProgress();
+  }
+
+  function noteServerCheck(state) {
+    if (!isLoading) return;
+    progress.server = state;
+    progress.serverAt = Date.now();
+    renderProgress();
+  }
+
+  function phaseLabel() {
+    switch (progress.phase) {
+      case 'thinking': return t('생각 중');
+      case 'writing': return t('응답 작성 중');
+      case 'tool': return t('도구 실행 중: {tool}', { tool: progress.detail });
+      case 'subagent': return t('하위 에이전트 작업 중: {agent}', { agent: progress.detail });
+      case 'asking': return t('사용자 응답 대기 중');
+      default: return t('모델 응답 대기 중');
+    }
+  }
+
+  function renderProgress() {
+    if (!isLoading || !progressTicker || loadingIndicator.classList.contains('retrying')) return;
+    const now = Date.now();
+    const segs = [phaseLabel(), formatDuration(now - progress.startedAt)];
+    const quietMs = now - progress.lastActivityAt;
+    let stalled = false;
+    if (quietMs >= QUIET_HINT_MS && progress.phase !== 'asking') {
+      segs.push(t('마지막 활동 {ago} 전', { ago: formatDuration(quietMs) }));
+      // 서버 확인 결과는 마지막 활동 이후의 것만 의미가 있다
+      if (progress.serverAt > progress.lastActivityAt) {
+        if (progress.server === 'busy') segs.push(t('서버 처리 중 확인됨'));
+        else if (progress.server === 'unreachable') { segs.push(t('서버 응답 없음 — 다시 확인 중')); stalled = true; }
+      }
+    }
+    const queued = pendingQueue.length;
+    if (queued) segs.push(t('대기 메시지 {count}개', { count: queued }));
+    loadingText.textContent = segs.join(' · ');
+    loadingIndicator.classList.toggle('stalled', stalled);
   }
 
   // 제공자 재시도(레이트 리밋·과부하) 대기 표시. background가 session.status retry를 kind:'retry'로 넘긴다.
@@ -2115,6 +2355,7 @@ I18N.ready.then(function() {
     loadingIndicator.classList.remove('retrying');
     loadingIndicator.title = '';
     loadingText.textContent = t('응답 대기 중...');
+    renderProgress();
   }
 
   async function cancelMessage() {
@@ -2127,6 +2368,7 @@ I18N.ready.then(function() {
       activeBlocksContainer = null;
     }
     removeTypingIndicator();
+    settleQueue({ cancelled: true });
     setLoadingState(false);
   }
 
@@ -2663,24 +2905,38 @@ I18N.ready.then(function() {
       ensureActiveBlockMessage();
       appendTextDelta(activeBlocks, message.chunk);
       blockRenderScheduler.request();
+      noteProgress('writing');
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId
                && ['permission', 'question', 'interaction-resolved'].includes(message.part?.kind)) {
       handleInteractionPart(message.part);
+      noteProgress(message.part.kind === 'interaction-resolved' ? 'waiting' : 'asking');
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId
                && ['retry', 'retry-cleared'].includes(message.part?.kind)) {
       if (message.part.kind === 'retry' && isLoading) showRetryStatus(message.part);
       else clearRetryStatus();
+      noteProgress(null);
+    } else if (message.action === 'message-part' && message.sessionId === currentSessionId
+               && message.part?.kind === 'heartbeat') {
+      noteServerCheck(message.part.state);
+    } else if (message.action === 'message-part' && message.sessionId === currentSessionId
+               && message.part?.kind === 'turn-start') {
+      if (isLoading) handleTurnStart(message.part);
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
       ensureActiveBlockMessage();
       const part = message.part || {};
       if (part.kind === 'tool') {
         upsertToolPart(activeBlocks, part);
+        const active = part.status === 'pending' || part.status === 'running';
+        noteProgress(active ? 'tool' : 'waiting', active ? (part.tool || '') : '');
       } else if (part.kind === 'reasoning-start') {
         upsertReasoningStart(activeBlocks, part.id);
+        noteProgress('thinking');
       } else if (part.kind === 'reasoning-delta') {
         appendReasoningDelta(activeBlocks, part.id, part.delta);
+        noteProgress('thinking');
       } else if (part.kind === 'subagent') {
         setSubagentProgress(activeBlocks, part);
+        noteProgress(part.activity ? 'subagent' : null, part.agent || '');
       }
       blockRenderScheduler.request();
     } else if (message.action === 'server-runtime-updated') {
@@ -2742,6 +2998,8 @@ I18N.ready.then(function() {
       }
       activeBlocks = null;
       activeBlocksContainer = null;
+      settleQueue({ recovered: !!message.recovered });
+      flushLocalQueue();
     }
   });
 

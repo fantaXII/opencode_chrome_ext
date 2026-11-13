@@ -97,23 +97,50 @@ test('복구: idle인데 내용이 없으면 UI가 풀리도록 오류로 완료
   assert.equal(out.length, 1); assert.ok(out[0][1]);
 });
 
-test('복구: 계속 busy면 180s 후 시간 초과로 완료 처리(무한 대기 방지)', async () => {
-  let t = 0; const out = [];
+test('복구: 제한 시간이 없으면 서버가 busy인 동안 계속 기다리고, 끝나면 내용을 받는다', async () => {
+  // 느린 LLM: 10분 넘게 busy. 예전 180초 상한이면 여기서 끊겼다.
+  let t = 0; const out = []; let busyCalls = 0;
   await recoverPendingPrompt({
     sessionId: 's1', port: 4096, startedAt: 0,
+    fetchFn: async () => ({ ok: true, json: async () => (t < 600000 ? { s1: { type: 'busy' } } : {}) }),
+    fetchContent: async () => ({ content: '늦은 답변' }),
+    onBusy: () => { busyCalls++; },
+    onComplete: (c, e) => out.push([c, e]), now: () => t, sleep: async (ms) => { t += ms; }
+  });
+  assert.deepEqual(out, [['늦은 답변', null]]);
+  assert.ok(busyCalls > 0, '대기 중에는 진행 표시용 onBusy가 불린다');
+});
+
+test('복구: 제한 시간을 설정했으면 그 시간 뒤에 시간 초과로 완료 처리', async () => {
+  let t = 0; const out = [];
+  await recoverPendingPrompt({
+    sessionId: 's1', port: 4096, startedAt: 0, maxAgeMs: 300000,
     fetchFn: async () => ({ ok: true, json: async () => ({ s1: {} }) }),
     fetchContent: async () => ({ content: '' }),
     onComplete: (c, e) => out.push([c, e]), now: () => t, sleep: async (ms) => { t += ms; }
   });
   assert.deepEqual(out, [['', '응답 시간 초과']]);
+  assert.ok(t >= 300000);
 });
 
-test('복구: 서버 접속 불가여도 시간 초과 후 완료 처리', async () => {
+test('복구: 서버에 계속 접속할 수 없으면 제한 시간이 없어도 포기한다', async () => {
   let t = 0; const out = [];
   await recoverPendingPrompt({
     sessionId: 's1', port: 4096, startedAt: 0,
     fetchFn: async () => { throw new Error('refused'); }, fetchContent: async () => ({ content: 'x' }),
     onComplete: (c, e) => out.push([c, e]), now: () => t, sleep: async (ms) => { t += ms; }
   });
-  assert.deepEqual(out, [['', '응답 시간 초과']]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0][0], '');
+  assert.match(out[0][1], /서버에 연결할 수 없어/);
+  assert.ok(t >= 60000 && t < 70000, `unreachable 한도(60s) 근처에서 포기해야 한다: ${t}`);
+});
+
+test('pending store: 응답 제한 시간을 함께 저장한다(0이면 생략)', async () => {
+  const store = createPendingStore(memStorage(), () => 5);
+  await store.add('s1', 4096, null, 300000); await store.add('s2', 4096, null, 0);
+  assert.deepEqual(await store.list(), [
+    { sessionId: 's1', port: 4096, startedAt: 5, timeoutMs: 300000 },
+    { sessionId: 's2', port: 4096, startedAt: 5 }
+  ]);
 });

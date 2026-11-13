@@ -1,6 +1,9 @@
 // 실행: node --test test/stream-stall.test.mjs
 // opencode가 느리거나(제공자 retry/backoff) 멈출 때 background.js의 응답 스트림 처리를 가짜 서버로 재현한다.
-// 실제 background.js를 불러오고, 타임아웃만 짧게 줄인다(무응답 제한 300ms, 전송 제한 200ms).
+// 실제 background.js를 불러오고, 시간 상수만 짧게 줄인다.
+//  - 응답 제한 시간: 설정값 5(분)에 단위(RESPONSE_TIMEOUT_UNIT_MS)를 idleMs/5로 바꿔 → 300ms
+//    (timeoutMin: null이면 설정 없음 = 기본값 "제한 없음")
+//  - 전송 제한 200ms, 조용할 때 상태 확인 간격 quietMs(기본은 길게 둬서 기존 테스트에 끼어들지 않게 한다)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startMockOpencode, ev } from './helpers/mock-opencode.mjs';
@@ -8,26 +11,40 @@ import { loadBackground, sleep, waitFor } from './helpers/background-harness.mjs
 
 const IDLE_MS = 300;
 const SEND_MS = 200;
+const QUEUE_GRACE_MS = 150;
 const SID = 'ses_test';
 
-async function setup({ local = {}, idleMs = IDLE_MS } = {}) {
+async function setup({ local = {}, idleMs = IDLE_MS, timeoutMin = 5, quietMs = 60000 } = {}) {
   const server = await startMockOpencode();
   const bg = await loadBackground({
     port: server.port,
-    constants: { STREAM_IDLE_TIMEOUT_MS: idleMs, PROMPT_SEND_TIMEOUT_MS: SEND_MS },
-    local: { selectedModel: { providerID: 'mock', modelID: 'model' }, ...local }
+    constants: {
+      RESPONSE_TIMEOUT_UNIT_MS: idleMs / 5,
+      PROMPT_SEND_TIMEOUT_MS: SEND_MS,
+      STREAM_QUIET_CHECK_MS: quietMs,
+      QUEUE_IDLE_GRACE_MS: QUEUE_GRACE_MS
+    },
+    local: {
+      selectedModel: { providerID: 'mock', modelID: 'model' },
+      ...(timeoutMin != null && { responseTimeoutMin: timeoutMin }),
+      ...local
+    }
   });
   const forSession = (action) => bg.sent.filter((m) => m.action === action && m.sessionId === SID);
+  let closed = false;
   return {
     server, bg, forSession,
     complete: () => forSession('message-complete')[0],
-    done: async () => { bg.cleanup(); await server.close(); }
+    parts: (kind) => forSession('message-part').map((m) => m.part).filter((p) => p.kind === kind),
+    closeServer: async () => { if (!closed) { closed = true; await server.close(); } },
+    done: async () => { bg.cleanup(); if (!closed) { closed = true; await server.close(); } }
   };
 }
 
 // 프롬프트를 받은 뒤 응답 생성을 시작하는 공통 흐름
 function startAnswering(server) {
   server.emit(ev.busy(SID));
+  server.emit(ev.user(SID, 'msg_u'));
   server.emit(ev.assistant(SID));
   server.emit(ev.textPart(SID));
 }
@@ -137,7 +154,7 @@ test('사용자가 중단한 뒤에는 남은 무응답 타이머가 뒤늦게 �
 
 test('작업 폴더를 지정한 상태에서 SSE가 재연결돼도 진행 중인 응답을 완료로 오인하지 않는다', async (t) => {
   const WORK = '/work/project';
-  // 재연결은 끊긴 뒤 0.5초 후에 일어나므로 무응답 제한을 그보다 넉넉히 둔다(실제 값은 180초)
+  // 재연결은 끊긴 뒤 0.5초 후에 일어나므로 무응답 제한을 그보다 넉넉히 둔다
   const { server, bg, complete, done } = await setup({ local: { workingDirectory: WORK }, idleMs: 3000 });
   t.after(done);
   server.state.statusDirectory = WORK;               // 상태는 이 디렉터리 instance에만 있다
@@ -226,4 +243,179 @@ test('정상 흐름: 느리지만 계속 delta가 오면 무응답 제한을 넘
   assert.equal(complete().error, undefined);
   assert.equal(complete().content, '012345');
   assert.deepEqual(server.state.aborts, []);
+});
+
+// ---- 응답 제한 시간 없음(기본값) ----
+
+test('제한 시간 없음(기본): 이벤트 없이 오래 걸려도 서버가 busy면 끊지 않고 "처리 중 확인"을 알린다', async (t) => {
+  const QUIET = 100;
+  const { server, bg, complete, parts, done } = await setup({ timeoutMin: null, quietMs: QUIET });
+  t.after(done);
+  server.state.statusMap = { [SID]: { type: 'busy' } };
+  const thinkMs = QUIET * 8; // 첫 토큰까지 오래 걸리는 느린 LLM
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(async () => {
+      startAnswering(server);
+      await sleep(thinkMs);
+      server.emit(ev.delta(SID, 'slow answer'));
+      server.state.statusMap = {};
+      server.emit(ev.idle(SID));
+    }, 20);
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => complete(), thinkMs + 3000, 'message-complete');
+  assert.equal(complete().error, undefined);
+  assert.equal(complete().content, 'slow answer');
+  assert.deepEqual(server.state.aborts, [], '제한 시간이 없으면 서버 세션을 abort하지 않는다');
+  const beats = parts('heartbeat');
+  assert.ok(beats.length >= 2, `조용한 동안 서버 상태 확인 결과가 전달돼야 한다 (${beats.length})`);
+  assert.ok(beats.every((b) => b.state === 'busy'));
+});
+
+test('제한 시간 없음: 완료 이벤트를 놓쳐도 상태 확인에서 idle이면 완료 처리한다', async (t) => {
+  const QUIET = 100;
+  const { server, bg, complete, done } = await setup({ timeoutMin: null, quietMs: QUIET });
+  t.after(done);
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(() => {
+      startAnswering(server);
+      server.emit(ev.delta(SID, 'done text'));
+      server.state.statusMap = {}; // idle 이벤트 없이 끝남(유실)
+    }, 20);
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => complete(), 3000, 'message-complete');
+  assert.equal(complete().error, undefined);
+  assert.equal(complete().content, 'done text');
+});
+
+test('제한 시간 없음: 서버가 사라지면 상태 확인이 연속 실패한 뒤 오류로 끝낸다', async (t) => {
+  const QUIET = 100;
+  const { server, bg, complete, closeServer, done } = await setup({ timeoutMin: null, quietMs: QUIET });
+  t.after(done);
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    setTimeout(async () => {
+      startAnswering(server);
+      server.emit(ev.delta(SID, 'partial'));
+      await sleep(30);
+      await closeServer();
+    }, 20);
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => complete(), 5000, 'message-complete');
+  assert.match(complete().error, /서버에 연결할 수 없어/);
+  assert.equal(complete().content, 'partial', '받은 데까지의 내용은 남긴다');
+});
+
+// ---- 대기(pending) 메시지 ----
+
+test('대기 메시지: 응답 중에 보낸 메시지가 서버 큐에서 처리되면 같은 구독으로 새 턴을 받는다', async (t) => {
+  const { server, bg, complete, parts, forSession, done } = await setup({ timeoutMin: null });
+  t.after(done);
+  let release;
+  const firstTurnDone = new Promise((r) => { release = r; });
+  server.state.onPrompt = (req, res, sid) => {
+    res.writeHead(204); res.end();
+    if (server.state.prompts.length === 1) {
+      setTimeout(async () => {
+        startAnswering(server);
+        server.emit(ev.delta(SID, 'first'));
+        await firstTurnDone;                      // 대기 메시지를 받은 뒤에 첫 응답이 끝난다
+        server.emit(ev.assistant(SID, 'msg_a2', 'msg_q1'));
+        server.emit(ev.textPart(SID, 'prt_t2', 'msg_a2'));
+        server.emit(ev.delta(SID, 'second', 'prt_t2', 'msg_a2'));
+        server.emit(ev.idle(SID));
+      }, 20);
+    } else {
+      server.emit(ev.user(SID, 'msg_q1'));        // 서버가 대기 메시지를 기록(아직 처리 전)
+      setTimeout(release, 30);
+    }
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await waitFor(() => forSession('message-chunk').length > 0, 2000, 'first chunk');
+  const res = await bg.send({ action: 'queue-message', sessionId: SID, message: 'and then?' });
+  assert.deepEqual(res, { success: true, queued: true });
+  await waitFor(() => complete(), 3000, 'message-complete');
+
+  assert.equal(server.state.prompts.length, 2);
+  assert.equal(server.clientCount <= 1, true);
+  const turns = parts('turn-start');
+  assert.deepEqual(turns, [{ kind: 'turn-start', consumed: 1, newBubble: true }]);
+  assert.deepEqual(forSession('message-chunk').map((m) => m.chunk), ['first', 'second']);
+  // turn-start는 두 번째 턴의 첫 청크보다 먼저 와야 사이드패널이 새 말풍선에 그린다
+  const order = bg.sent.filter((m) => m.sessionId === SID && (m.action === 'message-chunk' || m.part?.kind === 'turn-start'))
+    .map((m) => m.chunk || m.part.kind);
+  assert.deepEqual(order, ['first', 'turn-start', 'second']);
+  assert.equal(complete().error, undefined);
+  assert.equal(complete().content, 'second', '완료 내용은 마지막 턴(마지막 말풍선)의 텍스트');
+  assert.equal(forSession('message-complete').length, 1);
+});
+
+test('대기 메시지: 접수 직후 idle이 지나가도 완료로 끝내지 않고 이어지는 처리를 받는다', async (t) => {
+  const { server, bg, complete, done } = await setup({ timeoutMin: null });
+  t.after(done);
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    if (server.state.prompts.length === 1) {
+      setTimeout(() => { startAnswering(server); server.emit(ev.delta(SID, 'first')); }, 20);
+    } else {
+      // 첫 응답이 끝나 idle이 된 직후에 대기 메시지가 처리를 시작한다
+      setTimeout(async () => {
+        server.emit(ev.idle(SID));
+        await sleep(40);
+        server.emit(ev.busy(SID));
+        server.emit(ev.user(SID, 'msg_q1'));
+        server.emit(ev.assistant(SID, 'msg_a2', 'msg_q1'));
+        server.emit(ev.textPart(SID, 'prt_t2', 'msg_a2'));
+        server.emit(ev.delta(SID, 'second', 'prt_t2', 'msg_a2'));
+        server.emit(ev.idle(SID));
+      }, 10);
+    }
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await sleep(80);
+  const res = await bg.send({ action: 'queue-message', sessionId: SID, message: 'more' });
+  assert.equal(res.queued, true);
+  await waitFor(() => complete(), 3000, 'message-complete');
+  assert.equal(complete().content, 'second');
+  assert.equal(complete().error, undefined);
+});
+
+test('대기 메시지: 서버가 끝내 처리하지 않으면 잠시 뒤 완료 처리한다(사이드패널이 미처리로 표시)', async (t) => {
+  const { server, bg, complete, done } = await setup({ timeoutMin: null });
+  t.after(done);
+  let queuedAt = 0;
+  server.state.onPrompt = (req, res) => {
+    res.writeHead(204); res.end();
+    if (server.state.prompts.length === 1) {
+      setTimeout(() => { startAnswering(server); server.emit(ev.delta(SID, 'first')); }, 20);
+    } else {
+      queuedAt = Date.now();
+      setTimeout(() => server.emit(ev.idle(SID)), 10); // 상태는 idle({})로 남는다
+    }
+  };
+
+  await bg.send({ action: 'send-message', sessionId: SID, message: 'hi' });
+  await sleep(80);
+  await bg.send({ action: 'queue-message', sessionId: SID, message: 'more' });
+  await waitFor(() => complete(), 3000, 'message-complete');
+  assert.ok(complete().at - queuedAt >= QUEUE_GRACE_MS, '유예 시간 동안은 완료를 미룬다');
+  assert.equal(complete().content, 'first');
+  assert.equal(complete().error, undefined);
+});
+
+test('대기 메시지: 진행 중인 응답이 없으면 queued:false를 돌려준다(사이드패널이 일반 전송)', async (t) => {
+  const { server, bg, done } = await setup({ timeoutMin: null });
+  t.after(done);
+  const res = await bg.send({ action: 'queue-message', sessionId: SID, message: 'x' });
+  assert.deepEqual(res, { success: true, queued: false });
+  assert.equal(server.state.prompts.length, 0);
 });

@@ -9,7 +9,7 @@
  */
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
-import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit, PENDING_MAX_AGE_MS } from './lib/sw-resilience.mjs';
+import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
@@ -26,8 +26,15 @@ const DEFAULT_PORT = 4096;
 const MAX_PORT_CHECK = 10; // 4096 ~ 4105
 const SERVER_START_TIMEOUT = 30000; // 30초
 const SSE_RECONNECT_DELAY = 2000;
-const STREAM_IDLE_TIMEOUT_MS = 180000;      // 응답 스트림 무이벤트 제한
-const STREAM_ASK_TIMEOUT_MS = 30 * 60 * 1000; // 권한/질문 응답 대기 중 상한
+// 응답 제한 시간(무이벤트 N분이면 중단): ⚙ 설정의 chrome.storage.local.responseTimeoutMin. 0 = 없음(기본).
+// 느린 사내 LLM은 첫 토큰까지 수 분이 걸릴 수 있어 기본값은 제한 없음이다. 대신 STREAM_QUIET_CHECK_MS마다
+// 서버 상태를 확인해 서버가 busy인 동안은 기다리고, idle이면 완료 처리, 서버가 사라지면 오류로 끝낸다.
+const RESPONSE_TIMEOUT_CHOICES_MIN = [0, 5, 10, 30];
+const RESPONSE_TIMEOUT_UNIT_MS = 60000;     // 설정값(분)의 단위. 테스트 하네스가 짧게 치환한다
+const STREAM_ASK_TIMEOUT_MS = 30 * 60 * 1000; // 제한 시간이 켜져 있을 때 권한/질문 응답 대기 중 상한
+const STREAM_QUIET_CHECK_MS = 60000;        // 이만큼 조용하면 /session/status로 서버 상태를 확인한다
+const STREAM_SERVER_LOST_CHECKS = 3;        // 상태 확인이 연속 이만큼 실패하면 서버가 사라진 것으로 본다
+const QUEUE_IDLE_GRACE_MS = 3000;           // 대기 메시지가 남은 채 idle이 오면 이만큼 기다렸다 다시 확인한다
 const PROMPT_SEND_TIMEOUT_MS = 15000;       // prompt_async 요청 자체의 제한
 
 // ============================================
@@ -113,17 +120,23 @@ chrome.storage.session.get(['tabSessions', 'activeTabs', 'tabLastShownInfo', 'cu
 /** SW가 응답 도중 종료된 경우: 저장된 pending 세션의 결과를 REST로 회수해 사이드패널에 전달 */
 async function recoverInterruptedPrompts() {
   const list = await pendingPrompts.list();
-  for (const { sessionId, port, startedAt, directory } of list) {
+  for (const { sessionId, port, startedAt, directory, timeoutMs = 0 } of list) {
     if (eventSources.has(sessionId)) continue; // 이미 이 SW에서 다시 구독 중
-    if (Date.now() - startedAt > PENDING_MAX_AGE_MS * 2) { await pendingPrompts.remove(sessionId); continue; }
-    debugLog('WARN', `Recovering interrupted prompt after SW restart - sessionId=${sessionId}, port=${port}, ageMs=${Date.now() - startedAt}`);
+    // 제한 시간이 있으면 그 두 배가 지난 기록은 버린다. 제한이 없으면 서버가 busy인 동안 복구를 기다린다
+    // (storage.session은 브라우저를 다시 시작하면 비워진다).
+    if (timeoutMs > 0 && Date.now() - startedAt > timeoutMs * 2) { await pendingPrompts.remove(sessionId); continue; }
+    debugLog('WARN', `Recovering interrupted prompt after SW restart - sessionId=${sessionId}, port=${port}, ageMs=${Date.now() - startedAt}, timeoutMs=${timeoutMs || 'none'}`);
     swKeepAlive.acquire(`recover:${sessionId}`);
     recoverPendingPrompt({
       sessionId, port, startedAt, directory,
+      maxAgeMs: timeoutMs,
       fetchContent: fetchFallbackContent,
+      onBusy: () => {
+        chrome.runtime.sendMessage({ action: 'message-part', sessionId, part: { kind: 'heartbeat', state: 'busy', at: Date.now() } }).catch(() => {});
+      },
       onComplete: (content, error) => {
         debugLog(error ? 'ERROR' : 'INFO', `Interrupted prompt recovery done - sessionId=${sessionId}, chars=${content?.length || 0}, error=${error || 'none'}`);
-        chrome.runtime.sendMessage({ action: 'message-complete', sessionId, content, error }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'message-complete', sessionId, content, error, recovered: true }).catch(() => {});
       }
     }).catch((e) => {
       debugLog('ERROR', `Interrupted prompt recovery failed - sessionId=${sessionId}, error=${e.message}`);
@@ -1070,6 +1083,16 @@ async function getUiLang() {
     return 'ko';
   }
 }
+/** 응답 제한 시간(ms). 0이면 제한 없음. */
+async function getResponseTimeoutMs() {
+  try {
+    const { responseTimeoutMin } = await chrome.storage.local.get('responseTimeoutMin');
+    const min = Number(responseTimeoutMin);
+    return RESPONSE_TIMEOUT_CHOICES_MIN.includes(min) ? min * RESPONSE_TIMEOUT_UNIT_MS : 0;
+  } catch {
+    return 0;
+  }
+}
 async function getPageContextMode() {
   try {
     const { pageContext } = await chrome.storage.local.get('pageContext');
@@ -1136,6 +1159,108 @@ async function getCurrentTabInfo({ forPrompt = false } = {}) {
 /**
  * 메시지 전송
  */
+/** 선택된 모델이 없으면 서버 설정 → 첫 번째 사용 가능 모델 순으로 정한다. */
+async function ensureSelectedModel(port) {
+  if (selectedModel) return;
+  await syncModelFromServer(port);
+  if (selectedModel) return;
+  const models = await getAvailableModels();
+  if (models.length > 0 && models[0].models) {
+    const provider = models[0];
+    const firstModel = Array.isArray(provider.models)
+      ? provider.models[0]
+      : Object.values(provider.models)[0];
+    if (firstModel) {
+      selectedModel = { providerID: provider.id, modelID: firstModel.id || firstModel.name };
+      chrome.storage.local.set({ selectedModel });
+      debugLog('INFO', `Auto-selected model before send: ${selectedModel.providerID}/${selectedModel.modelID}`);
+    }
+  }
+  if (!selectedModel) {
+    throw new Error('사용 가능한 모델이 없습니다. OpenCode에서 AI 제공자 API 키를 설정해 주세요.');
+  }
+}
+
+/** 프롬프트 요청(헤더·본문)을 만든다. 작업 폴더 헤더와 페이지 정보 머리말을 붙인다. */
+async function buildPromptRequest(sessionId, message, tabInfo) {
+  const workingDir = await getWorkingDirectory();
+  const headers = { 'Content-Type': 'application/json' };
+  const dirHeader = buildDirectoryHeader(workingDir);
+  if (dirHeader) {
+    headers['x-opencode-directory'] = dirHeader;
+    debugLog('INFO', `x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}, sessionId=${sessionId}`);
+  } else {
+    debugLog('INFO', `x-opencode-directory not set (no saved working dir) - sessionId=${sessionId}`);
+  }
+  let fullMessage = message;
+  if (tabInfo?.url || tabInfo?.pageContent) {
+    // 머리말 언어가 모델의 답변 언어에 영향을 주므로 사이드패널 언어 설정을 따른다.
+    // 형식은 sidepanel.js의 stripPageContext()가 히스토리 복원 때 벗겨내는 패턴과 짝이다(양쪽 언어 모두 인식).
+    const L = (await getUiLang()) === 'en' ? PAGE_CONTEXT_LABELS.en : PAGE_CONTEXT_LABELS.ko;
+    let pageContext = '';
+    if (tabInfo.url) {
+      pageContext += `
+---
+${L.header}
+- ${L.title} ${tabInfo.title}
+- URL: ${tabInfo.url}
+`;
+    }
+    if (tabInfo.pageContent) {
+      const content = tabInfo.pageContent;
+      if (content.headings?.length) {
+        pageContext += `${L.headings}\n${content.headings.join('\n')}\n\n`;
+      }
+      if (content.paragraphs?.length) {
+        pageContext += `${L.paragraphs}\n${content.paragraphs.join('\n')}\n\n`;
+      }
+      if (content.selectedText) {
+        pageContext += `${L.selection}\n${content.selectedText}\n\n`;
+      }
+    }
+    fullMessage = pageContext + message;
+  }
+
+  const body = JSON.stringify({
+    ...(selectedModel && { model: selectedModel }),
+    parts: [{ type: 'text', text: fullMessage }]
+  });
+  return { headers, body, dirHeader };
+}
+
+/**
+ * POST /session/{id}/prompt_async. 서버는 세션이 응답 중이어도 204로 접수하고 큐에 넣는다(opencode 1.19.5 실측).
+ * 실패·시간 초과면 throw한다. timedOut 오류에는 err.timedOut = true를 붙인다.
+ */
+async function postPrompt(port, sessionId, { headers, body }) {
+  const promptCtrl = new AbortController();
+  const promptTimeout = setTimeout(() => promptCtrl.abort(), PROMPT_SEND_TIMEOUT_MS);
+  let promptResponse;
+  try {
+    promptResponse = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/prompt_async`,
+      { method: 'POST', headers, signal: promptCtrl.signal, body }
+    );
+  } catch (fetchErr) {
+    const timedOut = fetchErr.name === 'AbortError';
+    debugLog('ERROR', timedOut
+      ? `Prompt fetch timeout (${PROMPT_SEND_TIMEOUT_MS}ms) - sessionId=${sessionId}`
+      : `Prompt fetch error - ${fetchErr.message}, sessionId=${sessionId}`);
+    if (!timedOut) throw fetchErr;
+    const err = new Error(`메시지 전송 시간 초과 (${Math.round(PROMPT_SEND_TIMEOUT_MS / 1000)}s)`);
+    err.timedOut = true;
+    throw err;
+  } finally {
+    clearTimeout(promptTimeout);
+  }
+  if (promptResponse.status !== 204 && promptResponse.status !== 202 && !promptResponse.ok) {
+    const text = await promptResponse.text().catch(() => '');
+    debugLog('ERROR', `REST /prompt failed - status=${promptResponse.status}, body=${text}, sessionId=${sessionId}`);
+    throw new Error(`메시지 전송 실패: ${promptResponse.status} - ${text}`);
+  }
+  debugLog('INFO', `Prompt sent - sessionId=${sessionId}, status=${promptResponse.status}, model=${selectedModel ? `${selectedModel.providerID}/${selectedModel.modelID}` : 'default'}`);
+}
+
 async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onPart) {
   const session = sessions.get(sessionId);
   if (!session) {
@@ -1146,117 +1271,48 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onP
   if (!port) {
     throw new Error('OpenCode 서버 연결 실패');
   }
+  await ensureSelectedModel(port);
 
-  if (!selectedModel) {
-    await syncModelFromServer(port);
-    if (!selectedModel) {
-      const models = await getAvailableModels();
-      if (models.length > 0 && models[0].models) {
-        const provider = models[0];
-        const firstModel = Array.isArray(provider.models)
-          ? provider.models[0]
-          : Object.values(provider.models)[0];
-        if (firstModel) {
-          selectedModel = { providerID: provider.id, modelID: firstModel.id || firstModel.name };
-          chrome.storage.local.set({ selectedModel });
-          debugLog('INFO', `Auto-selected model before send: ${selectedModel.providerID}/${selectedModel.modelID}`);
-        }
-      }
-      if (!selectedModel) {
-        throw new Error('사용 가능한 모델이 없습니다. OpenCode에서 AI 제공자 API 키를 설정해 주세요.');
-      }
-    }
-  }
+  const request = await buildPromptRequest(sessionId, message, tabInfo);
+  const idleTimeoutMs = await getResponseTimeoutMs();
+
+  // prompt 전송 전에 SSE 구독을 먼저 연결 (server.connected 또는 5초 타임아웃까지 대기)
+  // /global/event 는 연결 시점 이후 이벤트만 전달하므로, prompt 전송이 먼저
+  // 이루어지면 응답이 빠른 모델의 경우 message.part.* 이벤트를 놓칠 수 있음
+  const subscribeStart = Date.now();
+  await subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { directory: request.dirHeader, idleTimeoutMs });
+  debugLog('INFO', `SSE pre-connected before prompt - sessionId=${sessionId}, elapsedMs=${Date.now() - subscribeStart}, responseTimeoutMs=${idleTimeoutMs || 'none'}`);
 
   try {
-    const workingDir = await getWorkingDirectory();
-    const headers = { 'Content-Type': 'application/json' };
-    const dirHeader = buildDirectoryHeader(workingDir);
-    if (dirHeader) {
-      headers['x-opencode-directory'] = dirHeader;
-      debugLog('INFO', `x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}, sessionId=${sessionId}`);
-    } else {
-      debugLog('INFO', `x-opencode-directory not set (no saved working dir) - sessionId=${sessionId}`);
-    }
-    let fullMessage = message;
-    if (tabInfo?.url || tabInfo?.pageContent) {
-      // 머리말 언어가 모델의 답변 언어에 영향을 주므로 사이드패널 언어 설정을 따른다.
-      // 형식은 sidepanel.js의 stripPageContext()가 히스토리 복원 때 벗겨내는 패턴과 짝이다(양쪽 언어 모두 인식).
-      const L = (await getUiLang()) === 'en' ? PAGE_CONTEXT_LABELS.en : PAGE_CONTEXT_LABELS.ko;
-      let pageContext = '';
-      if (tabInfo.url) {
-        pageContext += `
----
-${L.header}
-- ${L.title} ${tabInfo.title}
-- URL: ${tabInfo.url}
-`;
-      }
-      if (tabInfo.pageContent) {
-        const content = tabInfo.pageContent;
-        if (content.headings?.length) {
-          pageContext += `${L.headings}\n${content.headings.join('\n')}\n\n`;
-        }
-        if (content.paragraphs?.length) {
-          pageContext += `${L.paragraphs}\n${content.paragraphs.join('\n')}\n\n`;
-        }
-        if (content.selectedText) {
-          pageContext += `${L.selection}\n${content.selectedText}\n\n`;
-        }
-      }
-      fullMessage = pageContext + message;
-    }
-
-    // prompt 전송 전에 SSE 구독을 먼저 연결 (server.connected 또는 5초 타임아웃까지 대기)
-    // /global/event 는 연결 시점 이후 이벤트만 전달하므로, prompt 전송이 먼저
-    // 이루어지면 응답이 빠른 모델의 경우 message.part.* 이벤트를 놓칠 수 있음
-    const subscribeStart = Date.now();
-    await subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { directory: dirHeader });
-    debugLog('INFO', `SSE pre-connected before prompt - sessionId=${sessionId}, elapsedMs=${Date.now() - subscribeStart}`);
-
-    const promptCtrl = new AbortController();
-    const promptTimeout = setTimeout(() => promptCtrl.abort(), PROMPT_SEND_TIMEOUT_MS);
-    let promptResponse;
-    try {
-      promptResponse = await fetch(
-        `http://127.0.0.1:${port}/session/${sessionId}/prompt_async`,
-        {
-          method: 'POST',
-          headers,
-          signal: promptCtrl.signal,
-          body: JSON.stringify({
-            ...(selectedModel && { model: selectedModel }),
-            parts: [{ type: 'text', text: fullMessage }]
-          })
-        }
-      );
-    } catch (fetchErr) {
-      clearTimeout(promptTimeout);
-      const timedOut = fetchErr.name === 'AbortError';
-      const errMsg = timedOut
-        ? `Prompt fetch timeout (${PROMPT_SEND_TIMEOUT_MS}ms) - sessionId=${sessionId}`
-        : `Prompt fetch error - ${fetchErr.message}, sessionId=${sessionId}`;
-      debugLog('ERROR', errMsg);
-      // 사이드패널에는 전송 실패로 알리므로 이 프롬프트의 스트림을 끝낸다. 서버가 느려서 늦게라도 접수했다면
-      // 응답이 실패 표시 뒤에 섞여 들어오므로(그리고 사용자가 다시 보낸 프롬프트와 겹치므로) 서버에도 중단을 요청한다(접수 전에 도착하면 효과 없음 — 최선 노력).
-      stopPromptStream(sessionId);
-      if (timedOut) await abortServerSession(port, sessionId);
-      throw timedOut
-        ? new Error(`메시지 전송 시간 초과 (${Math.round(PROMPT_SEND_TIMEOUT_MS / 1000)}s)`)
-        : fetchErr;
-    }
-    clearTimeout(promptTimeout);
-    if (promptResponse.status !== 204 && promptResponse.status !== 202 && !promptResponse.ok) {
-      const body = await promptResponse.text().catch(() => '');
-      debugLog('ERROR', `REST /prompt failed - status=${promptResponse.status}, body=${body}, sessionId=${sessionId}`);
-      stopPromptStream(sessionId);
-      throw new Error(`메시지 전송 실패: ${promptResponse.status} - ${body}`);
-    }
-    debugLog('INFO', `Prompt sent - sessionId=${sessionId}, status=${promptResponse.status}, model=${selectedModel ? `${selectedModel.providerID}/${selectedModel.modelID}` : 'default'}`);
-  } catch (error) {
-    console.error('메시지 전송 오류:', error);
-    throw error;
+    await postPrompt(port, sessionId, request);
+  } catch (err) {
+    // 사이드패널에는 전송 실패로 알리므로 이 프롬프트의 스트림을 끝낸다. 서버가 느려서 늦게라도 접수했다면
+    // 응답이 실패 표시 뒤에 섞여 들어오므로(그리고 사용자가 다시 보낸 프롬프트와 겹치므로) 서버에도 중단을 요청한다(접수 전에 도착하면 효과 없음 — 최선 노력).
+    stopPromptStream(sessionId);
+    if (err.timedOut) await abortServerSession(port, sessionId);
+    throw err;
   }
+}
+
+/**
+ * 응답 중인 세션에 대기(pending) 메시지를 보낸다. 서버가 큐에 넣었다가 현재 응답이 끝나면 처리하고,
+ * 진행 중인 SSE 구독이 그 응답까지 이어서 받는다(turn-start로 사이드패널이 새 말풍선을 연다).
+ * 진행 중인 구독이 없으면(직전에 끝남) { queued: false }를 돌려주고, 사이드패널이 일반 전송으로 보낸다.
+ */
+async function queueMessage(sessionId, message, tabInfo) {
+  const stream = eventSources.get(sessionId)?.queue;
+  if (!stream) return { queued: false };
+  const request = await buildPromptRequest(sessionId, message, tabInfo);
+  // 접수 전에 idle이 와도 완료로 처리하지 않도록 먼저 센다
+  stream.add();
+  try {
+    await postPrompt(stream.port, sessionId, request);
+  } catch (err) {
+    stream.remove();
+    throw err;
+  }
+  debugLog('INFO', `Queued message sent - sessionId=${sessionId}, queued=${stream.outstanding()}`);
+  return { queued: true };
 }
 
 /** 세션의 응답 스트림 구독(SSE + 무응답 타이머)을 끝낸다. */
@@ -1372,8 +1428,9 @@ const pendingInteractions = new Map();
  * 스트림 종료 시 Last-Event-ID로 재연결하여 응답 이벤트 수신
  * directory: 프롬프트를 보낸 x-opencode-directory 값. 세션 상태(/session/status)는 디렉터리 instance별이라
  *            재연결 후 idle 확인·SW 재시작 복구에서 같은 값으로 물어야 한다.
+ * idleTimeoutMs: 무이벤트 제한(⚙ 응답 제한 시간). 0이면 시간으로 끊지 않고 서버 상태 확인(checkQuiet)만 한다.
  */
-function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { directory = null } = {}) {
+function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { directory = null, idleTimeoutMs = 0 } = {}) {
   const existing = eventSources.get(sessionId);
   if (existing) existing.abort();
 
@@ -1382,7 +1439,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
 
   // 응답 대기 동안 SW 유지 + 재시작 복구용 기록. 모든 종료 경로가 abort()를 거치므로 abort에서 해제한다.
   swKeepAlive.acquire(sessionId);
-  pendingPrompts.add(sessionId, port, directory);
+  pendingPrompts.add(sessionId, port, directory, idleTimeoutMs);
   controller.signal.addEventListener('abort', () => {
     swKeepAlive.release(sessionId);
     pendingPrompts.remove(sessionId);
@@ -1408,30 +1465,55 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     // 보내지 않는데, Retry-After에는 상한이 없어 무응답 제한보다 길 수 있다 → 그 시각까지는 기다려 준다.
     let retryUntil = 0;
 
+    // 대기(pending) 메시지: 응답 중에 queue-message로 보낸 프롬프트. 서버가 큐에 넣었다가 현재 응답 뒤에 처리한다.
+    // 처리 시작은 "부모(user 메시지)가 다른 assistant 메시지"로 안다(같은 턴의 여러 단계는 부모가 같다).
+    // userMessageIds[0] = 원래 프롬프트, [k] = k번째 대기 메시지(서버가 받은 순서).
+    const userMessageIds = [];
+    let turnParentId = null;
+    let queuedSent = 0;      // 접수 요청한 대기 메시지 수
+    let queuedConsumed = 0;  // 서버가 처리를 시작한 대기 메시지 수
+    let queueGraceTimer = null;
+    controller.queue = {
+      port,
+      add() { if (completed || controller.signal.aborted) return false; queuedSent++; return true; },
+      remove() { queuedSent = Math.max(queuedConsumed, queuedSent - 1); },
+      outstanding: () => queuedSent - queuedConsumed
+    };
+
     let timeoutId = null;
+    let lastActivityAt = Date.now();
     // 스트림이 어떤 경로로든 끝나면(cancel-message, 전송 실패, 새 프롬프트가 기존 구독을 대체 등) 타이머도 끝낸다.
     // 안 그러면 남은 타이머가 뒤늦게 "응답 시간 초과"를 보내고 서버 세션을 abort해 다음 프롬프트까지 죽인다.
     controller.signal.addEventListener('abort', () => {
       completed = true;
       clearTimeout(timeoutId);
+      clearTimeout(queueGraceTimer);
+      clearInterval(quietTimer);
     }, { once: true });
+    // 이 구독이 아직 eventSources에 등록된 것일 때만 지운다(새 프롬프트가 대체한 구독을 지우지 않게).
+    function detach() {
+      if (eventSources.get(sessionId) === controller) eventSources.delete(sessionId);
+    }
     function resetTimeout() {
+      lastActivityAt = Date.now();
       if (timeoutId) clearTimeout(timeoutId);
       timeoutId = null;
       if (completed || controller.signal.aborted) return;
-      // 사용자 응답 대기 중에는 짧은 무응답 제한 대신 넉넉한 상한(30분)만 둔다.
+      // 제한 없음(기본): 시간으로 끊지 않는다. 멈춤 판단은 checkQuiet가 서버 상태로 한다.
+      if (!idleTimeoutMs) return;
+      // 사용자 응답 대기 중에는 무응답 제한 대신 넉넉한 상한(30분)만 둔다.
       // 카드가 어떤 이유로든 사라져도 세션이 영원히 멈추지 않게 하기 위함.
-      const baseMs = pendingAsks.size > 0 ? STREAM_ASK_TIMEOUT_MS : STREAM_IDLE_TIMEOUT_MS;
+      const baseMs = pendingAsks.size > 0 ? Math.max(STREAM_ASK_TIMEOUT_MS, idleTimeoutMs) : idleTimeoutMs;
       // 재시도 대기 중이면 "다음 시도 시각 + 기본 제한"까지 연장한다(그 뒤에도 조용하면 정말 멈춘 것).
       const limitMs = retryUntil ? Math.max(baseMs, retryUntil - Date.now() + baseMs) : baseMs;
       timeoutId = setTimeout(async () => {
         if (!completed) {
           controller.abort();
-          eventSources.delete(sessionId);
-          debugLog('ERROR', `SSE timeout - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, bufferLength=${buffer.length}`);
+          detach();
+          debugLog('ERROR', `SSE timeout (${idleTimeoutMs}ms setting) - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, bufferLength=${buffer.length}`);
 
           let finalContent = buffer || '';
-          let errMsg = '응답 시간 초과';
+          let errMsg = '응답 시간 초과 — ⚙ 설정에서 응답 제한 시간을 늘리거나 끌 수 있습니다.';
           if (finalContent.length === 0) {
             debugLog('WARN', `Empty buffer at timeout - falling back to REST /session/${sessionId}/message`);
             const fallback = await fetchFallbackContent(port, sessionId);
@@ -1444,7 +1526,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
               if (fallback.hasUnfinishedTool) errMsg = '도구 실행이 멈춰 세션을 중단했습니다. 같은 문제가 반복되면 /new로 새 세션을 시작하거나 ⚙에서 서버를 재시작하세요.';
             }
           }
-          // 타임아웃 = 180초간 이벤트 없음. 서버에 busy 세션이 남지 않도록 항상 abort한다
+          // 타임아웃 = 설정한 시간 동안 이벤트 없음. 서버에 busy 세션이 남지 않도록 항상 abort한다
           // (이미 idle인 세션에는 무해). 안 하면 다음 프롬프트가 큐에서 영원히 대기한다.
           await abortServerSession(port, sessionId);
           onComplete(finalContent, errMsg);
@@ -1481,12 +1563,28 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     }
 
     // 응답 완료 처리(session.idle 또는 재연결 후 idle 확인). 텍스트가 비면 REST로 복구한다.
-    async function completeAsIdle(reason) {
+    // 대기 메시지가 아직 처리되지 않았으면 완료하지 않는다: 접수가 idle 직후였다면 서버가 곧 다시 busy가 된다.
+    // QUEUE_IDLE_GRACE_MS 뒤에도 idle이면 대기 메시지는 처리되지 않은 것으로 보고 완료한다(사이드패널이 표시).
+    async function completeAsIdle(reason, { force = false } = {}) {
       if (completed) return;
+      if (!force && queuedSent > queuedConsumed) {
+        if (queueGraceTimer) return;
+        debugLog('INFO', `Idle with queued messages outstanding (${reason}) - sessionId=${sessionId}, outstanding=${queuedSent - queuedConsumed}`);
+        queueGraceTimer = setTimeout(async () => {
+          queueGraceTimer = null;
+          if (completed || controller.signal.aborted || queuedSent <= queuedConsumed) return;
+          const { reachable, status } = await fetchSessionStatus();
+          if (completed || controller.signal.aborted || queuedSent <= queuedConsumed) return;
+          if (reachable && status && status.type !== 'idle') return; // 대기 메시지 처리 시작 → 이벤트가 이어진다
+          debugLog('WARN', `Queued messages not processed - sessionId=${sessionId}, outstanding=${queuedSent - queuedConsumed}`);
+          await completeAsIdle(`${reason}+queue-unprocessed`, { force: true });
+        }, QUEUE_IDLE_GRACE_MS);
+        return;
+      }
       completed = true;
       clearTimeout(timeoutId);
       controller.abort();
-      eventSources.delete(sessionId);
+      detach();
       debugLog('INFO', `Session idle (${reason}) - sessionId=${sessionId}, assistantMessageId=${assistantMessageId || 'none'}, trackedParts=${routerState.partTypes.size}, bufferLength=${buffer.length}`);
 
       let finalContent = buffer;
@@ -1506,6 +1604,91 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       }
       if (idleError) { onComplete(null, idleError); return; }
       onComplete(finalContent);
+    }
+
+    // 새 assistant 메시지가 시작됐다. 부모(user 메시지)가 바뀌었으면 대기 메시지의 응답이 시작된 것이다.
+    function noteAssistantTurn(parentId) {
+      if (!parentId || parentId === turnParentId) return;
+      const first = turnParentId === null;
+      turnParentId = parentId;
+      const idx = userMessageIds.indexOf(parentId);
+      // 부모의 user 이벤트를 놓쳤으면 다음 대기 메시지로 본다
+      const consumed = Math.min(queuedSent, idx >= 0 ? idx : queuedConsumed + (first ? 0 : 1));
+      if (consumed <= queuedConsumed && first) return; // 원래 프롬프트의 응답 시작
+      queuedConsumed = Math.max(queuedConsumed, consumed);
+      // 첫 응답이 곧바로 대기 메시지에 대한 것(서버가 둘을 한 번에 처리)이면 새 말풍선 없이 배지만 정리한다
+      const newBubble = !first;
+      if (newBubble) buffer = ''; // buffer = 현재 턴의 텍스트(완료 시 마지막 말풍선의 REST 폴백 판단에 쓴다)
+      debugLog('INFO', `Queued message turn started - sessionId=${sessionId}, parentId=${parentId}, consumed=${queuedConsumed}/${queuedSent}, newBubble=${newBubble}`);
+      onPart?.({ kind: 'turn-start', consumed: queuedConsumed, newBubble });
+    }
+
+    async function fetchSessionStatus() {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return { reachable: false };
+        return { reachable: true, status: (await res.json())?.[sessionId] || null };
+      } catch {
+        return { reachable: false };
+      }
+    }
+
+    // 이벤트가 STREAM_QUIET_CHECK_MS 이상 없으면 서버에 세션 상태를 묻는다(응답 제한 시간 설정과 무관하게 항상).
+    //  - busy/retry: 서버가 아직 일하는 중 → 계속 기다리고 사이드패널에 "서버 처리 중 확인"을 알린다(heartbeat).
+    //  - idle: 완료 신호를 놓쳤다 → 완료 처리. 응답이 한 번도 시작되지 않았으면 두 번 연속 확인 뒤 오류로 끝낸다.
+    //  - 연결 실패가 STREAM_SERVER_LOST_CHECKS번 이어지면 서버가 사라진 것으로 보고 오류로 끝낸다.
+    let quietFails = 0;
+    let quietIdleNoAssistant = 0;
+    let lastQuietCheckAt = 0;
+    let quietChecking = false;
+    async function checkQuiet() {
+      if (completed || controller.signal.aborted || quietChecking) return;
+      const now = Date.now();
+      if (now - lastActivityAt < STREAM_QUIET_CHECK_MS || now - lastQuietCheckAt < STREAM_QUIET_CHECK_MS) return;
+      quietChecking = true;
+      lastQuietCheckAt = now;
+      try {
+        const { reachable, status } = await fetchSessionStatus();
+        if (completed || controller.signal.aborted) return;
+        const quietSec = Math.round((Date.now() - lastActivityAt) / 1000);
+        if (!reachable) {
+          quietFails++;
+          debugLog('WARN', `Quiet check: server unreachable (${quietFails}/${STREAM_SERVER_LOST_CHECKS}) - sessionId=${sessionId}, quietSec=${quietSec}`);
+          onPart?.({ kind: 'heartbeat', state: 'unreachable', at: Date.now() });
+          if (quietFails >= STREAM_SERVER_LOST_CHECKS) {
+            finishWithError('서버에 연결할 수 없어 응답 대기를 중단했습니다. ⚙에서 서버를 재시작해 보세요.');
+          }
+          return;
+        }
+        quietFails = 0;
+        if (status && status.type !== 'idle') {
+          quietIdleNoAssistant = 0;
+          debugLog('INFO', `Quiet check: server still ${status.type} - sessionId=${sessionId}, quietSec=${quietSec}`);
+          onPart?.({ kind: 'heartbeat', state: 'busy', at: Date.now() });
+          return;
+        }
+        if (pendingAsks.size > 0) return; // 사용자 응답 대기 카드가 있으면 건드리지 않는다
+        if (assistantMessageId) {
+          debugLog('WARN', `Quiet check: session idle but no completion event - sessionId=${sessionId}, quietSec=${quietSec}`);
+          await completeAsIdle('quiet-check');
+          return;
+        }
+        if (++quietIdleNoAssistant >= 2) {
+          debugLog('ERROR', `Quiet check: session idle and response never started - sessionId=${sessionId}, quietSec=${quietSec}`);
+          finishWithError('서버가 응답을 시작하지 않았습니다. 다시 보내 보세요. 반복되면 /ext-log로 로그를 확인하세요.');
+        }
+      } finally {
+        quietChecking = false;
+      }
+    }
+    const quietTimer = setInterval(() => { checkQuiet().catch(() => {}); }, Math.max(10, STREAM_QUIET_CHECK_MS / 4));
+
+    function finishWithError(errMsg) {
+      if (completed) return;
+      completed = true;
+      controller.abort();
+      detach();
+      onComplete(buffer || null, errMsg);
     }
 
     function emitAsk(part) {
@@ -1579,7 +1762,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
           resolveOnce();
           clearTimeout(timeoutId);
           controller.abort();
-          eventSources.delete(sessionId);
+          detach();
           onComplete('', `SSE 연결 실패: ${response.status}`);
           return;
         }
@@ -1673,7 +1856,11 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                 case 'message.updated': {
                   const info = evt.properties?.info;
                   if (info?.sessionID === sessionId) resetTimeout();
+                  if (info?.role === 'user' && info?.sessionID === sessionId && info.id && !userMessageIds.includes(info.id)) {
+                    userMessageIds.push(info.id);
+                  }
                   if (info?.role === 'assistant' && info?.sessionID === sessionId) {
+                    if (info.id !== assistantMessageId) noteAssistantTurn(info.parentID || null);
                     assistantMessageId = info.id;
                     debugLog('INFO', `Assistant message started - sessionId=${sessionId}, messageId=${info.id}, model=${info.providerID || '?'}/${info.modelID || '?'}`);
 
@@ -1719,7 +1906,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                 }
                 case 'session.idle': {
                   await completeAsIdle('idle');
-                  return;
+                  if (completed) return;
+                  break; // 대기 메시지가 남아 완료를 미뤘다 → 계속 받는다
                 }
                 case 'session.status': {
                   // busy/retry = 서버가 아직 처리 중. retry는 제공자 재시도(레이트 리밋 등) 안내를 남긴다.
@@ -1729,7 +1917,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                   // session.idle은 deprecated 경로라 status idle도 완료 신호로 받는다(프롬프트 처리를 본 뒤에만).
                   if (st?.type === 'idle' && assistantMessageId && evt.properties?.sessionID === sessionId) {
                     await completeAsIdle('status-idle');
-                    return;
+                    if (completed) return;
                   }
                   break;
                 }
@@ -1745,7 +1933,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                   completed = true;
                   clearTimeout(timeoutId);
                   controller.abort();
-                  eventSources.delete(sessionId);
+                  detach();
                   const errMsg = evt.properties?.error?.data?.message
                     || evt.properties?.error?.message
                     || evt.properties?.error?.name
@@ -2134,6 +2322,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
           sendResponse({ success: true });
+          break;
+        }
+
+        // 응답 중에 보낸 메시지: 진행 중인 구독을 유지한 채 서버 큐에 넣는다(queueMessage 참고).
+        case 'queue-message': {
+          const tabInfo = await getCurrentTabInfo({ forPrompt: true });
+          const result = await queueMessage(message.sessionId, message.message, tabInfo);
+          sendResponse({ success: true, ...result });
           break;
         }
 

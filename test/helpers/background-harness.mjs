@@ -57,7 +57,7 @@ function createChromeStub({ local = {} } = {}) {
 /**
  * @param {object} opts
  * @param {number} opts.port      가짜 opencode 서버 포트 (이 포트만 스캔한다)
- * @param {Record<string, number>} [opts.constants]  `const NAME = 값;` 형태 상수 치환 (예: STREAM_IDLE_TIMEOUT_MS)
+ * @param {Record<string, number>} [opts.constants]  `const NAME = 값;` 형태 상수 치환 (예: RESPONSE_TIMEOUT_UNIT_MS)
  */
 export async function loadBackground({ port, constants = {}, local = {}, sourcePath = path.join(ROOT, 'background.js') }) {
   let src = fs.readFileSync(sourcePath, 'utf8');

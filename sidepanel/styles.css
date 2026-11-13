@@ -935,6 +935,27 @@ button, select, input, textarea {
 
 .user-message .message-content a { color: var(--on-accent); }
 
+/* 응답 중에 보낸 대기 메시지 (sidepanel.js setQueueBadge) */
+.message.user-message.queued .message-content {
+  opacity: 0.7;
+}
+
+.queue-badge {
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.9;
+  white-space: normal;
+}
+
+.queue-badge.warn {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--warn-bg);
+  color: var(--warn);
+  opacity: 1;
+}
+
 .user-message .message-content code {
   background: rgba(255, 255, 255, 0.18);
   color: var(--on-accent);
@@ -1782,6 +1803,15 @@ button, select, input, textarea {
   font-size: 12px;
   color: var(--text-secondary);
   z-index: 100;
+  /* 단계 · 경과 시간 · 마지막 활동 · 대기 메시지 수가 붙어 길어질 수 있다 */
+  max-width: calc(100vw - 32px);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 서버 상태 확인이 실패하는 중 (sidepanel.js renderProgress) */
+.loading-indicator.stalled {
+  background-color: var(--warn-bg);
+  color: var(--warn);
 }
 
 .loading-indicator.hidden {
