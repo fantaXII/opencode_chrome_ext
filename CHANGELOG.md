@@ -1,5 +1,18 @@
 # Changelog
 
+# [2.22.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.21.1...v2.22.0) (2026-11-14)
+
+
+### Bug Fixes
+
+* 폴더 목록이 서버 기록을 항상 읽고 /wd 직접 입력이 제안에 가로채이지 않게 수정 ([bf45868](https://github.com/fantaXII/opencode_chrome_ext/commit/bf458689e82e55ded05f7cbec465e8c1792e014b))
+
+
+### Features
+
+* 작업 폴더 즐겨찾기·최근 폴더 목록 ([2e931f4](https://github.com/fantaXII/opencode_chrome_ext/commit/2e931f4a8f2f50d4c07a785527af7e3df2dc61f3))
+* 폴더별 세션 이어가기와 즐겨찾기 내보내기/가져오기 ([e439894](https://github.com/fantaXII/opencode_chrome_ext/commit/e439894a6b91c60b62824bd0d17df17d27fd7f9f))
+
 ## [2.21.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.21.0...v2.21.1) (2026-11-14)
 
 
