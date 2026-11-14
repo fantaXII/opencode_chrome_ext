@@ -32,10 +32,10 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 
 ### background.js (Service Worker)
 - `manifest.json`에서 `"type": "module"`로 선언된 ES 모듈
-- 포트 4096~4105 범위를 스캔해 실행 중인 OpenCode 서버를 찾고, 없으면 Native Messaging으로 시작 요청
+- **확장 전용 서버**: 확장이 직접 띄운 서버만 쓴다(TUI가 자기 서버를 혼자 쓰는 것과 같다). 터미널 TUI·VS Code 등이 4096~4105에 띄운 서버에 붙으면 강제 재시작이 그 작업까지 죽이기 때문이다. host의 `start`/`restart` 응답 포트를 `chrome.storage.local.managedServerPort`에 두고, SW가 그 포트에 처음 붙을 때 `server-info`의 `managed`(server.json 대조)로 한 번 확인해 `storage.session.managedServerVerified`에 남긴다(브라우저를 다시 켜면 재확인). 기록이 없거나 그 포트를 다른 서버가 쓰면 범위 안에서 `managed`인 서버를 이어받고, 없으면 host `start`로 새로 띄운다(host는 opencode가 응답하는 포트를 건너뛰므로 TUI가 4096을 쓰면 4097 등에 뜬다). 서버를 띄운 뒤에는 host가 알려준 포트만 기다린다(`waitForServer(port)`). host가 판정하지 못하면(미설치·`Unknown action`·오류) 예전처럼 아무 서버에나 붙고 확장 서버로 기록하지 않는다. 서버가 2개여도 세션은 같은 DB를 써서 `/sessions`에 함께 보인다(1.19.4 실측).
 - Side Panel과는 `chrome.runtime.sendMessage`로 통신; 응답 청크는 `message-chunk` / `message-complete` 액션으로 역방향 push
 - 세션별 SSE 연결(`EventSource`)을 `eventSources` Map으로 관리; 60초 타임아웃
-- 30초마다 `periodicServerCheck`로 서버 포트 변경 감지
+- 1분마다 `periodicServerCheck`가 연결된 서버 포트의 health만 확인한다(범위를 다시 훑지 않는다). 내려갔으면 확인 기록을 지우고 `ensureOpenCodeServer`로 다시 연결한다.
 
 ### sidepanel/sidepanel.js
 - 모든 백엔드 통신은 `sendMessageToBackground(action, data)` 헬퍼를 통해 background로 위임
@@ -84,16 +84,21 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 
 ### 서버 재시작 (2단계)
 
-MCP/skill/agent를 새로 등록하면 opencode는 이를 자동 반영하지 않는다(config가 instance 단위로 캐시됨). TUI의 exit → 재진입에 대응하는 동작이 `POST /global/dispose`다.
+MCP/skill/agent를 새로 등록하면 opencode는 이를 자동 반영하지 않는다. 프로젝트 설정·skill은 instance 단위로 캐시돼 `POST /global/dispose`로 다시 읽지만, **전역 설정(`~/.config/opencode/opencode.json`)은 프로세스 수명 동안 캐시돼 dispose로 반영되지 않는다**(1.19.4 실측: 전역 MCP는 처음 여는 폴더에서도 안 보임). TUI의 exit → 재진입은 TUI 프로세스(와 그 안의 서버)를 새로 띄우는 것이라 하드 재시작에 해당한다. `PATCH /global/config {}`도 전역 설정을 다시 읽지만, 파일을 다시 써서 주석·포맷이 사라지므로 쓰지 않는다.
 
 | | 소프트 (`restart-instance`) | 하드 (`restart-server`) |
 |---|---|---|
 | 방법 | `POST /global/dispose` | Native Host가 포트 점유 프로세스 종료 후 재spawn |
 | 소요 | 1~2초 | 10~30초 |
 | 프로세스/포트 | 유지 | 재생성, **포트가 바뀔 수 있음** |
-| 용도 | MCP/skill/agent 등록 반영 | 서버가 응답하지 않을 때 |
+| 용도 | 프로젝트 설정의 MCP, skill/agent 등록 반영 | 전역 설정(MCP 등) 반영, 서버가 응답하지 않을 때 |
+| 위치 | MCP 메뉴 "↻ 설정 다시 읽기" | MCP 메뉴 "⟳ 서버 재시작", ⚙ "서버 강제 재시작" |
+
+둘 다 서버의 모든 진행 중 응답을 끊는다. 그래서 `runServerRestart`는 먼저 `get-active-streams`(SW가 구독 중인 `eventSources`, 확장 전용 서버라 이것이 진행 중 응답 전부다)로 다른 탭의 응답을 확인하고, 있으면 "끝난 뒤 재시작"(2초마다 확인, 상태 문구 옆 "대기 취소")/"지금 재시작"/취소를 고르게 한다(`showConfirm`의 `altText`).
 
 하드 재시작 중에는 사이드패널이 `restarting` 상태(처음 연결할 때와 같은 오버레이 + 입력/에이전트 전환/MCP·설정 메뉴 차단)가 되고, background는 `server-restart-state`를 모든 패널에 broadcast한다. `ensureOpenCodeServer`는 `_hardRestartPromise`가 있으면 새 서버를 띄우지 않고 재시작이 끝나기를 기다린다(두 번째 서버가 뜨는 레이스 방지). 소프트 재시작은 막지 않는다.
+
+MCP 목록 조회·켜기/끄기(`get-mcp-status`/`toggle-mcp`)는 현재 세션의 폴더(`getSessionDirectory`)로 `x-opencode-directory`를 붙인다. 프로젝트 MCP는 그 폴더 instance에만 있어서, 헤더 없이 물으면 서버 cwd 폴더 기준 목록이 나왔다. 사이드패널은 세션이 바뀔 때(`refreshWorkingDirectory`)와 MCP 메뉴를 열 때 목록을 다시 읽는다. (`/command`·`/agent` 조회는 아직 헤더 없이 서버 cwd 기준이다.)
 
 dispose는 열려 있는 SSE 스트림을 끊고 `server.instance.disposed` 이벤트를 내보낸다. `subscribeToEvents()`의 Last-Event-ID 재연결 경로가 자동으로 다시 붙지만, 진행 중이던 프롬프트는 instance와 함께 사라진다(사이드패널이 재시작 전에 `cancel-message`로 UI를 정리한다).
 

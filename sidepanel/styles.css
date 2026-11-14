@@ -470,6 +470,22 @@ button, select, input, textarea {
   color: var(--error);
 }
 
+/* 다른 탭의 응답을 기다리는 동안 상태 문구 옆에 붙는 취소 버튼 */
+.mcp-wait-cancel-btn {
+  margin-left: 4px;
+  padding: 1px 8px;
+  background: transparent;
+  color: var(--accent-text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mcp-wait-cancel-btn:hover {
+  background: var(--accent-soft);
+}
+
 /* ---- 설정 패널 ---- */
 .settings-dropdown {
   width: 280px;

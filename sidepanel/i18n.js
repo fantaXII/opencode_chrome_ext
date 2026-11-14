@@ -98,7 +98,16 @@
     'MCP 서버 없음': 'No MCP servers',
     '비활성': 'Disabled',
     '↻ 설정 다시 읽기': '↻ Reload config',
-    'opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)': 'opencode re-reads config/MCP/skill/agent from disk (the server process keeps running)',
+    '작업 폴더의 MCP와 skill/agent를 다시 읽습니다 (서버 프로세스 유지). 전역 설정의 MCP는 서버 재시작이 필요합니다': 'Re-reads the working folder\'s MCP and skills/agents (the server process keeps running). MCP in the global config needs a server restart',
+    '⟳ 서버 재시작 (전역 MCP 포함)': '⟳ Restart server (incl. global MCP)',
+    '서버를 다시 시작해 전역 설정까지 모두 다시 읽습니다 (10~30초)': 'Restarts the server and re-reads everything, including the global config (10–30s)',
+    '다른 탭에서 응답 중': 'Responding in another tab',
+    '다른 탭에서 진행 중인 응답이 {count}개 있습니다.\n지금 재시작하면 그 응답이 중단됩니다.': '{count} response(s) are in progress in other tabs.\nRestarting now will stop them.',
+    '끝난 뒤 재시작': 'Restart when done',
+    '지금 재시작': 'Restart now',
+    '다른 탭의 응답 {count}개가 끝나면 재시작합니다…': 'Will restart when {count} response(s) in other tabs finish…',
+    '재시작을 취소했습니다': 'Restart cancelled',
+    '대기 취소': 'Cancel wait',
 
     // ---- 재시작 ----
     '{runtime}(으)로 서버를 재시작하는 중… (최대 30초)': 'Restarting the server on {runtime}… (up to 30s)',

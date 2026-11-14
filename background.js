@@ -265,16 +265,114 @@ async function checkServerHealth(port) {
 /**
  * 사용 가능한 포트 찾기
  */
-async function findAvailablePort() {
-  console.log(`[findAvailablePort] ${DEFAULT_PORT} ~ ${DEFAULT_PORT + MAX_PORT_CHECK - 1} 범위 포트 스캔 시작`);
+/** 4096~4105에서 응답하는 opencode 서버 포트 목록(누가 띄웠는지는 따지지 않는다). */
+async function scanHealthyPorts() {
   const ports = Array.from({ length: MAX_PORT_CHECK }, (_, i) => DEFAULT_PORT + i);
   const states = await Promise.all(ports.map((port) => checkServerHealth(port)));
-  const healthy = ports.filter((_, i) => states[i].available);
+  return ports.filter((_, i) => states[i].available);
+}
 
+// ============================================
+// 확장 전용 서버
+// ============================================
+//
+// 사이드패널은 확장이 직접 띄운 서버만 쓴다. TUI처럼 "자기 서버를 혼자 쓰기" 위해서다.
+// 터미널 TUI·VS Code 등이 띄운 서버(--port 4096 등)에 붙으면 강제 재시작이 그 작업까지
+// 죽이므로, 전역 MCP처럼 프로세스 재시작으로만 반영되는 설정을 마음 놓고 반영할 수 없었다.
+//
+// - 확장이 띄운 서버의 포트는 host의 start/restart 응답으로 알고 chrome.storage.local에 둔다.
+// - 브라우저를 다시 켜면 그 포트를 다른 프로그램이 쓰고 있을 수 있으므로, SW가 그 포트에 처음 붙을 때
+//   host의 server-info(server.json 기록 pid와 현재 리스너 대조)로 한 번 확인한다. 결과는
+//   storage.session에 두어(브라우저 세션 동안 유지) SW가 재시작될 때마다 host를 부르지 않는다.
+// - host가 없거나(개발 환경·테스트) 구버전이라 판정하지 못하면 예전처럼 아무 서버에나 붙는다.
+const MANAGED_PORT_KEY = 'managedServerPort';
+// 지금 연결된 서버가 확장 서버인지: true(기록·확인·직접 띄움) | false(판정 불가로 아무 서버나 고름) | null(미연결)
+// false인 서버는 다른 프로그램의 서버일 수 있으므로 하드 재시작이 그 프로세스를 죽이지 않고 새 서버를 띄운다.
+let serverIsManaged = null;
+const MANAGED_VERIFIED_KEY = 'managedServerVerified';
+
+/** host로 확장이 띄운 서버인지 확인한다: 'managed' | 'unmanaged' | 'unknown'(판정 불가) */
+async function checkManagedServer(port) {
+  try {
+    const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port });
+    if (info?.status === 'success' && typeof info.managed === 'boolean') {
+      return info.managed ? 'managed' : 'unmanaged';
+    }
+    debugLog('WARN', `checkManagedServer: cannot decide - port=${port}, error=${info?.error || '?'}`);
+  } catch (error) {
+    debugLog('WARN', `checkManagedServer: ${error.message}`);
+  }
+  return 'unknown';
+}
+
+/** 확장이 띄운(또는 확인한) 서버 포트를 기록한다. */
+async function rememberManagedServer(port) {
+  serverIsManaged = true;
+  try {
+    await chrome.storage.local.set({ [MANAGED_PORT_KEY]: port });
+    await chrome.storage.session.set({ [MANAGED_VERIFIED_KEY]: port });
+  } catch {}
+}
+
+/** 확인 결과만 지운다(포트가 내려갔을 때). 다시 붙을 때 host로 재확인한다. */
+function forgetManagedVerification() {
+  chrome.storage.session.remove(MANAGED_VERIFIED_KEY).catch(() => {});
+}
+
+/**
+ * 사이드패널이 쓸 서버 포트. 확장이 띄운 서버가 없으면 null(→ 호출부가 새로 띄운다).
+ * 다른 프로그램이 띄운 서버는 건너뛴다. host가 판정하지 못할 때만 예전처럼 아무 서버나 고른다.
+ */
+async function findAvailablePort() {
+  let stored = null;
+  let verified = null;
+  try {
+    stored = (await chrome.storage.local.get(MANAGED_PORT_KEY))[MANAGED_PORT_KEY] ?? null;
+    verified = (await chrome.storage.session.get(MANAGED_VERIFIED_KEY))[MANAGED_VERIFIED_KEY] ?? null;
+  } catch {}
+
+  // 1. 기록된 확장 서버
+  if (stored && (await checkServerHealth(stored)).available) {
+    if (verified === stored) { serverIsManaged = true; return stored; }
+    const verdict = await checkManagedServer(stored);
+    if (verdict !== 'unmanaged') {
+      // unknown(host 없음·구버전)이면 기록을 믿는다.
+      chrome.storage.session.set({ [MANAGED_VERIFIED_KEY]: stored }).catch(() => {});
+      debugLog('INFO', `findAvailablePort: managed server on port ${stored} (${verdict})`);
+      serverIsManaged = true;
+      return stored;
+    }
+    debugLog('WARN', `findAvailablePort: port ${stored} is now used by another opencode server - ignoring`);
+    chrome.storage.local.remove(MANAGED_PORT_KEY).catch(() => {});
+  }
+
+  // 2. 기록이 없거나 맞지 않음: 범위 안의 서버 중 확장이 띄운 것을 찾는다
+  //    (이 기능 이전 버전이 띄운 서버도 server.json 기록이 있어 여기서 이어받는다).
+  const healthy = await scanHealthyPorts();
   if (healthy.length === 0) {
-    console.log(`[findAvailablePort] 모든 포트 실패 - 사용 가능한 서버 없음`);
+    console.log(`[findAvailablePort] 사용 가능한 서버 없음`);
     return null;
   }
+  for (const port of healthy) {
+    const verdict = await checkManagedServer(port);
+    if (verdict === 'managed') {
+      await rememberManagedServer(port);
+      debugLog('INFO', `findAvailablePort: adopted managed server on port ${port}`);
+      return port;
+    }
+    if (verdict === 'unknown') {
+      // 판정할 수 없으면 예전 동작(아무 서버나)으로 돌아간다. 이 포트는 확장 서버로 기록하지 않는다.
+      debugLog('WARN', `findAvailablePort: host cannot identify servers - legacy selection among ${JSON.stringify(healthy)}`);
+      serverIsManaged = false;
+      return pickPreferredServer(healthy);
+    }
+  }
+  debugLog('INFO', `findAvailablePort: ignoring servers not started by the extension ${JSON.stringify(healthy)}`);
+  return null;
+}
+
+/** (판정 불가 시) 서버가 여러 개면 실행 환경 우선순위에 맞는 것을 고른다. */
+async function pickPreferredServer(healthy) {
   if (healthy.length === 1) {
     console.log(`[findAvailablePort] 포트 ${healthy[0]} 발견!`);
     return healthy[0];
@@ -287,7 +385,7 @@ async function findAvailablePort() {
   const runtimes = await Promise.all(healthy.map(async (port) => runtimeFromDirectory(await probeServerDirectory(port))));
   const idx = runtimes.indexOf(want);
   const chosen = idx >= 0 ? healthy[idx] : healthy[0];
-  debugLog('INFO', `findAvailablePort: multiple servers ${JSON.stringify(healthy.map((p, i) => ({ port: p, runtime: runtimes[i] })))} - preferred=${preferred}, chosen=${chosen}`);
+  debugLog('INFO', `pickPreferredServer: multiple servers ${JSON.stringify(healthy.map((p, i) => ({ port: p, runtime: runtimes[i] })))} - preferred=${preferred}, chosen=${chosen}`);
   return chosen;
 }
 
@@ -423,12 +521,13 @@ async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
 /**
  * 서버가 사용 가능할 때까지 대기
  */
-async function waitForServer(timeout = SERVER_START_TIMEOUT) {
+async function waitForServer(expectedPort, timeout = SERVER_START_TIMEOUT) {
   const startTime = Date.now();
-  console.log(`[waitForServer] 서버 시작 대기 시작 - timeout=${timeout}ms`);
+  console.log(`[waitForServer] 포트 ${expectedPort} 서버 시작 대기 - timeout=${timeout}ms`);
 
+  // host가 알려준 그 포트만 본다. 범위를 다시 훑으면 다른 프로그램(TUI 등)의 서버를 고를 수 있다.
   while (Date.now() - startTime < timeout) {
-    const port = await findAvailablePort();
+    const port = (await checkServerHealth(expectedPort)).available ? expectedPort : null;
     if (port) {
       console.log(`[waitForServer] 서버 발견! 포트 ${port}`);
       return port;
@@ -490,8 +589,9 @@ async function ensureOpenCodeServer() {
       console.log(`[ensureOpenCodeServer] Native Messaging 결과: startedPort=${startedPort}`);
 
       if (startedPort) {
-        port = await waitForServer();
+        port = await waitForServer(startedPort);
         if (port) {
+          await rememberManagedServer(port);
           serverState.port = port;
           serverState.available = true;
           const health = await checkServerHealth(port);
@@ -541,8 +641,11 @@ async function periodicServerCheck() {
     return;
   }
   console.log(`[periodicServerCheck] 주기 체크 시작 - 현재 serverState.port=${serverState.port}, available=${serverState.available}`);
-  const port = await findAvailablePort();
-  console.log(`[periodicServerCheck] findAvailablePort 결과: port=${port}, 기존 serverState.port=${serverState.port}`);
+  // 연결된 서버(확장 서버)만 확인한다. 범위를 훑으면 다른 프로그램이 띄운 서버로 옮겨 붙을 수 있다.
+  // 연결되지 않은 상태에서의 연결은 사이드패널 요청(ensureOpenCodeServer)이 맡는다.
+  if (!serverState.available || !serverState.port) return;
+  const port = (await checkServerHealth(serverState.port)).available ? serverState.port : null;
+  if (!port) forgetManagedVerification();
   if (port !== serverState.port) {
     const wasAvailable = serverState.available;
     console.log(`[periodicServerCheck] 서버 포트 변경 감지! ${serverState.port} → ${port}`);
@@ -698,15 +801,21 @@ async function runHardRestart(requestedRuntime) {
 
     debugLog('INFO', `restart-server: requesting native host restart - port=${oldPort}, isWSLHint=${serverIsWSL === true}, preferredRuntime=${preferredRuntime}, interruptedSSE=${interrupted.length}`);
 
+    // 확장 서버인지 확인하지 못한 서버(다른 프로그램의 서버일 수 있음)는 죽이지 않고 새 확장 서버를 띄운다.
+    const replaceOnly = serverIsManaged === false;
+    if (replaceOnly) debugLog('WARN', `restart-server: port ${oldPort} is not a confirmed extension server - starting a new server instead of killing it`);
+
     let response;
     try {
-      response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
-        action: 'restart',
-        port: oldPort,
-        isWSL: serverIsWSL === true,
-        preferredRuntime,
-        proxy: await getProxy()
-      });
+      response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, replaceOnly
+        ? { action: 'start', preferredPort: DEFAULT_PORT, preferredRuntime, proxy: await getProxy() }
+        : {
+          action: 'restart',
+          port: oldPort,
+          isWSL: serverIsWSL === true,
+          preferredRuntime,
+          proxy: await getProxy()
+        });
     } catch (error) {
       debugLog('ERROR', `restart-server: native messaging error - ${error.message}`);
       const reason = error.message?.includes('native messaging host not found') ? 'native-host-missing' : undefined;
@@ -727,13 +836,14 @@ async function runHardRestart(requestedRuntime) {
       chrome.storage.local.set({ preferredRuntime: requestedRuntime }).catch(() => {});
     }
 
-    const port = await waitForServer();
+    const port = response.port ? await waitForServer(response.port) : null;
     if (!port) {
       serverState.available = false;
       debugLog('ERROR', `restart-server: server not reachable after restart${attemptsStr}`);
       return { success: false, error: '재시작 후 서버를 찾을 수 없습니다' };
     }
 
+    await rememberManagedServer(port);
     const health = await resyncAfterRestart(port);
 
     // 포트가 바뀌었을 수 있다. 세션 자체는 서버 디스크에 남아 있으므로 유지하고
@@ -815,6 +925,13 @@ function sameDirectory(a, b) {
     return /^[A-Za-z]:/.test(v) ? v.toLowerCase() : v;
   };
   return norm(a) === norm(b);
+}
+
+/** MCP 조회·켜기/끄기용 헤더: 세션의 폴더, 세션이 없으면 새 세션의 기본 폴더. */
+async function mcpDirectoryHeaders(sessionId, port) {
+  const dir = sessionId ? await getSessionDirectory(sessionId, port) : await getWorkingDirectory();
+  const dirHeader = buildDirectoryHeader(dir);
+  return dirHeader ? { 'x-opencode-directory': dirHeader } : {};
 }
 
 /**
@@ -2692,10 +2809,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        // MCP는 폴더 instance마다 따로 뜬다(프로젝트 opencode.json의 MCP는 그 폴더에만 있다).
+        // 헤더 없이 물으면 서버 cwd 폴더의 목록이 와서, 작업 폴더에 추가한 MCP가 보이지 않았다.
+        // 그래서 현재 세션의 폴더(없으면 새 세션의 기본 폴더)로 묻고 켜고 끈다.
         case 'get-mcp-status': {
           const mcpPort = serverState.port;
           if (!mcpPort) { sendResponse({ success: false, servers: {} }); break; }
-          const mcpRes = await fetch(`http://127.0.0.1:${mcpPort}/mcp`);
+          const mcpHeaders = await mcpDirectoryHeaders(message.sessionId, mcpPort);
+          const mcpRes = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, { headers: mcpHeaders });
           if (!mcpRes.ok) { sendResponse({ success: false, servers: {} }); break; }
           sendResponse({ success: true, servers: await mcpRes.json() });
           break;
@@ -2704,16 +2825,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'toggle-mcp': {
           const togglePort = serverState.port;
           if (!togglePort) { sendResponse({ success: false }); break; }
+          const toggleHeaders = await mcpDirectoryHeaders(message.sessionId, togglePort);
           const action = message.connect ? 'connect' : 'disconnect';
           const toggleRes = await fetch(
             `http://127.0.0.1:${togglePort}/mcp/${encodeURIComponent(message.name)}/${action}`,
-            { method: 'POST' }
+            { method: 'POST', headers: toggleHeaders }
           );
-          const statusRes = await fetch(`http://127.0.0.1:${togglePort}/mcp`);
+          const statusRes = await fetch(`http://127.0.0.1:${togglePort}/mcp`, { headers: toggleHeaders });
           const servers = statusRes.ok ? await statusRes.json() : {};
           sendResponse({ success: toggleRes.ok, servers });
           break;
         }
+
+        // 재시작 전에 다른 탭에서 진행 중인 응답이 있는지 본다. 확장 전용 서버라 진행 중인 응답은
+        // 모두 이 SW가 구독 중인 스트림이다(완료·중단되면 eventSources에서 빠진다).
+        case 'get-active-streams':
+          sendResponse({ success: true, sessionIds: [...eventSources.keys()] });
+          break;
 
         // 소프트 재시작: MCP/skill/agent 등 config 변경을 반영 (프로세스 유지)
         case 'restart-instance': {

@@ -162,6 +162,8 @@ I18N.ready.then(function() {
         updateWorkingFolderDisplay(res.directory);
       }
     } catch (e) {}
+    // MCP 목록도 폴더마다 다르다.
+    loadMcpStatus();
   }
 
   function updateWorkingFolderDisplay(dir, isDefault = false) {
@@ -1555,7 +1557,10 @@ I18N.ready.then(function() {
 
   async function loadMcpStatus() {
     try {
-      const res = await sendMessageToBackground('get-mcp-status');
+      // MCP는 폴더마다 다르므로 현재 세션의 폴더 기준으로 묻는다.
+      const sid = currentSessionId;
+      const res = await sendMessageToBackground('get-mcp-status', { sessionId: sid });
+      if (sid !== currentSessionId) return; // 그 사이 세션이 바뀜
       if (res.success) {
         mcpServers = res.servers;
         updateMcpBadge();
@@ -1577,14 +1582,18 @@ I18N.ready.then(function() {
     }
   }
 
-  // MCP 목록 아래에 고정으로 붙는 소프트 재시작 액션.
-  // - "설정 다시 읽기": POST /global/dispose (프로세스 유지, 1~2초). MCP/skill/agent를
-  //   새로 등록했을 때 TUI를 exit 후 재진입한 것과 같은 효과.
-  // 서버 강제 재시작과 실행 환경(WSL/Windows) 선택은 설정(⚙) 드롭다운에 있다.
+  // MCP 목록 아래에 고정으로 붙는 재시작 액션.
+  // - "설정 다시 읽기": POST /global/dispose (프로세스 유지, 1~2초). 프로젝트 설정(작업 폴더의
+  //   opencode.json)의 MCP와 skill/agent는 반영되지만, 전역 설정(~/.config/opencode/opencode.json)은
+  //   opencode가 프로세스 수명 동안 캐시해 반영되지 않는다(1.19.4 실측).
+  // - "서버 재시작": 하드 재시작. TUI를 나갔다 들어온 것과 같아 전역 설정까지 다시 읽는다.
+  //   사이드패널은 확장 전용 서버를 쓰므로 다른 프로그램(TUI 등)의 작업에는 영향이 없다.
   const mcpActionsHtml = () => `
     <div class="mcp-actions">
       <button id="mcp-reload-btn" class="mcp-action-btn"
-              title="${t('opencode가 config/MCP/skill/agent를 디스크에서 다시 읽습니다 (서버 프로세스 유지)')}">${t('↻ 설정 다시 읽기')}</button>
+              title="${t('작업 폴더의 MCP와 skill/agent를 다시 읽습니다 (서버 프로세스 유지). 전역 설정의 MCP는 서버 재시작이 필요합니다')}">${t('↻ 설정 다시 읽기')}</button>
+      <button id="mcp-hard-restart-btn" class="mcp-action-btn danger"
+              title="${t('서버를 다시 시작해 전역 설정까지 모두 다시 읽습니다 (10~30초)')}">${t('⟳ 서버 재시작 (전역 MCP 포함)')}</button>
       <div id="mcp-action-status" class="mcp-action-status hidden"></div>
     </div>`;
 
@@ -1625,7 +1634,7 @@ I18N.ready.then(function() {
         const connect = e.target.checked;
         e.target.disabled = true;
         try {
-          const res = await sendMessageToBackground('toggle-mcp', { name, connect });
+          const res = await sendMessageToBackground('toggle-mcp', { name, connect, sessionId: currentSessionId });
           if (res.success) {
             mcpServers = res.servers;
             updateMcpBadge();
@@ -1658,6 +1667,16 @@ I18N.ready.then(function() {
       }
       el.className = 'mcp-action-status' + (mcpActionStatus.kind ? ` ${mcpActionStatus.kind}` : '');
       el.textContent = mcpActionStatus.text;
+      if (restartWaitCancel) {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'mcp-wait-cancel-btn';
+        cancelBtn.textContent = t('대기 취소');
+        cancelBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          restartWaitCancel?.();
+        });
+        el.append(' ', cancelBtn);
+      }
     }
   }
 
@@ -1668,10 +1687,22 @@ I18N.ready.then(function() {
 
   function bindMcpActions() {
     const reloadBtn = document.getElementById('mcp-reload-btn');
-    if (restartBusy && reloadBtn) reloadBtn.disabled = true;
+    const hardBtn = document.getElementById('mcp-hard-restart-btn');
+    if (restartBusy) {
+      if (reloadBtn) reloadBtn.disabled = true;
+      if (hardBtn) hardBtn.disabled = true;
+    }
     applyMcpActionStatus();
 
     reloadBtn?.addEventListener('click', () => runServerRestart('soft'));
+    hardBtn?.addEventListener('click', async () => {
+      if (restartBusy) return;
+      const ok = await showConfirm(
+        t('서버 강제 재시작'),
+        t('OpenCode가 재시작됩니다.\n진행 중인 응답은 중단되며 10~30초 걸릴 수 있습니다.')
+      );
+      if (ok) runServerRestart('hard');
+    });
   }
 
   // 재시작 후 서버에서 다시 읽어야 하는 목록들을 갱신한다.
@@ -1695,6 +1726,10 @@ I18N.ready.then(function() {
   async function runServerRestart(mode, runtime) {
     if (restartBusy) return;
     const isHard = mode === 'hard';
+
+    // 재시작(소프트 포함)은 서버의 모든 진행 중 응답을 끊는다. 다른 탭에서 응답 중이면
+    // 끝날 때까지 기다릴지, 지금 재시작할지 고르게 한다.
+    if (!(await waitForOtherStreams())) return;
 
     restartBusy = true;
     setRestartControlsDisabled(true);
@@ -1754,8 +1789,53 @@ I18N.ready.then(function() {
     }
   }
 
+  // ---- 다른 탭의 응답이 끝나기를 기다렸다가 재시작 ----
+  let restartWaitCancel = null; // 기다리는 중이면 취소 함수
+
+  async function otherActiveStreams() {
+    try {
+      const res = await sendMessageToBackground('get-active-streams');
+      return (res?.sessionIds || []).filter(id => id !== currentSessionId);
+    } catch {
+      return [];
+    }
+  }
+
+  /** true면 재시작을 진행한다. */
+  async function waitForOtherStreams() {
+    const others = await otherActiveStreams();
+    if (others.length === 0) return true;
+    const choice = await showConfirm(
+      t('다른 탭에서 응답 중'),
+      t('다른 탭에서 진행 중인 응답이 {count}개 있습니다.\n지금 재시작하면 그 응답이 중단됩니다.', { count: others.length }),
+      { okText: t('끝난 뒤 재시작'), altText: t('지금 재시작') }
+    );
+    if (choice === 'alt') return true;
+    if (choice !== true) return false;
+
+    restartBusy = true;
+    setRestartControlsDisabled(true);
+    let cancelled = false;
+    restartWaitCancel = () => { cancelled = true; };
+    try {
+      let count = others.length;
+      while (!cancelled && count > 0) {
+        setMcpActionStatus(t('다른 탭의 응답 {count}개가 끝나면 재시작합니다…', { count }), null);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (!cancelled) count = (await otherActiveStreams()).length;
+      }
+      if (cancelled) setMcpActionStatus(t('재시작을 취소했습니다'), null);
+      return !cancelled;
+    } finally {
+      restartWaitCancel = null;
+      restartBusy = false;
+      setRestartControlsDisabled(false);
+      applyMcpActionStatus();
+    }
+  }
+
   function setRestartControlsDisabled(disabled) {
-    document.querySelectorAll('#mcp-reload-btn, #settings-hard-restart-btn, #runtime-pref, #proxy-save-btn, #proxy-reset-btn, .settings-field input')
+    document.querySelectorAll('#mcp-reload-btn, #mcp-hard-restart-btn, #settings-hard-restart-btn, #runtime-pref, #proxy-save-btn, #proxy-reset-btn, .settings-field input')
       .forEach(el => { el.disabled = disabled; });
   }
 
@@ -1765,13 +1845,17 @@ I18N.ready.then(function() {
   const confirmMessage = document.getElementById('confirm-message');
   const confirmOkBtn = document.getElementById('confirm-ok-btn');
   const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+  const confirmAltBtn = document.getElementById('confirm-alt-btn');
 
-  function showConfirm(title, message, { okText = t('확인'), cancelText = t('취소') } = {}) {
+  // altText를 주면 세 번째 버튼이 생기고, 누르면 'alt'로 끝난다.
+  function showConfirm(title, message, { okText = t('확인'), cancelText = t('취소'), altText = null } = {}) {
     return new Promise((resolve) => {
       confirmTitle.textContent = title;
       confirmMessage.textContent = message;
       confirmOkBtn.textContent = okText;
       confirmCancelBtn.textContent = cancelText;
+      confirmAltBtn.textContent = altText || '';
+      confirmAltBtn.classList.toggle('hidden', !altText);
       confirmDialog.classList.remove('hidden');
       confirmOkBtn.focus();
 
@@ -1779,18 +1863,21 @@ I18N.ready.then(function() {
         confirmDialog.classList.add('hidden');
         confirmOkBtn.removeEventListener('click', onOk);
         confirmCancelBtn.removeEventListener('click', onCancel);
+        confirmAltBtn.removeEventListener('click', onAlt);
         confirmDialog.removeEventListener('click', onBackdrop);
         document.removeEventListener('keydown', onKey, true);
         resolve(result);
       };
       const onOk = () => finish(true);
       const onCancel = () => finish(false);
+      const onAlt = () => finish('alt');
       const onBackdrop = (e) => { if (e.target === confirmDialog) finish(false); };
       const onKey = (e) => {
         if (e.key === 'Escape') { e.stopPropagation(); finish(false); }
       };
       confirmOkBtn.addEventListener('click', onOk);
       confirmCancelBtn.addEventListener('click', onCancel);
+      confirmAltBtn.addEventListener('click', onAlt);
       confirmDialog.addEventListener('click', onBackdrop);
       document.addEventListener('keydown', onKey, true);
     });
@@ -2261,6 +2348,10 @@ I18N.ready.then(function() {
       if (!restartBusy) mcpActionStatus = null; // 지난 재시작 결과 문구는 열 때 지운다
       renderMcpDropdown();
       mcpDropdown.classList.remove('hidden');
+      // 열 때마다 최신 상태로 다시 읽는다(연결 상태가 바뀌었을 수 있다).
+      loadMcpStatus().then(() => {
+        if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
+      });
     } else {
       mcpDropdown.classList.add('hidden');
     }

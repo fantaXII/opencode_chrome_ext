@@ -20,6 +20,7 @@ export async function startMockOpencode() {
     sessionDirs: {},
     promptDirs: [],      // prompt_async 요청의 x-opencode-directory 값
     deleted: [],         // DELETE /session/{id}를 받은 sessionID
+    mcpRequests: [],     // /mcp 요청의 [method, path, x-opencode-directory]
     // (req, res, sessionId) => void. 기본은 즉시 204
     onPrompt: (req, res) => { res.writeHead(204); res.end(); }
   };
@@ -47,6 +48,11 @@ export async function startMockOpencode() {
       state.statusRequests.push(dir);
       const visible = state.statusDirectory == null || state.statusDirectory === dir;
       return json(res, 200, visible ? state.statusMap : {});
+    }
+    if (p === '/mcp' || p.startsWith('/mcp/')) {
+      req.resume();
+      state.mcpRequests.push([req.method, p, req.headers['x-opencode-directory'] || null]);
+      return json(res, 200, p === '/mcp' ? {} : true);
     }
     if ((m = p.match(/^\/session\/([^/]+)\/prompt_async$/))) {
       state.prompts.push(m[1]);
