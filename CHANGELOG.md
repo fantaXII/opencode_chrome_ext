@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.21.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.21.0...v2.21.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* native host가 바뀐 릴리스에서만 host 업데이트 안내 ([9bebf7f](https://github.com/fantaXII/opencode_chrome_ext/commit/9bebf7fa781ec92f492d11c20129f0d5a63c8ac9))
+
 # [2.21.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.20.0...v2.21.0) (2026-11-14)
 
 
