@@ -1,5 +1,19 @@
 # Changelog
 
+# [2.21.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.20.0...v2.21.0) (2026-11-14)
+
+
+### Bug Fixes
+
+* Windows opencode 탐색 보강 및 wsl.exe 오류 출력 오인 수정 ([22faac6](https://github.com/fantaXII/opencode_chrome_ext/commit/22faac6d4b2c0e3b44c086c8aafa66cca49bec7d))
+* 명령(skill 포함)·에이전트 목록을 세션의 작업 폴더 기준으로 조회 ([d5bb1ac](https://github.com/fantaXII/opencode_chrome_ext/commit/d5bb1ac33d9f92e67f70fa1fcb809dcc51090ea0))
+* 작업 폴더 변경 중 진행 표시와 입력 차단 추가 ([bd4ee69](https://github.com/fantaXII/opencode_chrome_ext/commit/bd4ee69ede415ed50312603c93ea98868f74ad93))
+
+
+### Features
+
+* 확장 전용 서버 사용 및 MCP 목록을 작업 폴더 기준으로 조회 ([0869477](https://github.com/fantaXII/opencode_chrome_ext/commit/0869477ee6775b9ec5453cfcda26cba077fc2411))
+
 # [2.20.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.19.0...v2.20.0) (2026-11-13)
 
 
