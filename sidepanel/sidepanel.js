@@ -382,6 +382,13 @@ I18N.ready.then(function() {
       b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
       row.appendChild(b);
     };
+    // 그 폴더의 이전 세션 목록(대화 기록이 있는 폴더만)
+    if (item.sessions > 0 && item.available !== false) {
+      btn('🕘', t('이 폴더의 이전 세션 이어가기'), () => {
+        closeFolderDropdown();
+        showSessionPicker({ directory: item.path });
+      });
+    }
     if (favorite) {
       btn('✎', t('이름 바꾸기'), () => renameFavorite(row, name, item));
       btn('★', t('즐겨찾기에서 빼기'), () => setFavorite(item.path, false), true);
@@ -462,6 +469,25 @@ I18N.ready.then(function() {
       addErrorMessage(t(e.message));
     }
     folderListCache = null; // 최근 순서가 바뀌었다
+  }
+
+  // 폴더에서 새 세션: 지금 세션과 다른 폴더면 폴더 변경(새 세션)과 같고, 같은 폴더면 그 폴더를 기본값으로 두고 /new처럼 만든다.
+  async function startSessionInFolder(path) {
+    if (!sameFolder(path, currentWorkingDir || defaultWorkingDir)) {
+      await selectFolder(path);
+      return;
+    }
+    try {
+      const set = await sendMessageToBackground('set-working-directory', { directory: path });
+      if (set?.success === false) throw new Error(workingDirError(set));
+      messagesContainer.innerHTML = '';
+      const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
+      currentSessionId = result.success ? result.sessionId : null;
+      await refreshWorkingDirectory();
+      addBotMessage(t('새 세션을 시작했습니다.'));
+    } catch (e) {
+      addErrorMessage(t('세션 재생성에 실패했습니다.') + ' ' + t(e.message || ''));
+    }
   }
 
   async function setFavorite(path, favorite, name) {
@@ -1164,10 +1190,11 @@ I18N.ready.then(function() {
 
   agentBar.addEventListener('click', () => cycleAgent());
 
-  async function showSessionPicker() {
+  // directory를 주면 그 폴더의 세션만 보여주고, 맨 위에 "이 폴더에서 새 세션"을 둔다(폴더 목록의 🕘).
+  async function showSessionPicker({ directory = null } = {}) {
     let res;
     try {
-      res = await sendMessageToBackground('list-sessions', {});
+      res = await sendMessageToBackground('list-sessions', directory ? { directory } : {});
     } catch (e) {
       addErrorMessage(t('세션 목록 조회 실패: {error}', { error: t(e.message) }));
       return;
@@ -1176,7 +1203,7 @@ I18N.ready.then(function() {
       addErrorMessage(t('세션 목록 조회 실패: {error}', { error: t(res?.error || 'unknown') }));
       return;
     }
-    if (!res.sessions.length) {
+    if (!res.sessions.length && !directory) {
       addBotMessage(t('이어갈 수 있는 이전 세션이 없습니다.'));
       return;
     }
@@ -1192,15 +1219,37 @@ I18N.ready.then(function() {
     picker.className = 'model-picker';
     const title = document.createElement('p');
     title.className = 'model-picker-title';
-    title.textContent = t('이어갈 세션을 선택하세요:');
+    title.textContent = directory
+      ? t('{folder} 폴더에서 이어갈 세션을 선택하세요:', { folder: folderBaseName(directory) })
+      : t('이어갈 세션을 선택하세요:');
+    if (directory) title.title = directory;
     picker.appendChild(title);
+
+    if (directory) {
+      const fresh = document.createElement('button');
+      fresh.className = 'model-picker-btn';
+      fresh.textContent = t('＋ 이 폴더에서 새 세션 시작');
+      fresh.addEventListener('click', async () => {
+        if (isLoading) { addBotMessage(t('응답 중에는 새 세션을 시작할 수 없습니다.')); return; }
+        messageDiv.remove();
+        await startSessionInFolder(directory);
+      });
+      picker.appendChild(fresh);
+      if (!res.sessions.length) {
+        const none = document.createElement('p');
+        none.className = 'model-picker-title';
+        none.textContent = t('이 폴더에 이어갈 이전 세션이 없습니다.');
+        picker.appendChild(none);
+      }
+    }
 
     for (const s of res.sessions) {
       const isCurrent = s.id === currentSessionId;
       const btn = document.createElement('button');
       btn.className = 'model-picker-btn' + (isCurrent ? ' current' : '');
       const when = s.updated ? new Date(s.updated).toLocaleString() : '';
-      btn.textContent = `${s.title || t('(제목 없음)')}${s.dir ? ' [' + s.dir + ']' : ''}${when ? ' · ' + when : ''}${isCurrent ? ' ✓' : ''}`;
+      const dirLabel = !directory && s.dir ? ' [' + s.dir + ']' : ''; // 폴더로 거른 목록에서는 폴더 이름이 중복이다
+      btn.textContent = `${s.title || t('(제목 없음)')}${dirLabel}${when ? ' · ' + when : ''}${isCurrent ? ' ✓' : ''}`;
       btn.addEventListener('click', async () => {
         if (isCurrent || isLoading) return;
         try {
@@ -2265,6 +2314,47 @@ I18N.ready.then(function() {
     refreshAppliedProxyLine();
   }
 
+  // ---- 작업 폴더 즐겨찾기 내보내기/가져오기 ----
+  let favoritesIoText = null; // { text, error } — 설정 드롭다운을 다시 그려도 결과 문구를 유지한다
+
+  function setFavoritesIoText(text, error = false) {
+    favoritesIoText = text ? { text, error } : null;
+    if (!settingsDropdown.classList.contains('hidden')) renderSettingsDropdown();
+  }
+
+  async function exportFavorites() {
+    try {
+      const res = await sendMessageToBackground('export-folder-favorites');
+      const count = res?.data?.favorites?.length || 0;
+      if (!count) { setFavoritesIoText(t('내보낼 즐겨찾기가 없습니다.')); return; }
+      const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `opencode-folder-favorites-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setFavoritesIoText(t('즐겨찾기 {count}개를 내보냈습니다.', { count }));
+    } catch (e) {
+      setFavoritesIoText(t('실패: {error}', { error: t(e.message) }), true);
+    }
+  }
+
+  async function importFavorites(file) {
+    if (!file) return;
+    try {
+      if (file.size > 1_000_000) throw new Error(t('즐겨찾기 파일 형식이 올바르지 않습니다'));
+      const res = await sendMessageToBackground('import-folder-favorites', { text: await file.text() });
+      if (!res?.success) throw new Error(res?.error || 'unknown');
+      folderListCache = null;
+      setFavoritesIoText(t('{added}개를 추가했습니다 (전체 {total}개).', { added: res.added, total: res.total }));
+    } catch (e) {
+      setFavoritesIoText(t('실패: {error}', { error: t(e.message) }), true);
+    }
+  }
+
   async function renderSettingsDropdown() {
     let info;
     try {
@@ -2380,6 +2470,16 @@ I18N.ready.then(function() {
           <button id="proxy-save-btn" class="mcp-action-btn"${dis}>${t('저장')}</button>
         </div>
       </details>
+      <div class="settings-section">
+        <div class="settings-title">${t('작업 폴더 즐겨찾기')}</div>
+        <div class="settings-current">${t('확장을 삭제하면 즐겨찾기도 지워집니다. 파일로 백업해 두고 다시 가져올 수 있습니다.')}</div>
+        <div class="settings-buttons">
+          <button id="fav-export-btn" class="mcp-action-btn">${t('내보내기')}</button>
+          <button id="fav-import-btn" class="mcp-action-btn">${t('가져오기')}</button>
+          <input id="fav-import-file" type="file" accept=".json,application/json" class="hidden">
+        </div>
+        ${favoritesIoText ? `<div class="settings-current${favoritesIoText.error ? ' warn' : ''}">${escapeHtml(favoritesIoText.text)}</div>` : ''}
+      </div>
       <div class="mcp-actions">
         <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
                 title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('서버 강제 재시작')}</button>
@@ -2400,6 +2500,11 @@ I18N.ready.then(function() {
         ${updateCheckText ? `<div class="settings-current">${escapeHtml(updateCheckText)}</div>` : ''}
       </div>`;
     applyMcpActionStatus();
+
+    document.getElementById('fav-export-btn')?.addEventListener('click', exportFavorites);
+    const favFile = document.getElementById('fav-import-file');
+    document.getElementById('fav-import-btn')?.addEventListener('click', () => favFile?.click());
+    favFile?.addEventListener('change', () => importFavorites(favFile.files?.[0]));
 
     document.getElementById('lang-select')?.addEventListener('change', (e) => {
       I18N.setLang(e.target.value);

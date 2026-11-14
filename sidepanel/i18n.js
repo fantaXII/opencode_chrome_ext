@@ -108,6 +108,18 @@
     '☆ 현재 폴더 추가': '☆ Add current folder',
     '다른 폴더 열기…': 'Open another folder…',
     '경로 입력': 'Type a path',
+    '이 폴더의 이전 세션 이어가기': 'Resume a previous session in this folder',
+    '{folder} 폴더에서 이어갈 세션을 선택하세요:': 'Choose a session to resume in {folder}:',
+    '＋ 이 폴더에서 새 세션 시작': '＋ Start a new session in this folder',
+    '이 폴더에 이어갈 이전 세션이 없습니다.': 'No previous sessions in this folder.',
+    '작업 폴더 즐겨찾기': 'Folder favorites',
+    '확장을 삭제하면 즐겨찾기도 지워집니다. 파일로 백업해 두고 다시 가져올 수 있습니다.': 'Favorites are deleted when the extension is removed. Back them up to a file and import them later.',
+    '내보내기': 'Export',
+    '가져오기': 'Import',
+    '내보낼 즐겨찾기가 없습니다.': 'There are no favorites to export.',
+    '즐겨찾기 {count}개를 내보냈습니다.': 'Exported {count} favorite(s).',
+    '즐겨찾기 파일 형식이 올바르지 않습니다': 'The favorites file format is invalid',
+    '{added}개를 추가했습니다 (전체 {total}개).': 'Added {added} (total {total}).',
 
     // ---- MCP ----
     'MCP 서버 없음': 'No MCP servers',

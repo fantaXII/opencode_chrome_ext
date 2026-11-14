@@ -90,3 +90,48 @@ test('background: 최근 폴더는 서버 세션 기록에서 온다(SW가 다�
   assert.match(server.state.sessionListQueries[0], /roots=true/);
   assert.match(server.state.sessionListQueries[0], /limit=1000/);
 });
+
+test('mergeFavorites/parseFavoritesFile: 내보낸 형식·경로 배열을 받고, 중복은 유지(빈 이름만 채움), 잘못된 항목은 건너뛴다', async () => {
+  const { mergeFavorites, parseFavoritesFile, FAVORITES_LIMIT } = await import('../lib/folder-list.mjs');
+  const existing = [{ path: '/a', name: '', addedAt: 1 }, { path: '/b', name: 'B', addedAt: 2 }];
+  const incoming = parseFavoritesFile(JSON.stringify({ type: 'x', favorites: [
+    { path: '/a/', name: 'A' }, { path: '/b', name: 'other' }, '/c', { path: '' }, { path: 5 }, 'bad\u0001path'
+  ] }));
+  const { merged, added } = mergeFavorites(existing, incoming, 9);
+  assert.equal(added, 1);
+  assert.deepEqual(merged.map(f => [f.path, f.name]), [['/a', 'A'], ['/b', 'B'], ['/c', '']]);
+  assert.deepEqual(parseFavoritesFile('["/x"]'), ['/x']);
+  assert.throws(() => parseFavoritesFile('{"nope":1}'));
+  assert.throws(() => parseFavoritesFile('not json'));
+  const many = Array.from({ length: FAVORITES_LIMIT + 10 }, (_, i) => `/p${i}`);
+  assert.equal(mergeFavorites([], many).merged.length, FAVORITES_LIMIT);
+});
+
+test('background: 즐겨찾기 내보내기 → 가져오기 왕복, 잘못된 파일은 거부', async (t) => {
+  const server = await startMockOpencode();
+  const bg = await loadBackground({ port: server.port, local: { folderFavorites: [{ path: '/w', name: 'W', addedAt: 1 }] } });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  const exp = await bg.send({ action: 'export-folder-favorites' });
+  assert.equal(exp.data.favorites.length, 1);
+  bg.localStorage.folderFavorites = [];
+  const imp = await bg.send({ action: 'import-folder-favorites', text: JSON.stringify(exp.data) });
+  assert.deepEqual([imp.added, imp.total], [1, 1]);
+  assert.deepEqual(bg.localStorage.folderFavorites.map(f => [f.path, f.name]), [['/w', 'W']]);
+  const bad = await bg.send({ action: 'import-folder-favorites', text: '{"x":1}' });
+  assert.equal(bad.success, false);
+});
+
+test('background: list-sessions에 폴더를 주면 그 폴더의 (대화가 있는) 세션만, 전체 폴더 경로와 함께 준다', async (t) => {
+  const server = await startMockOpencode();
+  server.state.sessionList = [ses('/w/a', 30), ses('/w/b', 20), ses('/w/a/', 10)];
+  for (const s of server.state.sessionList) server.state.messages[s.id] = [{ info: { id: 'm' } }];
+  const bg = await loadBackground({ port: server.port, local: { selectedModel: { providerID: 'mock', modelID: 'model' } } });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  const res = await bg.send({ action: 'list-sessions', directory: '/w/a' });
+  assert.deepEqual(res.sessions.map(s => [s.id, s.directory]), [['s30', '/w/a'], ['s10', '/w/a/']]);
+  assert.ok(server.state.sessionListQueries.some(q => /roots=true/.test(q)));
+  const all = await bg.send({ action: 'list-sessions' });
+  assert.equal(all.sessions.length, 3);
+});

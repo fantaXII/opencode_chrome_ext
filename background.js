@@ -10,7 +10,7 @@
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
 import { MIN_HOST_VERSION } from './lib/host-version.mjs';
-import { buildFolderList, pushRecent, folderKey } from './lib/folder-list.mjs';
+import { buildFolderList, pushRecent, folderKey, mergeFavorites, parseFavoritesFile, FAVORITES_EXPORT_TYPE } from './lib/folder-list.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 
@@ -2361,13 +2361,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const headers = {};
           const dirHeader = buildDirectoryHeader(await getWorkingDirectory());
           if (dirHeader) headers['x-opencode-directory'] = dirHeader;
-          const listRes = await fetch(`http://127.0.0.1:${port}/session`, { headers, signal: AbortSignal.timeout(5000) });
+          // 폴더를 지정하면(폴더 목록의 🕘) 그 폴더의 세션만 보여준다. 기본 목록은 최근 100개뿐이라
+          // 오래 안 쓴 폴더의 세션이 빠지므로 넉넉히 받는다(roots: 하위 에이전트 세션은 서버에서 뺀다).
+          const filterKey = message.directory ? folderKey(message.directory) : null;
+          const listUrl = `http://127.0.0.1:${port}/session` + (filterKey ? '?roots=true&limit=1000' : '');
+          const listRes = await fetch(listUrl, { headers, signal: AbortSignal.timeout(5000) });
           if (!listRes.ok) { sendResponse({ success: false, error: `세션 목록 조회 실패: ${listRes.status}` }); break; }
           const raw = await listRes.json();
           // 패널을 열 때마다 빈 세션이 만들어지므로, 메시지가 하나라도 있는 세션만 보여준다.
           // (x-opencode-directory 헤더는 목록을 필터링하지 않아 모든 디렉터리의 세션이 온다.)
           const candidates = (Array.isArray(raw) ? raw : [])
             .filter(x => x?.id && !x.parentID) // 서브에이전트 세션 제외
+            .filter(x => !filterKey || folderKey(x.directory) === filterKey)
             .sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0))
             .slice(0, 60);
           const hasMsg = await Promise.all(candidates.map(async x => {
@@ -2385,7 +2390,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               id: x.id,
               title: x.title || '',
               updated: x.time?.updated || x.time?.created || 0,
-              dir: (x.directory || '').split(/[\\/]/).filter(Boolean).pop() || ''
+              dir: (x.directory || '').split(/[\\/]/).filter(Boolean).pop() || '',
+              directory: x.directory || ''
             }));
           sendResponse({ success: true, sessions: list });
           break;
@@ -2751,6 +2757,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           await chrome.storage.local.set({ [FOLDER_FAVORITES_KEY]: next });
           sendResponse({ success: true });
+          break;
+        }
+
+        // 즐겨찾기 내보내기/가져오기(⚙). 확장을 삭제하면 storage.local이 지워지므로 백업용이다.
+        case 'export-folder-favorites': {
+          const favs = (await chrome.storage.local.get(FOLDER_FAVORITES_KEY))[FOLDER_FAVORITES_KEY] || [];
+          sendResponse({ success: true, data: { type: FAVORITES_EXPORT_TYPE, version: 1, exportedAt: new Date().toISOString(), favorites: favs } });
+          break;
+        }
+
+        case 'import-folder-favorites': {
+          let incoming;
+          try {
+            if (typeof message.text !== 'string' || message.text.length > 1_000_000) throw new Error('invalid-format');
+            incoming = parseFavoritesFile(message.text);
+          } catch {
+            sendResponse({ success: false, error: '즐겨찾기 파일 형식이 올바르지 않습니다' });
+            break;
+          }
+          const favs = (await chrome.storage.local.get(FOLDER_FAVORITES_KEY))[FOLDER_FAVORITES_KEY] || [];
+          const { merged, added } = mergeFavorites(favs, incoming);
+          await chrome.storage.local.set({ [FOLDER_FAVORITES_KEY]: merged });
+          debugLog('INFO', `import-folder-favorites: added=${added}, total=${merged.length}`);
+          sendResponse({ success: true, added, total: merged.length });
           break;
         }
 
