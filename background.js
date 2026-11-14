@@ -927,8 +927,12 @@ function sameDirectory(a, b) {
   return norm(a) === norm(b);
 }
 
-/** MCP 조회·켜기/끄기용 헤더: 세션의 폴더, 세션이 없으면 새 세션의 기본 폴더. */
-async function mcpDirectoryHeaders(sessionId, port) {
+/**
+ * 폴더 instance별 목록(MCP·명령·skill·에이전트) 조회용 헤더: 세션의 폴더, 세션이 없으면 새 세션의 기본 폴더.
+ * 프로젝트(.opencode/, opencode.json)의 항목은 그 폴더 instance에만 있어서, 헤더 없이 물으면
+ * 서버 cwd 폴더 기준 목록이 와서 작업 폴더에 추가한 항목이 보이지 않는다(1.19.4 실측).
+ */
+async function sessionDirectoryHeaders(sessionId, port) {
   const dir = sessionId ? await getSessionDirectory(sessionId, port) : await getWorkingDirectory();
   const dirHeader = buildDirectoryHeader(dir);
   return dirHeader ? { 'x-opencode-directory': dirHeader } : {};
@@ -2754,7 +2758,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'get-commands': {
           const cmdPort = serverState.port;
           if (!cmdPort) { sendResponse({ commands: [] }); break; }
-          const cmdRes = await fetch(`http://127.0.0.1:${cmdPort}/command`);
+          // skill도 이 목록에 들어 있다. 작업 폴더의 command/skill이 보이도록 세션 폴더로 묻는다.
+          const cmdRes = await fetch(`http://127.0.0.1:${cmdPort}/command`, { headers: await sessionDirectoryHeaders(message.sessionId, cmdPort) });
           if (!cmdRes.ok) { sendResponse({ commands: [] }); break; }
           const cmdData = await cmdRes.json();
           const commands = Array.isArray(cmdData) ? cmdData : (cmdData.commands || cmdData.items || []);
@@ -2765,7 +2770,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'get-agents': {
           const agentPort = serverState.port;
           if (!agentPort) { sendResponse({ agents: [] }); break; }
-          const agentRes = await fetch(`http://127.0.0.1:${agentPort}/agent`);
+          const agentRes = await fetch(`http://127.0.0.1:${agentPort}/agent`, { headers: await sessionDirectoryHeaders(message.sessionId, agentPort) });
           if (!agentRes.ok) { sendResponse({ agents: [] }); break; }
           const agentData = await agentRes.json();
           const agents = Array.isArray(agentData)
@@ -2801,7 +2806,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             `http://127.0.0.1:${runPort}/session/${message.sessionId}/command`,
             {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...(await sessionDirectoryHeaders(message.sessionId, runPort)) },
               body: JSON.stringify({ id: message.commandId })
             }
           );
@@ -2810,12 +2815,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         // MCP는 폴더 instance마다 따로 뜬다(프로젝트 opencode.json의 MCP는 그 폴더에만 있다).
-        // 헤더 없이 물으면 서버 cwd 폴더의 목록이 와서, 작업 폴더에 추가한 MCP가 보이지 않았다.
-        // 그래서 현재 세션의 폴더(없으면 새 세션의 기본 폴더)로 묻고 켜고 끈다.
+        // 그래서 현재 세션의 폴더(없으면 새 세션의 기본 폴더)로 묻고 켜고 끈다(sessionDirectoryHeaders).
         case 'get-mcp-status': {
           const mcpPort = serverState.port;
           if (!mcpPort) { sendResponse({ success: false, servers: {} }); break; }
-          const mcpHeaders = await mcpDirectoryHeaders(message.sessionId, mcpPort);
+          const mcpHeaders = await sessionDirectoryHeaders(message.sessionId, mcpPort);
           const mcpRes = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, { headers: mcpHeaders });
           if (!mcpRes.ok) { sendResponse({ success: false, servers: {} }); break; }
           sendResponse({ success: true, servers: await mcpRes.json() });
@@ -2825,7 +2829,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'toggle-mcp': {
           const togglePort = serverState.port;
           if (!togglePort) { sendResponse({ success: false }); break; }
-          const toggleHeaders = await mcpDirectoryHeaders(message.sessionId, togglePort);
+          const toggleHeaders = await sessionDirectoryHeaders(message.sessionId, togglePort);
           const action = message.connect ? 'connect' : 'disconnect';
           const toggleRes = await fetch(
             `http://127.0.0.1:${togglePort}/mcp/${encodeURIComponent(message.name)}/${action}`,

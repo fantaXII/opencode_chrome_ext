@@ -162,8 +162,10 @@ I18N.ready.then(function() {
         updateWorkingFolderDisplay(res.directory);
       }
     } catch (e) {}
-    // MCP 목록도 폴더마다 다르다.
+    // MCP·명령(skill 포함)·에이전트 목록도 폴더마다 다르다.
     loadMcpStatus();
+    loadCommandCatalog();
+    loadAgents();
   }
 
   function updateWorkingFolderDisplay(dir, isDefault = false) {
@@ -768,7 +770,10 @@ I18N.ready.then(function() {
       { id: 'local.exit',  slash: '/exit',  title: 'Exit',        description: t('사이드패널 닫기 (대화는 /sessions로 다시 열 수 있음)'), hasArg: false },
     ];
     try {
-      const res = await sendMessageToBackground('get-commands', {});
+      // 작업 폴더의 command/skill은 그 폴더 기준으로 물어야 보인다.
+      const sid = currentSessionId;
+      const res = await sendMessageToBackground('get-commands', { sessionId: sid });
+      if (sid !== currentSessionId) return; // 그 사이 세션이 바뀜 — 새 세션 기준 호출이 채운다
       const serverCmds = (res.commands || []).map(c => ({
         id: 'server.' + c.name,
         slash: '/' + c.name,
@@ -863,14 +868,22 @@ I18N.ready.then(function() {
     return null;
   }
 
+  // 에이전트 목록은 세션 폴더마다 다르다(작업 폴더의 .opencode/agent). 목록을 다시 읽어도
+  // 고른 에이전트가 새 목록에 있으면 유지하고, 없으면(그 폴더에 없는 프로젝트 에이전트) 첫 번째로 돌린다.
   async function loadAgents() {
     try {
-      const res = await sendMessageToBackground('get-agents');
+      const prevName = availableAgents[currentAgentIndex]?.name;
+      const sid = currentSessionId;
+      const res = await sendMessageToBackground('get-agents', { sessionId: sid });
+      if (sid !== currentSessionId) return; // 그 사이 세션이 바뀜
       availableAgents = res.agents || [];
       if (availableAgents.length > 0) {
-        currentAgentIndex = 0;
-        updateAgentBar();
+        const idx = prevName ? availableAgents.findIndex(a => a.name === prevName) : -1;
+        currentAgentIndex = idx >= 0 ? idx : 0;
+      } else {
+        currentAgentIndex = -1;
       }
+      updateAgentBar();
     } catch {}
   }
 
@@ -1707,18 +1720,9 @@ I18N.ready.then(function() {
 
   // 재시작 후 서버에서 다시 읽어야 하는 목록들을 갱신한다.
   async function refreshServerCatalogs() {
-    const prevAgentName = availableAgents[currentAgentIndex]?.name;
     await loadMcpStatus();
     await loadCommandCatalog();
-    await loadAgents();
-    // loadAgents()는 선택을 0번으로 되돌리므로 이전에 고른 에이전트를 복원한다.
-    if (prevAgentName) {
-      const idx = availableAgents.findIndex(a => a.name === prevAgentName);
-      if (idx >= 0) {
-        currentAgentIndex = idx;
-        updateAgentBar();
-      }
-    }
+    await loadAgents(); // 고른 에이전트는 새 목록에 있으면 유지된다
     await loadModels();
   }
 

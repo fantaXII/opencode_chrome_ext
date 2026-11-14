@@ -164,3 +164,22 @@ test('확장 서버인지 확인하지 못한 서버는 하드 재시작이 죽�
   assert.equal(res.port, fresh.port);
   assert.equal(bg.localStorage.managedServerPort, fresh.port);
 });
+
+test('명령(skill 포함)·에이전트 목록도 세션의 작업 폴더로 묻는다', async (t) => {
+  const server = await startMockOpencode();
+  const bg = await loadBackground({ port: server.port, local: MODEL });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  await bg.send({ action: 'init-server' });
+  const dir = '/home/user/프로젝트';
+  bg.localStorage.workingDirectory = dir;
+  const s = await bg.send({ action: 'get-tab-session', tabId: 8, title: 't' });
+  bg.localStorage.workingDirectory = '/other';
+
+  const cmds = await bg.send({ action: 'get-commands', sessionId: s.sessionId });
+  const agents = await bg.send({ action: 'get-agents', sessionId: s.sessionId });
+  assert.deepEqual(cmds.commands.map((c) => c.name), ['workcmd']);
+  assert.deepEqual(agents.agents.map((a) => a.name), ['build']);
+  const enc = encodeURIComponent(dir);
+  assert.deepEqual(server.state.catalogRequests, [['/command', enc], ['/agent', enc]]);
+});

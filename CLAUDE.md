@@ -98,7 +98,7 @@ MCP/skill/agent를 새로 등록하면 opencode는 이를 자동 반영하지 �
 
 하드 재시작 중에는 사이드패널이 `restarting` 상태(처음 연결할 때와 같은 오버레이 + 입력/에이전트 전환/MCP·설정 메뉴 차단)가 되고, background는 `server-restart-state`를 모든 패널에 broadcast한다. `ensureOpenCodeServer`는 `_hardRestartPromise`가 있으면 새 서버를 띄우지 않고 재시작이 끝나기를 기다린다(두 번째 서버가 뜨는 레이스 방지). 소프트 재시작은 막지 않는다.
 
-MCP 목록 조회·켜기/끄기(`get-mcp-status`/`toggle-mcp`)는 현재 세션의 폴더(`getSessionDirectory`)로 `x-opencode-directory`를 붙인다. 프로젝트 MCP는 그 폴더 instance에만 있어서, 헤더 없이 물으면 서버 cwd 폴더 기준 목록이 나왔다. 사이드패널은 세션이 바뀔 때(`refreshWorkingDirectory`)와 MCP 메뉴를 열 때 목록을 다시 읽는다. (`/command`·`/agent` 조회는 아직 헤더 없이 서버 cwd 기준이다.)
+폴더 instance별 목록 — MCP(`get-mcp-status`/`toggle-mcp`), 명령(`get-commands`, opencode는 skill도 이 목록에 넣는다), 에이전트(`get-agents`) — 은 `sessionDirectoryHeaders`로 현재 세션의 폴더(`getSessionDirectory`)를 `x-opencode-directory`에 붙여 묻는다. 작업 폴더의 `.opencode/`·`opencode.json` 항목은 그 폴더 instance에만 있어서, 헤더 없이 물으면 서버 cwd 기준 목록이 나와 작업 폴더의 MCP·skill·command·agent가 보이지 않았다(1.19.4 실측. 실행 자체는 세션 폴더 기준이라 됐다). 사이드패널은 세션이 바뀔 때(`refreshWorkingDirectory`) 세 목록을, MCP 메뉴를 열 때 MCP 목록을 다시 읽는다. `loadAgents`는 고른 에이전트가 새 목록에 있으면 유지하고 없으면 첫 번째로 돌린다.
 
 dispose는 열려 있는 SSE 스트림을 끊고 `server.instance.disposed` 이벤트를 내보낸다. `subscribeToEvents()`의 Last-Event-ID 재연결 경로가 자동으로 다시 붙지만, 진행 중이던 프롬프트는 instance와 함께 사라진다(사이드패널이 재시작 전에 `cancel-message`로 UI를 정리한다).
 
