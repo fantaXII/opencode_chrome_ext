@@ -49,6 +49,83 @@ function Find-NodeExecutable {
     return $null
 }
 
+# ─── opencode 탐색 (host.js의 findWindowsOpenCode / findWslOpenCode와 같은 순서) ───
+# 설치 시점에 Windows·WSL 양쪽을 실제로 확인해, WSL 네트워크 설정 안내와 .mcp.json 설정을
+# 실제 상태에 맞춘다.
+function Find-WindowsOpenCode {
+    # $env:Path는 위에서 레지스트리 값으로 새로 읽었다(= host.js의 registry-path 단계)
+    $cmd = Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+
+    $scoopShims = if ($env:SCOOP) { Join-Path $env:SCOOP "shims" } else { Join-Path $env:USERPROFILE "scoop\shims" }
+    $pnpmHome = if ($env:PNPM_HOME) { $env:PNPM_HOME } else { Join-Path $env:LOCALAPPDATA "pnpm" }
+    $programData = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
+    $dirs = @(
+        (Join-Path $env:APPDATA "npm"),
+        (Join-Path $env:USERPROFILE ".opencode\bin"),
+        (Join-Path $env:USERPROFILE ".bun\bin"),
+        $scoopShims,
+        $pnpmHome,
+        $env:NVM_SYMLINK,
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"),
+        (Join-Path $programData "chocolatey\bin")
+    ) | Where-Object { $_ }
+    foreach ($dir in $dirs) {
+        foreach ($name in @("opencode.exe", "opencode.cmd", "opencode.bat")) {
+            $candidate = Join-Path $dir $name
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    return $null
+}
+
+# wsl.exe를 시간 제한을 두고 실행해 stdout(UTF-8)과 종료 코드를 돌려준다.
+# 인자는 리눅스 셸이 그대로 해석하도록 원문 문자열로 넘긴다(PowerShell 5.1의 네이티브 인자
+# 전달은 안쪽 큰따옴표를 이스케이프하지 않아 `bash -c '. "$HOME/..."'` 형태가 깨진다).
+function Invoke-WslCommand {
+    param([string]$Arguments, [int]$TimeoutMs = 15000)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "wsl.exe"
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ ExitCode = $null; Stdout = ""; Error = $_.Exception.Message }
+    }
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $null = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($TimeoutMs)) {
+        try { $p.Kill() } catch {}
+        return @{ ExitCode = $null; Stdout = ""; Error = "timeout" }
+    }
+    return @{ ExitCode = $p.ExitCode; Stdout = $stdoutTask.Result; Error = $null }
+}
+
+function Find-WslOpenCode {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $null }
+    $strategies = @(
+        "bash -c 'test -x `"`$HOME/.opencode/bin/opencode`" && echo `"`$HOME/.opencode/bin/opencode`"'",
+        "bash -c '. `"`$HOME/.nvm/nvm.sh`" 2>/dev/null; which opencode 2>/dev/null'",
+        "bash -ilc 'which opencode 2>/dev/null'"
+    )
+    foreach ($wslArgs in $strategies) {
+        $r = Invoke-WslCommand -Arguments $wslArgs
+        # wsl.exe 자체 오류(배포판 없음 등)는 종료 코드 -1이고 메시지가 stdout에 UTF-16LE로 나온다.
+        # 이 경우 다른 전략도 같은 결과이므로 끝낸다.
+        # 시간 초과도 끝낸다: WSL이 없는 PC의 wsl.exe 스텁에서 전략마다 15초씩 기다리지 않도록.
+        if ($r.ExitCode -eq -1 -or $r.Error) { return $null }
+        if ($r.ExitCode -ne 0) { continue }
+        $last = ($r.Stdout -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -Last 1
+        if ($last -and $last.StartsWith("/")) { return $last }
+    }
+    return $null
+}
+
 function Set-ProxyCredentials {
     param([string]$ProxyUri, [System.Net.ICredentials]$Credentials)
     $proxy = New-Object System.Net.WebProxy($ProxyUri)
@@ -505,6 +582,14 @@ if (-not $SkipNpmInstall) {
     }
 }
 
+# opencode 위치 확인 (Windows / WSL 양쪽을 실제로 확인)
+Write-Host ""
+Write-Host "Looking for opencode..." -ForegroundColor Gray
+$winOpenCode = Find-WindowsOpenCode
+$wslOpenCode = Find-WslOpenCode
+if ($winOpenCode) { Write-Host "  Windows: $winOpenCode" -ForegroundColor Gray } else { Write-Host "  Windows: not found" -ForegroundColor Gray }
+if ($wslOpenCode) { Write-Host "  WSL:     $wslOpenCode" -ForegroundColor Gray } else { Write-Host "  WSL:     not found" -ForegroundColor Gray }
+
 # WSL2 networking configuration check
 Write-Host ""
 Write-Host "Checking WSL2 networking configuration..." -ForegroundColor Gray
@@ -512,12 +597,22 @@ Write-Host "Checking WSL2 networking configuration..." -ForegroundColor Gray
 $wslConfigPath = "$env:USERPROFILE\.wslconfig"
 $wslConfigContent = if (Test-Path $wslConfigPath) { Get-Content $wslConfigPath -Raw } else { "" }
 
-if ($wslConfigContent -notmatch "networkingMode\s*=\s*mirrored") {
+# mirrored 설정은 WSL의 opencode에 연결할 때만 필요하다. Windows에만 opencode가 있으면
+# WSL을 재시작(작업 중인 WSL 세션 종료)하는 설정을 권하지 않는다. 양쪽 모두 없으면
+# 나중에 WSL에 설치할 수 있으므로 기존처럼 안내한다.
+if ($winOpenCode -and -not $wslOpenCode) {
+    Write-Host " Using Windows opencode - WSL2 networking setup skipped." -ForegroundColor Green
+    Write-Host " (If you install opencode in WSL later, re-run this installer.)" -ForegroundColor Gray
+} elseif ($wslConfigContent -notmatch "networkingMode\s*=\s*mirrored") {
     Write-Host ""
     Write-Host "─────────────────────────────────────────────────" -ForegroundColor Cyan
     Write-Host " WSL OpenCode Integration Setup" -ForegroundColor Cyan
     Write-Host "─────────────────────────────────────────────────" -ForegroundColor Cyan
-    Write-Host " OpenCode is not found on Windows. To use WSL opencode,"
+    if ($wslOpenCode) {
+        Write-Host " OpenCode was found in WSL. To use WSL opencode,"
+    } else {
+        Write-Host " OpenCode was not found on Windows or in WSL. To use WSL opencode,"
+    }
     Write-Host " WSL2 Mirrored Networking configuration is required."
     Write-Host ""
     Write-Host " Config file: $wslConfigPath"
@@ -567,9 +662,8 @@ if ($privateConfig -and $privateConfig.mcpServers) {
 
     # [2] WSL2 ~/.mcp.json
     try {
-        # nvm 환경 포함하여 탐색 (host.js 전략과 동일)
-        $wslOcCheck = wsl.exe bash -c '. "$HOME/.nvm/nvm.sh" 2>/dev/null; which opencode 2>/dev/null' 2>&1
-        if ($LASTEXITCODE -eq 0 -and $wslOcCheck) {
+        # 위에서 host.js와 같은 3가지 전략으로 찾은 결과를 쓴다
+        if ($wslOpenCode) {
             # wsl --list --quiet는 UTF-16LE 출력으로 distro명 깨짐 → WSL 내부 env var 사용
             $defaultDistro = (wsl.exe bash -c 'echo $WSL_DISTRO_NAME' 2>&1).Trim()
             $wslHome = (wsl.exe bash -c 'echo $HOME' 2>&1).Trim()

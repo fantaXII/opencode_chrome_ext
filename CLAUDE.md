@@ -49,7 +49,9 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 
 ### native-host/host.js
 - Chrome Native Messaging 프로토콜: stdin/stdout, 메시지 앞에 4바이트 LE 길이 헤더
-- `which` 모듈로 `opencode` 바이너리 경로 탐색 후 `spawn('opencode', ['serve', '--port', port])`
+- `opencode` 경로 탐색 후 `spawn(<경로>, ['serve', '--port', port])`. WSL은 `~/.opencode/bin` → nvm → 로그인 셸(`bash -ilc`) 순으로 찾는다. Windows도 같은 수준으로 찾는다(`findWindowsOpenCode`). host는 **Chrome이 시작될 때의 PATH**를 물려받으므로, 그 뒤에 설치한 opencode는 물려받은 PATH로 못 찾는다. 그래서 물려받은 PATH → 레지스트리의 현재 Machine+User PATH(PowerShell) → 알려진 설치 폴더(`%APPDATA%\npm`, `~\.opencode\bin`, `~\.bun\bin`, scoop, pnpm, nvm-windows, WinGet Links, chocolatey) 순으로 찾는다. 2·3단계에서 찾았으면 그 PATH를 spawn env에도 넣는다(npm `opencode.cmd`가 PATH에서 `node`를 찾기 때문). `.cmd`/`.bat`은 `shell:true`로 띄우고 경로를 따옴표로 감싼다. 감싸지 않으면 공백이 있는 사용자 폴더에서 실행이 깨진다.
+  - **wsl.exe 출력 해석(`interpretWslResult`)**: wsl.exe 자신의 실패(배포판 없음, 서비스 오류)는 종료 코드 `0xFFFFFFFF`이고 메시지를 **stdout에 UTF-16LE로** 쓴다(실측). 그래서 Buffer로 받는다. 종료 코드가 `0xFFFFFFFF`일 때만 UTF-16LE로 읽고, 그 외에는 UTF-8로 읽는다. 경로는 `/`로 시작하는 줄만 인정한다. 예전에는 이 오류 출력(`"\u0000"`)을 "WSL에서 찾음"으로 오인해 Windows 탐색을 건너뛰었다. 재시도는 일시적 실패일 때만 한다. 일시적 실패는 시간 초과, 실행 오류, wsl.exe 자체 오류, 그리고 종료 코드가 0인데 경로가 없는 경우다(WSL 초기화 지연으로 출력이 유실된 것으로 본다). "없음"이라는 확실한 답은 그 전략을 다시 시도하지 않고, 배포판이 없거나 wsl.exe가 없으면 WSL 탐색을 바로 끝낸다.
+  - `install.ps1`도 같은 순서로 양쪽을 찾는다(`Find-WindowsOpenCode`/`Find-WslOpenCode`). Windows에만 opencode가 있으면 WSL mirrored 네트워크 설정(WSL 재시작) 안내를 건너뛴다. wsl.exe 인자는 `Invoke-WslCommand`가 원문 문자열로 넘긴다. PowerShell 5.1의 네이티브 인자 전달은 안쪽 `"`를 이스케이프하지 않아 깨지기 때문이다.
 - 지원 액션: `start` / `stop` / `restart` / `status` / `server-info` / `check-port` / `get-home-dir` / `browse-for-folder` / `browse-for-file` / `read-log` / `resolve-directory`
 - `sendNativeMessage`는 메시지마다 host 프로세스를 새로 띄우므로 모듈 전역 상태(`opencodeProcess`/`isWSL`)는 요청 간 유지되지 않는다. `stop`/`restart`는 프로세스 핸들이 아니라 **포트를 점유한 프로세스**를 찾아서 종료한다(Windows: `Get-NetTCPConnection` → `taskkill /T /F`, WSL: `wsl.exe ss -ltnpH` → `wsl.exe kill`). 서버가 어느 쪽에 있는지 알 수 없으므로 양쪽을 모두 시도하고, 성공 판정은 포트의 health로만 한다.
 - **실행 환경 우선순위**: `start`/`restart` 메시지의 `preferredRuntime`(`auto`|`windows`|`wsl`)이 `findOpenCodePath`의 탐색 순서를 정한다(`windows`면 Windows → WSL, `auto`·`wsl`은 WSL → Windows; 못 찾으면 반대편으로 fallback). 이미 떠 있는 서버가 여러 개면 `findAvailablePort`가 각 서버의 cwd 형식(`C:\` → Windows, `/` → WSL)으로 환경을 판별해 같은 우선순위로 고른다. 연결된 서버의 환경은 `serverState.runtime`에 보관하고 헤더 배지로 표시한다. 값은 `chrome.storage.local.preferredRuntime`에 저장되며, 사이드패널 ⚙ 설정에서 바꾼다. 하드 재시작이 성공한 뒤에만 저장되고, 현재와 다른 환경을 고르면 확인 다이얼로그 후 하드 재시작한다.
@@ -65,7 +67,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
   - 폴더를 바꾸면 그 탭의 세션만 새로 만든다(이전 세션은 지우지 않는다). 다른 탭의 세션은 원래 폴더로 계속 동작하다가, 새 세션(`/new`, exit 후 다시 열기 등)부터 새 기본값을 쓴다.
   - 사이드패널은 여러 탭이 한 화면을 같이 쓰므로, 세션이 바뀔 때마다 `refreshWorkingDirectory()`로 현재 세션의 폴더를 표시한다.
   - 예전에는 전역 값으로 보내서, 다른 탭에서 폴더를 바꾸면 화면엔 새 폴더가 보이는데 실제로는 원래 폴더로 동작했다. 상태 확인이 다른 instance로 가서 응답 중인 세션을 idle로 오인할 수도 있었다.
-- `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다.
+- `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다. 결과를 읽을 때는 `wslStdout(result)`처럼 종료 코드 0을 먼저 확인한다. wsl.exe가 실패하면 stdout에 UTF-16LE 오류 메시지가 나와서, 그대로 읽으면 깨진 문자열이 홈 폴더가 되거나 오류 코드 속 숫자가 pid가 된다.
 
 ### OpenCode REST API (background.js가 직접 호출)
 | 엔드포인트 | 용도 |

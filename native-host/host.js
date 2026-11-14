@@ -82,22 +82,162 @@ async function findAvailablePort(startPort = 4096) {
 // opencode 경로 탐색 (preferredRuntime 순서, 못 찾으면 반대편 fallback)
 // ============================================
 
-function findWindowsOpenCode(diagnostic) {
-  diagnostic.windowsPath.checked = true;
-  try {
-    fileLog('DEBUG', 'findOpenCodePath: Trying Windows PATH...');
-    const windowsPath = require('which').sync('opencode');
-    diagnostic.windowsPath.found = true;
-    fileLog('INFO', `findOpenCodePath: Found in Windows PATH: ${windowsPath}`);
-    return { path: windowsPath, isWSL: false, diagnostic };
-  } catch (error) {
-    diagnostic.windowsPath.error = error.message;
-    fileLog('WARN', `findOpenCodePath: Not in Windows PATH - ${error.message}`);
-    return null;
+// Windows 탐색도 WSL처럼 여러 전략을 쓴다. host는 Chrome이 실행될 때의 환경을 물려받으므로
+// process.env.PATH는 Chrome을 띄운 뒤 설치한 opencode(npm -g, scoop 등)를 모른다.
+// WSL의 `bash -ilc`가 새 로그인 환경을 읽는 것처럼, 레지스트리의 현재 PATH를 다시 읽고
+// 흔한 설치 폴더도 직접 확인한다.
+
+/** PATH 문자열들을 ';'로 합친다(빈 항목·대소문자만 다른 중복 제거, 앞쪽 우선). */
+function mergeWindowsPath(...parts) {
+  const seen = new Set();
+  const out = [];
+  for (const part of parts) {
+    for (const raw of String(part || '').split(';')) {
+      const dir = raw.trim();
+      const key = dir.replace(/\\+$/, '').toLowerCase();
+      if (!dir || seen.has(key)) continue;
+      seen.add(key);
+      out.push(dir);
+    }
   }
+  return out.join(';');
 }
 
-// WSL (최대 3회 재시도, 3가지 전략)
+/** PowerShell이 출력한 Machine/User PATH 두 줄을 하나의 PATH로 합친다. */
+function parseRegistryPathOutput(stdout) {
+  return mergeWindowsPath(...String(stdout || '').split(/\r?\n/));
+}
+
+/** opencode가 흔히 설치되는 Windows 폴더(존재 여부는 which가 확인한다). */
+function windowsKnownOpenCodeDirs(env) {
+  const home = env.USERPROFILE;
+  const dirs = [
+    env.APPDATA && path.win32.join(env.APPDATA, 'npm'),               // npm i -g
+    home && path.win32.join(home, '.opencode', 'bin'),                 // 공식 설치 스크립트
+    home && path.win32.join(home, '.bun', 'bin'),                      // bun i -g
+    env.SCOOP ? path.win32.join(env.SCOOP, 'shims') : home && path.win32.join(home, 'scoop', 'shims'),
+    env.PNPM_HOME || (env.LOCALAPPDATA && path.win32.join(env.LOCALAPPDATA, 'pnpm')),
+    env.NVM_SYMLINK,                                                   // nvm-windows의 활성 node 폴더
+    env.LOCALAPPDATA && path.win32.join(env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'),
+    path.win32.join(env.ProgramData || env.PROGRAMDATA || 'C:\\ProgramData', 'chocolatey', 'bin'),
+  ];
+  return dirs.filter(Boolean);
+}
+
+/** env 복사본의 PATH를 바꾼다. Windows는 대소문자를 구분하지 않으므로 Path/PATH 키를 모두 지우고 하나만 둔다. */
+function withWindowsPath(env, pathValue) {
+  const out = { ...env };
+  for (const k of Object.keys(out)) {
+    if (k.toUpperCase() === 'PATH') delete out[k];
+  }
+  out.Path = pathValue;
+  return out;
+}
+
+/**
+ * Windows에서 opencode를 실행할 spawn 인자. .cmd/.bat은 셸이 필요하고(최신 Node는 셸 없이
+ * 띄우면 EINVAL), shell:true는 `cmd /d /s /c "<명령> <인자>"`로 이어 붙이기만 하므로
+ * 경로에 공백이 있으면(C:\Users\홍 길동\...) 깨진다. 그래서 경로를 따옴표로 감싼다.
+ */
+function windowsSpawnCommand(filePath) {
+  const isCmd = /\.(cmd|bat)$/i.test(filePath);
+  return { command: isCmd ? `"${filePath}"` : filePath, shell: isCmd };
+}
+
+/** 레지스트리의 현재 Machine + User PATH(환경변수 확장 포함). 실패하면 ''. */
+function readRegistryPath() {
+  const ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " +
+    "[Environment]::GetEnvironmentVariable('Path','Machine'); " +
+    "[Environment]::GetEnvironmentVariable('Path','User')";
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 10000 });
+  if (r.error) throw r.error;
+  return parseRegistryPathOutput(r.stdout);
+}
+
+function findWindowsOpenCode(diagnostic) {
+  diagnostic.windowsPath.checked = true;
+  diagnostic.windowsPath.strategies = [];
+  const which = require('which');
+  const inheritedPath = process.env.PATH || process.env.Path || '';
+  const errors = [];
+
+  // 찾은 폴더를 앞에 두고 최신 PATH를 합친다. npm의 opencode.cmd는 PATH에서 node를 찾으므로
+  // 찾기만 하고 옛 PATH로 실행하면 "찾았는데 시작 실패"가 된다.
+  let freshPath = '';
+  const strategies = [
+    { id: 'inherited-path', getPath: () => inheritedPath },
+    { id: 'registry-path', getPath: () => (freshPath = readRegistryPath()) },
+    { id: 'known-dirs', getPath: () => windowsKnownOpenCodeDirs(process.env).join(';') },
+  ];
+
+  for (const s of strategies) {
+    try {
+      fileLog('DEBUG', `findOpenCodePath: Windows strategy ${s.id}...`);
+      const searchPath = s.getPath();
+      const found = searchPath ? which.sync('opencode', { path: searchPath, nothrow: true }) : null;
+      diagnostic.windowsPath.strategies.push({ id: s.id, found: !!found });
+      if (!found) continue;
+
+      diagnostic.windowsPath.found = true;
+      fileLog('INFO', `findOpenCodePath: Found on Windows (${s.id}): ${found}`);
+      const result = { path: found, isWSL: false, diagnostic };
+      if (s.id !== 'inherited-path') {
+        result.pathEnv = mergeWindowsPath(path.win32.dirname(found), freshPath, inheritedPath);
+      }
+      return result;
+    } catch (error) {
+      errors.push(`${s.id}: ${error.message}`);
+      diagnostic.windowsPath.strategies.push({ id: s.id, found: false, error: error.message });
+      fileLog('WARN', `findOpenCodePath: Windows ${s.id} exception: ${error.message}`);
+    }
+  }
+
+  diagnostic.windowsPath.error = errors.join('; ') || 'not found in inherited PATH, registry PATH, or known install dirs';
+  fileLog('WARN', `findOpenCodePath: Not found on Windows - ${diagnostic.windowsPath.error}`);
+  return null;
+}
+
+// wsl.exe 자신의 실패(배포판 없음, 서비스 오류 등)는 종료 코드 0xFFFFFFFF(-1)이고, 메시지를
+// stderr가 아니라 **stdout에 UTF-16LE로** 쓴다(실측). 예전 코드는 stdout의 마지막 줄을 경로로
+// 썼기 때문에, WSL이 실패하면 "\u0000" 같은 깨진 값을 "WSL에서 찾음"으로 오인해 Windows 쪽을
+// 아예 찾지 않았다.
+const WSL_EXE_FAILURE = new Set([4294967295, -1]);
+
+// wsl.exe 자체 실패일 때만 UTF-16LE로 읽는다. 성공한 실행에 wsl.exe 안내문(UTF-16LE)이 앞에
+// 붙어도 리눅스 출력(UTF-8) 경로가 깨지지 않도록, 그 외에는 UTF-8로 읽고 NUL만 지운다.
+function decodeWslOutput(buf, asUtf16) {
+  if (buf == null) return '';
+  const text = typeof buf === 'string' ? buf : buf.toString(asUtf16 && buf.includes(0) ? 'utf16le' : 'utf8');
+  return text.replace(/^\uFEFF/, '').replace(/\u0000/g, '');
+}
+
+/**
+ * wsl.exe로 opencode 경로를 물어본 결과를 해석한다. 반환 kind:
+ * - 'found': stdout 마지막 줄이 절대 경로('/'로 시작)
+ * - 'final': 리눅스 쪽이 정상 실행돼 "없음"(종료 코드 0이 아님)으로 답했다. 다시 해도 같다.
+ * - 'no-wsl': wsl.exe가 없거나(ENOENT) 배포판이 없음. WSL 탐색 전체를 끝낸다.
+ * - 'transient': 시간 초과·실행 오류·그 밖의 wsl.exe 자체 오류, 또는 종료 코드 0인데 경로가
+ *   없음(세 전략 모두 없으면 0이 아닌 코드로 끝나므로 출력이 유실된 것으로 본다. WSL 초기화 지연).
+ */
+function interpretWslResult(result) {
+  const wslFailed = WSL_EXE_FAILURE.has(result.status);
+  const stdout = decodeWslOutput(result.stdout, wslFailed);
+  const stderr = decodeWslOutput(result.stderr, wslFailed);
+  const message = `${stdout}\n${stderr}`.trim().substring(0, 300);
+  if (result.error) return { kind: result.error.code === 'ENOENT' ? 'no-wsl' : 'transient', path: null, message: result.error.message };
+  if (result.status === null) return { kind: 'transient', path: null, message };
+  if (wslFailed) {
+    const noDistro = /WSL_E_DEFAULT_DISTRO_NOT_FOUND|WSL_E_DISTRO_NOT_FOUND|no installed distributions/i.test(message);
+    return { kind: noDistro ? 'no-wsl' : 'transient', path: null, message };
+  }
+  const last = stdout.split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
+  if (last.startsWith('/')) return { kind: 'found', path: last, message };
+  return { kind: result.status === 0 ? 'transient' : 'final', path: null, message };
+}
+
+// WSL (3가지 전략). 일시적 실패가 있었을 때만 최대 3회까지 다시 시도한다.
+// 예전에는 "opencode 없음"이라는 확실한 답에도 3회 × 3전략을 반복해, Windows에만 opencode가
+// 있는 사용자는 Windows를 찾기 전에 수십 초를 기다렸다.
 async function findWslOpenCode(diagnostic) {
   diagnostic.wsl.checked = true;
   const wslStrategies = [
@@ -106,16 +246,22 @@ async function findWslOpenCode(diagnostic) {
     ['bash', '-ilc', 'which opencode 2>/dev/null'],
   ];
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    for (let si = 0; si < wslStrategies.length; si++) {
+  // 확실히 없다고 답한 전략은 다음 회차에서 건너뛴다.
+  const pending = new Set(wslStrategies.map((_, i) => i));
+  for (let attempt = 1; attempt <= 3 && pending.size; attempt++) {
+    for (const si of [...pending]) {
+      let kind;
       try {
         fileLog('DEBUG', `findOpenCodePath: WSL strategy ${si + 1}/${wslStrategies.length}, attempt ${attempt}/3...`);
-        const result = spawnSync('wsl.exe', wslStrategies[si], { encoding: 'utf8', timeout: 15000 });
-        const wslPath = (result.stdout || '').split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
-        const stderr = (result.stderr || '').trim().substring(0, 200);
+        // encoding 없이 Buffer로 받아 UTF-8(리눅스 출력)/UTF-16LE(wsl.exe 오류)를 구분한다.
+        const result = spawnSync('wsl.exe', wslStrategies[si], { timeout: 15000 });
+        const r = interpretWslResult(result);
+        kind = r.kind;
+        const wslPath = r.path;
+        const stderr = r.message.substring(0, 200);
 
-        diagnostic.wsl.strategies.push({ id: si + 1, attempt, found: !!wslPath, stderr, exitCode: result.status });
-        fileLog('DEBUG', `findOpenCodePath: WSL s${si + 1}/a${attempt}: path="${wslPath}", exitCode=${result.status}, stderr="${stderr}"`);
+        diagnostic.wsl.strategies.push({ id: si + 1, attempt, found: !!wslPath, stderr, exitCode: result.status, kind });
+        fileLog('DEBUG', `findOpenCodePath: WSL s${si + 1}/a${attempt}: path="${wslPath || ''}", exitCode=${result.status}, kind=${kind}, output="${stderr}"`);
 
         if (wslPath) {
           diagnostic.wsl.found = true;
@@ -123,13 +269,20 @@ async function findWslOpenCode(diagnostic) {
           return { path: wslPath, isWSL: true, diagnostic };
         }
       } catch (error) {
-        diagnostic.wsl.strategies.push({ id: si + 1, attempt, found: false, stderr: error.message, exitCode: null });
+        kind = 'transient';
+        diagnostic.wsl.strategies.push({ id: si + 1, attempt, found: false, stderr: error.message, exitCode: null, kind });
         fileLog('WARN', `findOpenCodePath: WSL s${si + 1}/a${attempt} exception: ${error.message}`);
       }
+
+      if (kind === 'no-wsl') {
+        fileLog('INFO', 'findOpenCodePath: WSL not available - skipping WSL search');
+        return null;
+      }
+      if (kind === 'final') pending.delete(si);
     }
 
-    if (attempt < 3) {
-      fileLog('DEBUG', 'findOpenCodePath: Retrying WSL in 2s...');
+    if (pending.size && attempt < 3) {
+      fileLog('DEBUG', `findOpenCodePath: Retrying ${pending.size} WSL strategy(ies) in 2s...`);
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
@@ -250,11 +403,13 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
       });
     } else {
       fileLog('INFO', `startOpenCodeServer: Spawning on Windows: ${found.path} serve --port ${port}`);
-      const isCmd = /\.(cmd|bat)$/i.test(found.path);
-      opencodeProcess = spawn(found.path, ['serve', '--port', port.toString()], {
+      const { command, shell } = windowsSpawnCommand(found.path);
+      // PATH를 새로 읽어 찾았으면 실행 환경에도 그 PATH를 준다(.cmd 래퍼가 node를 찾도록).
+      const env = found.pathEnv ? withWindowsPath(spawnEnv, found.pathEnv) : spawnEnv;
+      opencodeProcess = spawn(command, ['serve', '--port', port.toString()], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: isCmd,
-        env: spawnEnv
+        shell,
+        env
       });
     }
 
@@ -364,15 +519,26 @@ function parseSsListener(output, port) {
   return null;
 }
 
+/**
+ * 리눅스 명령이 정상 종료(0)했을 때만 stdout을 돌려준다. wsl.exe 자체가 실패하면(종료 코드
+ * 0xFFFFFFFF) stdout에 UTF-16LE 오류 메시지가 나오므로, 이를 결과로 읽으면 깨진 값이나
+ * 오류 코드 속 숫자(0x8007...)를 pid로 오인한다.
+ */
+function wslStdout(result) {
+  if (!result || result.error || result.status !== 0) return '';
+  return String(result.stdout || '').replace(/\u0000/g, '');
+}
+
 function findWSLListener(port) {
   const ss = spawnSync('wsl.exe', ['ss', '-ltnpH'], { encoding: 'utf8', timeout: 15000 });
-  const parsed = parseSsListener(ss.stdout, port);
+  const parsed = parseSsListener(wslStdout(ss), port);
   if (parsed) return parsed;
 
   // ss가 없거나 pid 정보를 못 얻은 경우 폴백. fuser는 pid를 stdout에,
   // "4096/tcp:" 헤더를 stderr에 쓰므로 stdout만 본다.
   const fuser = spawnSync('wsl.exe', ['fuser', `${port}/tcp`], { encoding: 'utf8', timeout: 15000 });
-  const fuserMatch = (fuser.stdout || '').match(/\d+/);
+  // fuser는 리스너가 있을 때만 0으로 끝난다(없으면 1).
+  const fuserMatch = wslStdout(fuser).match(/\d+/);
   return fuserMatch ? { pid: Number(fuserMatch[0]), name: '' } : null;
 }
 
@@ -808,8 +974,9 @@ async function handleMessage(message) {
     case 'get-home-dir': {
       try {
         const result = spawnSync('wsl.exe', ['sh', '-c', 'echo $HOME'], { encoding: 'utf8', timeout: 3000 });
-        const wslHome = (result.stdout || '').trim();
-        if (wslHome) return { status: 'success', directory: wslHome };
+        // 배포판이 없거나 WSL이 실패하면 깨진 오류 문자열이 작업 폴더 기본값이 되지 않도록 한다.
+        const wslHome = wslStdout(result).trim();
+        if (wslHome.startsWith('/')) return { status: 'success', directory: wslHome };
       } catch {}
       return { status: 'success', directory: os.homedir() };
     }
@@ -979,5 +1146,5 @@ if (require.main === module) {
   main();
 } else {
   // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
-  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory };
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory, mergeWindowsPath, parseRegistryPathOutput, windowsKnownOpenCodeDirs, withWindowsPath, windowsSpawnCommand, interpretWslResult, wslStdout };
 }
