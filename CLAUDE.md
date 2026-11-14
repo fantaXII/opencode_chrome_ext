@@ -66,6 +66,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
   - 기존 세션에 보내는 요청(프롬프트·`/session/status`·권한/질문 조회·응답)은 `getSessionDirectory(sessionId)`로 보낸다. 값은 `sessionDirectories`(`storage.session`)에 있고, 없으면 `GET /session/{id}`로 확인한다.
   - 폴더를 바꾸면 그 탭의 세션만 새로 만든다(이전 세션은 지우지 않는다). 다른 탭의 세션은 원래 폴더로 계속 동작하다가, 새 세션(`/new`, exit 후 다시 열기 등)부터 새 기본값을 쓴다.
   - 사이드패널은 여러 탭이 한 화면을 같이 쓰므로, 세션이 바뀔 때마다 `refreshWorkingDirectory()`로 현재 세션의 폴더를 표시한다.
+  - 사이드패널의 폴더 변경(📁·✏️·`/wd`)은 모두 `changeWorkingDirectory()` 하나를 거친다. 변경 중(`workingDirBusy`)에는 폴더 표시줄에 스피너와 "작업 폴더 변경 중…"을 띄우고, 입력·전송·폴더 조작을 막고, 겹친 요청은 무시한다. 응답 중이면 확인 다이얼로그를 띄운 뒤 `cancelMessage()`로 UI를 정리하고 바꾼다(`/wd`는 다른 명령처럼 응답 중에는 실행되지 않는다).
   - 예전에는 전역 값으로 보내서, 다른 탭에서 폴더를 바꾸면 화면엔 새 폴더가 보이는데 실제로는 원래 폴더로 동작했다. 상태 확인이 다른 instance로 가서 응답 중인 세션을 idle로 오인할 수도 있었다.
 - `wsl.exe`에는 `bash -c "<스크립트>"` 대신 argv만 넘긴다(따옴표·`$` 확장이 인자 전달 과정에서 깨질 수 있음). 출력 파싱은 Node에서 처리한다. 결과를 읽을 때는 `wslStdout(result)`처럼 종료 코드 0을 먼저 확인한다. wsl.exe가 실패하면 stdout에 UTF-16LE 오류 메시지가 나와서, 그대로 읽으면 깨진 문자열이 홈 폴더가 되거나 오류 코드 속 숫자가 pid가 된다.
 

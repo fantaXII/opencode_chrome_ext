@@ -207,28 +207,85 @@ I18N.ready.then(function() {
 
   workingFolderEditBtn.addEventListener('click', enterEditMode);
 
-  folderIcon.addEventListener('click', async () => {
-    const res = await sendMessageToBackground('browse-for-folder');
-    if (res?.directory) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: res.directory, tabId: currentTabId, sessionId: currentSessionId });
-      if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
-      applyWorkingDirSessionReset(result);
-      await refreshWorkingDirectory();
-      if (res.warning) {
-        addErrorMessage(t(res.warning));
+  // 작업 폴더 변경(📁·✏️·/wd 공통). background는 host 경로 확인(WSL이면 수 초) → 이 탭 세션 해제 → 새 세션 생성까지
+  // 하므로, 그동안 진행 표시를 띄우고 입력·폴더 조작을 막는다. 막지 않으면 곧 버려질 이전 세션으로 프롬프트가 가거나,
+  // 변경이 겹쳐 세션이 두 개 생길 수 있다.
+  let workingDirBusy = false;
+
+  function setWorkingDirChanging(on) {
+    workingFolderWrapper.classList.toggle('changing', on);
+    workingFolderEditBtn.disabled = on;
+    messageInput.disabled = on || isServerTransitioning();
+    if (on) {
+      hideCommandDropdown();
+      sendBtn.disabled = true;
+      workingFolderDisplay.textContent = t('작업 폴더 변경 중…');
+      messageInput.placeholder = t('작업 폴더 변경 중…');
+    } else {
+      messageInput.placeholder = isLoading ? t('응답 중 — 입력하면 대기 메시지로 보냅니다') : t('메시지를 입력하세요...');
+      updateSendButtonState();
+    }
+  }
+
+  // pickDirectory: 바꿀 폴더를 돌려주는 함수({directory, warning} 또는 null = 취소).
+  // 성공하면 background 응답, 취소·이미 변경 중이면 null을 돌려주고, 실패하면 사용자용 문구로 throw한다.
+  async function changeWorkingDirectory(pickDirectory) {
+    if (workingDirBusy) return null;
+    workingDirBusy = true;
+    let locked = false;
+    try {
+      const picked = await pickDirectory();
+      if (!picked?.directory) return null;
+      // 폴더를 바꾸면 이 탭 세션이 해제되며 진행 중인 응답은 서버에서 중단된다. 로딩 상태가 남지 않도록 먼저 확인·정리한다.
+      if (isLoading) {
+        const ok = await showConfirm(
+          t('작업 폴더 변경'),
+          t('응답이 진행 중입니다. 응답을 중단하고 작업 폴더를 바꿀까요?'),
+          { okText: t('중단하고 변경') }
+        );
+        if (!ok) return null;
+        await cancelMessage();
       }
+      const tabId = currentTabId;
+      setWorkingDirChanging(true);
+      locked = true;
+      const result = await sendMessageToBackground('set-working-directory', { directory: picked.directory, tabId, sessionId: currentSessionId });
+      if (result?.success === false) throw new Error(workingDirError(result));
+      // 그 사이 다른 탭으로 바뀌었으면 화면은 건드리지 않는다(새 세션은 background가 그 탭에 연결해 두었다)
+      if (tabId === currentTabId) applyWorkingDirSessionReset(result);
+      if (picked.warning) addErrorMessage(t(picked.warning));
+      return result;
+    } finally {
+      workingDirBusy = false;
+      if (locked) {
+        setWorkingDirChanging(false);
+        await refreshWorkingDirectory(); // 실패해도 "변경 중…" 문구를 현재 세션 폴더로 되돌린다
+      }
+    }
+  }
+
+  folderIcon.addEventListener('click', async () => {
+    try {
+      await changeWorkingDirectory(async () => {
+        const res = await sendMessageToBackground('browse-for-folder');
+        return res?.directory ? { directory: res.directory, warning: res.warning } : null;
+      });
+    } catch (e) {
+      addErrorMessage(t(e.message));
     }
   });
 
   async function commitWorkingFolder() {
+    // Enter로 커밋하면 exitEditMode가 입력칸을 숨기면서 blur가 또 올 수 있다. 이미 닫혔으면 무시한다.
+    if (workingFolderInput.classList.contains('hidden')) return;
     const newPath = workingFolderInput.value.trim();
     exitEditMode();
     // 편집칸은 표시 중인 폴더(기본값이면 서버 cwd)로 채워지므로 그것과 비교한다. 안 바꾸고 나가면 아무것도 하지 않는다.
-    if (newPath !== (currentWorkingDir || defaultWorkingDir)) {
-      const result = await sendMessageToBackground('set-working-directory', { directory: newPath, tabId: currentTabId, sessionId: currentSessionId });
-      if (result?.success === false) { addErrorMessage(workingDirError(result)); return; }
-      applyWorkingDirSessionReset(result);
-      await refreshWorkingDirectory();
+    if (newPath === (currentWorkingDir || defaultWorkingDir)) return;
+    try {
+      await changeWorkingDirectory(async () => ({ directory: newPath }));
+    } catch (e) {
+      addErrorMessage(t(e.message));
     }
   }
 
@@ -1023,11 +1080,8 @@ I18N.ready.then(function() {
     if (slash === '/wd') {
       if (!args) { addBotMessage(t('사용법: /wd <path>')); sendBtn.disabled = false; return; }
       try {
-        const result = await sendMessageToBackground('set-working-directory', { directory: args, tabId: currentTabId, sessionId: currentSessionId });
-        if (result?.success === false) throw new Error(workingDirError(result));
-        applyWorkingDirSessionReset(result);
-        await refreshWorkingDirectory();
-        addBotMessage(t('작업 디렉토리가 변경되었습니다: {dir}', { dir: result.directory || args }));
+        const result = await changeWorkingDirectory(async () => ({ directory: args }));
+        if (result) addBotMessage(t('작업 디렉토리가 변경되었습니다: {dir}', { dir: result.directory || args }));
       } catch (e) {
         addErrorMessage(t('디렉토리 변경 실패: {error}', { error: t(e.message) }));
       } finally {
@@ -1071,7 +1125,7 @@ I18N.ready.then(function() {
       await exitPanel();
       return;
     }
-    if (isServerTransitioning()) return;
+    if (isServerTransitioning() || workingDirBusy) return;
     if (!message && attachedFiles.length === 0) return;
 
     // 응답 중: 서버 큐에 대기 메시지로 보낸다(현재 응답이 끝나면 모델이 이어서 처리). 명령은 응답이 끝난 뒤에만.
