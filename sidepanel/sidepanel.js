@@ -92,6 +92,7 @@ I18N.ready.then(function() {
   let currentAgentIndex = -1;
   let attachedFiles = [];
   const attachmentsBar = document.getElementById('attachments-bar');
+  const TAB_SWITCH_SETTLE_MS = 150; // 탭 전환 직후 패널의 표시 상태(document.hidden)가 바뀔 때까지 기다리는 시간
   let reinitToken = 0; // 탭 전환 레이스 컨디션 방지용 토큰
 
   function updateSendButtonState() {
@@ -628,22 +629,27 @@ I18N.ready.then(function() {
     // 세션 준비 완료 후 입력 내용이 있으면 전송 버튼 활성화
     updateSendButtonState();
 
+    await consumePendingContextText(tab.id);
+  }
+
+  // 우클릭 "OpenCode로 보내기"로 저장된 선택 텍스트를 입력창에 넣는다(그 탭을 보여주는 패널만).
+  async function consumePendingContextText(tabId) {
     try {
       const { pendingContextText } = await chrome.storage.local.get('pendingContextText');
-      if (pendingContextText?.tabId === tab.id && pendingContextText?.text) {
-        await chrome.storage.local.remove('pendingContextText');
-        messageInput.value = pendingContextText.text;
-        messageInput.dispatchEvent(new Event('input'));
+      if (pendingContextText?.tabId !== tabId || !pendingContextText?.text) return;
+      if (tabId !== currentTabId) return;
+      await chrome.storage.local.remove('pendingContextText');
+      messageInput.value = pendingContextText.text;
+      messageInput.dispatchEvent(new Event('input'));
 
-        const focusInput = () => {
-          window.focus();
-          messageInput.focus();
-          messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
-        };
-        focusInput();
-        // 패널이 막 열리는 시점에는 포커스 요청이 무시될 수 있어 한 번 더 시도
-        setTimeout(focusInput, 150);
-      }
+      const focusInput = () => {
+        window.focus();
+        messageInput.focus();
+        messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+      };
+      focusInput();
+      // 패널이 막 열리는 시점에는 포커스 요청이 무시될 수 있어 한 번 더 시도
+      setTimeout(focusInput, 150);
     } catch (e) {
       console.error('pendingContextText 처리 실패:', e);
     }
@@ -652,6 +658,16 @@ I18N.ready.then(function() {
   // 탭 전환 시 — 다른 탭이고 해당 탭에 세션이 있을 때만 갱신
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
     if (activeInfo.tabId === currentTabId) return; // 같은 탭, 무시
+    // 패널 문서는 탭마다 따로 살아 있을 수 있다. 다른 탭으로 가면 이 패널은 숨은 채 남는데,
+    // 그래도 이 이벤트를 받아 새 탭의 세션으로 바뀌면 원래 탭으로 돌아왔을 때 엉뚱한 대화가 보인다.
+    // 이벤트 시점에는 표시 상태가 아직 바뀌지 않았을 수 있어 잠시 기다린 뒤 판단한다.
+    await new Promise((r) => setTimeout(r, TAB_SWITCH_SETTLE_MS));
+    if (document.hidden) return;
+    try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active && active.id !== activeInfo.tabId) return; // 그 사이 또 다른 탭으로 바뀜(그 이벤트가 처리한다)
+    } catch (e) {}
+    if (activeInfo.tabId === currentTabId) return;
     try {
       const response = await sendMessageToBackground('has-tab-session', { tabId: activeInfo.tabId });
       if (!response.has) return; // 이 탭에는 extension 없음
@@ -663,6 +679,15 @@ I18N.ready.then(function() {
   // background의 action.onClicked에서 전송 — 새 탭에서 아이콘 클릭 시
   chrome.runtime.onMessage.addListener((message) => {
     if (message.action === 'reinit-for-tab') {
+      // 탭마다 패널 문서가 따로 살아 있을 수 있다(Tab C의 패널은 Tab A로 가도 숨은 채 남는다).
+      // 숨은 패널이 이 메시지를 처리하면 다른 탭의 세션으로 바뀌고 선택 텍스트까지 가져가므로 무시한다.
+      // 새로 열린 패널은 panel-init에서 같은 일을 하므로 이 메시지를 놓쳐도 된다.
+      if (document.hidden) return;
+      // 이미 그 탭을 보여주는 패널이면 대화를 다시 그리지 않고 선택 텍스트만 넣는다.
+      if (message.reason === 'context-menu' && message.tabId === currentTabId && currentSessionId) {
+        consumePendingContextText(message.tabId);
+        return;
+      }
       chrome.tabs.get(message.tabId, (tab) => {
         if (chrome.runtime.lastError || !tab) return;
         reinitForTab(tab, 'reinit-for-tab-message');

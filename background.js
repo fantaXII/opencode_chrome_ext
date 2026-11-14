@@ -3198,7 +3198,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   chrome.storage.local.set({ pendingContextText: { tabId: tab.id, text: selectionText } })
     .then(() => {
       setTimeout(() => {
-        chrome.runtime.sendMessage({ action: 'reinit-for-tab', tabId: tab.id }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'reinit-for-tab', tabId: tab.id, reason: 'context-menu' }).catch(() => {});
       }, 300);
     });
 });

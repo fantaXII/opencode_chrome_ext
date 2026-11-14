@@ -41,6 +41,7 @@ sidepanel.js  ──chrome.runtime.sendMessage──▶  background.js (Service 
 - 모든 백엔드 통신은 `sendMessageToBackground(action, data)` 헬퍼를 통해 background로 위임
 - SSE 청크는 background가 push하면 `chrome.runtime.onMessage`로 수신해 실시간 렌더링
 - 초기화 순서: `init-server` → `get-models` → `create-session`
+- **패널 문서는 탭마다 따로 살아 있을 수 있다**: Tab C에서 연 패널은 Tab A로 가도 숨은 채(`document.hidden`) 남아 `chrome.runtime.sendMessage` broadcast를 계속 받는다. 그래서 `reinit-for-tab`은 숨은 패널에서 무시한다(새로 연 패널은 `panel-init`에서 같은 일을 한다). 탭 전환(`tabs.onActivated`)도 같다: 이벤트 시점에는 표시 상태가 아직 안 바뀌었을 수 있어 `TAB_SWITCH_SETTLE_MS`(150ms) 뒤 `document.hidden`이면 무시한다. 무시하지 않으면 숨은 Tab C 패널이 Tab A 세션으로 바뀌어, Tab C로 돌아왔을 때 잠깐 엉뚱한 대화가 보이고 다시 불러오느라 일을 두 번 한다. 예전에는 우클릭 "OpenCode로 보내기"의 선택 텍스트(`pendingContextText`)를 Tab C의 숨은 패널이 가져갔다. 이미 그 탭을 보여주는 패널이면(`reason: 'context-menu'`) 대화를 다시 그리지 않고 `consumePendingContextText`로 입력창에만 넣는다.
 
 - **세션은 지우지 않는다(TUI와 같은 개념)**: 탭 닫기·`exit`·작업 폴더 변경 모두 탭-세션 연결만 끊는다. 서버의 세션은 남아 `/sessions`로 원래 폴더 그대로 이어갈 수 있다. 응답 중이었다면 `releaseSession`이 구독을 끝내고 서버 세션을 `abort`한다. `DELETE /session`은 쓰지 않는다.
 - `exit`/`/exit`/`quit`(입력 전체가 일치할 때만): 응답 중이면 `cancel-message` 후 `exit-panel`을 보낸다. background는 이 탭의 `tabSessions`·`activeTabs` 연결을 끊고 `sidePanel.setOptions({tabId, enabled:false})`로 패널을 닫는다. 서버 세션은 지우지 않는다. 그래서 `/sessions`로 이어갈 수 있고, 다시 열면 `get-tab-session`이 새 세션을 만든다. 패널이 남아 있으면 사이드패널이 `window.close()`로 닫는다.
