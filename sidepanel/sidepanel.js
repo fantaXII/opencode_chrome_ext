@@ -1516,9 +1516,9 @@ I18N.ready.then(function() {
     init();
   });
 
-  // mode: 'missing'(host 미설치) | 'outdated'(설치됐지만 확장보다 낮은 버전)
-  // 안내하는 인스톨러는 항상 현재 확장 버전과 같은 릴리스의 파일이다.
-  function showNativeHostGuide(mode = 'missing', hostVersion = null) {
+  // mode: 'missing'(host 미설치) | 'outdated'(설치됐지만 필요한 버전(required = MIN_HOST_VERSION)보다 낮음)
+  // 안내하는 인스톨러는 항상 현재 확장 버전과 같은 릴리스의 파일이다(최신 host).
+  function showNativeHostGuide(mode = 'missing', hostVersion = null, required = null) {
     const { version } = chrome.runtime.getManifest();
     guideDownloadBtn.href = `https://github.com/fantaXII/opencode_chrome_ext/releases/download/v${version}/opencode-native-host-setup-v${version}.exe`;
 
@@ -1529,7 +1529,7 @@ I18N.ready.then(function() {
       : t('Chrome 확장과 OpenCode를 연결하는<br>Native Host 프로그램이 필요합니다.');
     const note = document.getElementById('guide-version-note');
     note.textContent = outdated
-      ? t('설치된 버전: {installed} → 필요한 버전: v{required} (기존 설치 위에 그대로 설치하면 됩니다)', { installed: hostVersion ? 'v' + hostVersion : t('구버전'), required: version })
+      ? t('설치된 버전: {installed} → 필요한 버전: v{required} (기존 설치 위에 그대로 설치하면 됩니다)', { installed: hostVersion ? 'v' + hostVersion : t('구버전'), required: required || version })
       : t('설치할 버전: v{version}', { version });
     note.classList.remove('hidden');
     guideDismissBtn.classList.toggle('hidden', !outdated);
@@ -1564,7 +1564,7 @@ I18N.ready.then(function() {
     if (hostGuideDismissed) return;
     try {
       const res = await sendMessageToBackground('check-host-version');
-      if (res.state === 'outdated') showNativeHostGuide('outdated', res.hostVersion);
+      if (res.state === 'outdated') showNativeHostGuide('outdated', res.hostVersion, res.required);
     } catch {}
   }
 
@@ -2188,7 +2188,7 @@ I18N.ready.then(function() {
     document.getElementById('host-update-btn')?.addEventListener('click', () => {
       hostGuideDismissed = false;
       settingsDropdown.classList.add('hidden');
-      showNativeHostGuide(hostInfo?.state === 'missing' ? 'missing' : 'outdated', hostInfo?.hostVersion);
+      showNativeHostGuide(hostInfo?.state === 'missing' ? 'missing' : 'outdated', hostInfo?.hostVersion, hostInfo?.required);
     });
 
     document.getElementById('update-check-btn')?.addEventListener('click', async () => {

@@ -183,3 +183,23 @@ test('명령(skill 포함)·에이전트 목록도 세션의 작업 폴더로 �
   const enc = encodeURIComponent(dir);
   assert.deepEqual(server.state.catalogRequests, [['/command', enc], ['/agent', enc]]);
 });
+
+test('host 업데이트 안내는 확장 버전이 아니라 MIN_HOST_VERSION(host가 마지막으로 바뀐 버전)과 비교한다', async (t) => {
+  const { MIN_HOST_VERSION } = await import('../lib/host-version.mjs');
+  const older = '0.0.1';
+  let hostVersion = MIN_HOST_VERSION;
+  const server = await startMockOpencode();
+  const bg = await loadBackground({
+    port: server.port,
+    local: MODEL,
+    nativeMessage: (msg) => (msg.action === 'get-version' ? { status: 'success', version: hostVersion } : { status: 'error', error: 'Unknown action' })
+  });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  const same = await bg.send({ action: 'check-host-version' });
+  assert.equal(same.state, 'ok', 'host가 바뀌지 않은 릴리스에서는 안내하지 않는다');
+  assert.equal(same.required, MIN_HOST_VERSION);
+  hostVersion = older;
+  const old = await bg.send({ action: 'check-host-version' });
+  assert.equal(old.state, 'outdated');
+});

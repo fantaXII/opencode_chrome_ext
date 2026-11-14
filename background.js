@@ -9,6 +9,7 @@
  */
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
+import { MIN_HOST_VERSION } from './lib/host-version.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 
@@ -401,12 +402,13 @@ function compareVersions(a, b) {
 }
 
 /**
- * 설치된 native host 버전을 확장 버전과 비교한다.
+ * 설치된 native host 버전을 MIN_HOST_VERSION(host가 마지막으로 바뀐 릴리스)과 비교한다.
+ * 확장 버전과 비교하면 host가 그대로인 릴리스에서도 매번 재설치를 안내하게 된다.
  * state: 'ok' | 'outdated' | 'missing'(host 미설치) | 'unknown'(판단 불가 - 안내하지 않음)
  * get-version이 없는 구버전 host는 'Unknown action'을 돌려주므로 outdated로 본다.
  */
 async function checkHostVersion() {
-  const required = chrome.runtime.getManifest().version;
+  const required = MIN_HOST_VERSION;
   try {
     const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-version' });
     let result;
