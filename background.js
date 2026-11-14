@@ -2713,10 +2713,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'get-folder-list': {
           const store = await chrome.storage.local.get([FOLDER_FAVORITES_KEY, FOLDER_RECENT_KEY, FOLDER_HIDDEN_KEY]);
           let serverSessions = [];
-          const port = serverState.available ? serverState.port : null;
+          // SW가 다시 떠서 serverState를 잃었어도 서버 기록을 읽도록 연결을 확인한다.
+          const port = await ensureOpenCodeServer();
           if (port) {
             try {
-              const r = await fetch(`http://127.0.0.1:${port}/session`, { signal: AbortSignal.timeout(5000) });
+              // 기본 목록은 최근 100개라 오래된 폴더가 빠진다. 하위 에이전트 세션은 서버에서 빼고(roots) 넉넉히 받는다.
+              const r = await fetch(`http://127.0.0.1:${port}/session?roots=true&limit=1000`, { signal: AbortSignal.timeout(5000) });
               if (r.ok) serverSessions = await r.json();
             } catch (e) {
               debugLog('WARN', `get-folder-list: session list failed - ${e.message}`);

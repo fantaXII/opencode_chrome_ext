@@ -554,8 +554,8 @@ I18N.ready.then(function() {
     });
     commandDropdown.classList.remove('hidden');
     isDropdownOpen = true;
-    selectedDropdownIndex = 0;
-    highlightDropdownItem(0);
+    // 처음에는 아무것도 고르지 않는다: 직접 입력한 경로 + Enter는 그 경로로 바꿔야 한다(↓/Tab으로 고를 때만 제안 사용).
+    highlightDropdownItem(-1);
   }
 
   async function reinitForTab(tab, reason = 'unknown') {
@@ -2757,13 +2757,13 @@ I18N.ready.then(function() {
         highlightDropdownItem(Math.max(selectedDropdownIndex - 1, 0));
         return;
       }
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && selectedDropdownIndex >= 0 && items[selectedDropdownIndex]) {
         e.preventDefault();
-        if (selectedDropdownIndex >= 0 && items[selectedDropdownIndex]) {
-          selectCommand(items[selectedDropdownIndex]);
-        }
+        selectCommand(items[selectedDropdownIndex]);
         return;
       }
+      // 고른 항목이 없으면(/wd 제안) 드롭다운을 닫고 입력한 그대로 보낸다
+      if (e.key === 'Enter') hideCommandDropdown();
       if (e.key === 'Escape') {
         e.preventDefault();
         hideCommandDropdown();

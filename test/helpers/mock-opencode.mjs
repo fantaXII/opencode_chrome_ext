@@ -22,6 +22,8 @@ export async function startMockOpencode() {
     deleted: [],         // DELETE /session/{id}를 받은 sessionID
     mcpRequests: [],     // /mcp 요청의 [method, path, x-opencode-directory]
     catalogRequests: [], // /command·/agent 요청의 [path, x-opencode-directory]
+    sessionList: [],     // GET /session 응답
+    sessionListQueries: [], // GET /session 요청의 query string
     // (req, res, sessionId) => void. 기본은 즉시 204
     onPrompt: (req, res) => { res.writeHead(204); res.end(); }
   };
@@ -70,6 +72,10 @@ export async function startMockOpencode() {
       return json(res, 200, true);
     }
     if ((m = p.match(/^\/session\/([^/]+)\/message$/))) return json(res, 200, state.messages[m[1]] || []);
+    if (p === '/session' && req.method === 'GET') {
+      state.sessionListQueries.push(url.search);
+      return json(res, 200, state.sessionList);
+    }
     if (p === '/session' && req.method === 'POST') {
       req.resume();
       const id = `ses_mock${state.created.length + 1}`;

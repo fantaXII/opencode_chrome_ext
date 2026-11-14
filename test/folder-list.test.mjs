@@ -78,3 +78,15 @@ test('background: 폴더 변경이 최근에 기록되고, 즐겨찾기 추가·
   list = await bg.send({ action: 'get-folder-list' });
   assert.ok(list.recent.some(r => r.path === '/proj/a'));
 });
+
+test('background: 최근 폴더는 서버 세션 기록에서 온다(SW가 다시 떠 연결 정보가 없어도, 하위 세션 제외·넉넉히 요청)', async (t) => {
+  const server = await startMockOpencode();
+  server.state.sessionList = [ses('/tui/work', 200), ses('/ext/a', 100), ses('/tui/work', 50)];
+  const bg = await loadBackground({ port: server.port, local: { selectedModel: { providerID: 'mock', modelID: 'model' } } });
+  t.after(async () => { bg.cleanup(); await server.close(); });
+
+  const list = await bg.send({ action: 'get-folder-list' }); // init-server 없이
+  assert.deepEqual(list.recent.map(r => [r.path, r.sessions]), [['/tui/work', 2], ['/ext/a', 1]]);
+  assert.match(server.state.sessionListQueries[0], /roots=true/);
+  assert.match(server.state.sessionListQueries[0], /limit=1000/);
+});
