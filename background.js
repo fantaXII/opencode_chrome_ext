@@ -10,6 +10,7 @@
 
 import { createRouterState, routeMessagePartUpdated, routeMessagePartDelta } from './lib/part-router.mjs';
 import { MIN_HOST_VERSION } from './lib/host-version.mjs';
+import { buildFolderList, pushRecent, folderKey } from './lib/folder-list.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 
@@ -927,6 +928,25 @@ function sameDirectory(a, b) {
     return /^[A-Za-z]:/.test(v) ? v.toLowerCase() : v;
   };
   return norm(a) === norm(b);
+}
+
+// 작업 폴더 즐겨찾기·최근·숨김(chrome.storage.local — 확장 업데이트로는 지워지지 않는다). lib/folder-list.mjs 참고.
+const FOLDER_FAVORITES_KEY = 'folderFavorites';
+const FOLDER_RECENT_KEY = 'folderRecent';
+const FOLDER_HIDDEN_KEY = 'folderHidden';
+
+/** 고른 폴더를 최근 목록 맨 앞에 넣고, 숨겨 둔 폴더였으면 숨김을 푼다. */
+async function recordRecentFolder(path) {
+  try {
+    const key = folderKey(path);
+    const store = await chrome.storage.local.get([FOLDER_RECENT_KEY, FOLDER_HIDDEN_KEY]);
+    await chrome.storage.local.set({
+      [FOLDER_RECENT_KEY]: pushRecent(store[FOLDER_RECENT_KEY], path),
+      [FOLDER_HIDDEN_KEY]: (store[FOLDER_HIDDEN_KEY] || []).filter(h => folderKey(h) !== key)
+    });
+  } catch (e) {
+    debugLog('WARN', `recordRecentFolder: ${e.message}`);
+  }
 }
 
 /**
@@ -2662,6 +2682,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // 바꾼 폴더는 새 세션의 기본값이 된다. 다른 탭의 기존 세션은 원래 폴더로 계속 동작하고,
           // 그 탭에서 새 세션을 시작할 때(/new, exit 후 다시 열기 등)부터 이 폴더가 적용된다.
           await chrome.storage.local.set({ workingDirectory: normalized });
+          if (normalized) await recordRecentFolder(normalized);
 
           // opencode 세션은 생성 시점의 x-opencode-directory 헤더로 디렉토리가
           // 고정되며, 이후 헤더 값을 바꿔도 반영되지 않는다. 따라서 이 탭 세션의 폴더와
@@ -2685,6 +2706,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           sendResponse({ success: true, directory: normalized, newSessionId });
+          break;
+        }
+
+        // ---- 작업 폴더 즐겨찾기·최근 목록 ----
+        case 'get-folder-list': {
+          const store = await chrome.storage.local.get([FOLDER_FAVORITES_KEY, FOLDER_RECENT_KEY, FOLDER_HIDDEN_KEY]);
+          let serverSessions = [];
+          const port = serverState.available ? serverState.port : null;
+          if (port) {
+            try {
+              const r = await fetch(`http://127.0.0.1:${port}/session`, { signal: AbortSignal.timeout(5000) });
+              if (r.ok) serverSessions = await r.json();
+            } catch (e) {
+              debugLog('WARN', `get-folder-list: session list failed - ${e.message}`);
+            }
+          }
+          const list = buildFolderList({
+            sessions: Array.isArray(serverSessions) ? serverSessions : [],
+            recent: store[FOLDER_RECENT_KEY] || [],
+            favorites: store[FOLDER_FAVORITES_KEY] || [],
+            hidden: store[FOLDER_HIDDEN_KEY] || [],
+            runtime: serverState.runtime || null
+          });
+          sendResponse({ success: true, ...list });
+          break;
+        }
+
+        case 'set-folder-favorite': {
+          const path = String(message.path || '').trim();
+          if (!path) { sendResponse({ success: false }); break; }
+          const key = folderKey(path);
+          const favs = (await chrome.storage.local.get(FOLDER_FAVORITES_KEY))[FOLDER_FAVORITES_KEY] || [];
+          const rest = favs.filter(f => folderKey(f.path) !== key);
+          const existing = favs.find(f => folderKey(f.path) === key);
+          let next = rest;
+          if (message.favorite) {
+            const name = typeof message.name === 'string' ? message.name.trim().slice(0, 60) : (existing?.name || '');
+            const entry = { path: existing?.path || path, name, addedAt: existing?.addedAt || Date.now() };
+            // 이미 있으면 자리를 유지(이름만 바꿈), 새로 넣으면 맨 뒤
+            next = existing ? favs.map(f => (folderKey(f.path) === key ? entry : f)) : [...favs, entry];
+          }
+          await chrome.storage.local.set({ [FOLDER_FAVORITES_KEY]: next });
+          sendResponse({ success: true });
+          break;
+        }
+
+        // 최근 목록에서 지우기. 최근 목록은 서버 세션 기록에서 만들어지므로 지울 수 없어 숨김으로 기록한다
+        // (그 폴더를 다시 고르면 숨김이 풀린다). 세션 자체는 지우지 않는다.
+        case 'hide-recent-folder': {
+          const key = folderKey(message.path);
+          const store = await chrome.storage.local.get([FOLDER_RECENT_KEY, FOLDER_HIDDEN_KEY]);
+          const hidden = (store[FOLDER_HIDDEN_KEY] || []).filter(h => folderKey(h) !== key);
+          hidden.push(message.path);
+          await chrome.storage.local.set({
+            [FOLDER_HIDDEN_KEY]: hidden.slice(-200),
+            [FOLDER_RECENT_KEY]: (store[FOLDER_RECENT_KEY] || []).filter(r => folderKey(r.path) !== key)
+          });
+          sendResponse({ success: true });
           break;
         }
 

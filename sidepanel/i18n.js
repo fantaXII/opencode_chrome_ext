@@ -94,6 +94,21 @@
     '메시지 전송에 실패했습니다.': 'Failed to send the message.',
     '[첨부 파일 — 필요 시 read 도구로 읽어 분석하세요]': '[Attached files — read them with the read tool if needed]',
 
+    // ---- 작업 폴더 즐겨찾기·최근 ----
+    '즐겨찾기·최근 폴더': 'Favorite & recent folders',
+    '지금 서버 실행 환경에서 쓸 수 없는 경로입니다: {path}': 'This path cannot be used by the current server runtime: {path}',
+    '이름 바꾸기': 'Rename',
+    '즐겨찾기에서 빼기': 'Remove from favorites',
+    '즐겨찾기에 추가': 'Add to favorites',
+    '최근 목록에서 지우기 (대화 기록은 남습니다)': 'Remove from recent (conversations are kept)',
+    '불러오는 중…': 'Loading…',
+    '즐겨찾기': 'Favorites',
+    '☆를 눌러 자주 쓰는 폴더를 추가하세요': 'Click ☆ to add folders you use often',
+    '최근 폴더': 'Recent folders',
+    '☆ 현재 폴더 추가': '☆ Add current folder',
+    '다른 폴더 열기…': 'Open another folder…',
+    '경로 입력': 'Type a path',
+
     // ---- MCP ----
     'MCP 서버 없음': 'No MCP servers',
     '비활성': 'Disabled',

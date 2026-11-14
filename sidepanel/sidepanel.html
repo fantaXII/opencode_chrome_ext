@@ -67,7 +67,9 @@
           <span class="folder-icon" id="folder-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
           <span id="working-folder-display" class="working-folder-display" data-i18n>폴더 없음</span>
           <input id="working-folder-input" class="working-folder-input hidden" type="text" placeholder="/path/to/folder">
+          <button id="working-folder-list-btn" class="working-folder-edit-btn" title="즐겨찾기·최근 폴더" aria-label="즐겨찾기·최근 폴더" aria-haspopup="true" aria-expanded="false" data-i18n-title data-i18n-aria-label><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg></button>
           <button id="working-folder-edit-btn" class="working-folder-edit-btn" title="edit" aria-label="edit"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/></svg></button>
+          <div id="folder-dropdown" class="model-dropdown folder-dropdown hidden" role="menu"></div>
         </div>
       </div>
       <div class="input-wrapper">

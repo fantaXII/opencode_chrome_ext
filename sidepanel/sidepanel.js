@@ -219,6 +219,8 @@ I18N.ready.then(function() {
   function setWorkingDirChanging(on) {
     workingFolderWrapper.classList.toggle('changing', on);
     workingFolderEditBtn.disabled = on;
+    folderListBtn.disabled = on;
+    if (on) closeFolderDropdown();
     messageInput.disabled = on || isServerTransitioning();
     if (on) {
       hideCommandDropdown();
@@ -309,6 +311,252 @@ I18N.ready.then(function() {
   });
 
   workingFolderInput.addEventListener('blur', commitWorkingFolder);
+
+  // ---- 작업 폴더 즐겨찾기·최근 목록 ----
+  // 최근 폴더는 서버 세션 기록(+ 확장에서 고른 폴더)에서, 즐겨찾기는 chrome.storage.local에서 온다(background get-folder-list).
+  // 폴더를 고르면 📁·✏️·/wd와 같은 changeWorkingDirectory를 탄다(새 세션, 이전 세션은 남음).
+  const folderListBtn = document.getElementById('working-folder-list-btn');
+  const folderDropdown = document.getElementById('folder-dropdown');
+  let folderListCache = null; // { favorites, recent } — /wd 자동완성에도 쓴다
+
+  const folderBaseName = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
+  const sameFolder = (a, b) => {
+    const k = (p) => { const v = String(p || '').replace(/\\/g, '/').replace(/\/+$/, ''); return /^[A-Za-z]:/.test(v) ? v.toLowerCase() : v; };
+    return k(a) === k(b);
+  };
+
+  async function loadFolderList() {
+    try {
+      const res = await sendMessageToBackground('get-folder-list', {});
+      if (res?.success) folderListCache = { favorites: res.favorites || [], recent: res.recent || [] };
+    } catch {}
+    return folderListCache;
+  }
+
+  function closeFolderDropdown() {
+    folderDropdown.classList.add('hidden');
+    folderListBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  async function openFolderDropdown() {
+    if (workingDirBusy || isServerTransitioning()) return;
+    closeModelDropdown();
+    folderListBtn.setAttribute('aria-expanded', 'true');
+    folderDropdown.classList.remove('hidden');
+    renderFolderDropdown(); // 캐시가 있으면 바로, 없으면 "불러오는 중…"
+    await loadFolderList();
+    if (!folderDropdown.classList.contains('hidden')) renderFolderDropdown();
+  }
+
+  function folderRow(item, { favorite }) {
+    const current = currentWorkingDir || defaultWorkingDir;
+    const row = document.createElement('div');
+    row.className = 'folder-row' + (item.available === false ? ' unavailable' : '');
+
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'model-item' + (sameFolder(item.path, current) ? ' current' : '');
+    const name = document.createElement('span');
+    name.className = 'model-item-name';
+    name.textContent = (favorite && item.name) || folderBaseName(item.path);
+    const sub = document.createElement('span');
+    sub.className = 'folder-item-path';
+    const bdi = document.createElement('bdi');
+    bdi.textContent = item.path;
+    sub.appendChild(bdi);
+    main.append(name, sub);
+    main.title = item.available === false
+      ? t('지금 서버 실행 환경에서 쓸 수 없는 경로입니다: {path}', { path: item.path })
+      : item.path;
+    main.disabled = item.available === false;
+    main.addEventListener('click', () => selectFolder(item.path));
+    row.appendChild(main);
+
+    const btn = (text, title, onClick, on = false) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'folder-row-btn' + (on ? ' on' : '');
+      b.textContent = text;
+      b.title = title;
+      b.setAttribute('aria-label', title);
+      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+      row.appendChild(b);
+    };
+    if (favorite) {
+      btn('✎', t('이름 바꾸기'), () => renameFavorite(row, name, item));
+      btn('★', t('즐겨찾기에서 빼기'), () => setFavorite(item.path, false), true);
+    } else {
+      btn('☆', t('즐겨찾기에 추가'), () => setFavorite(item.path, true));
+      btn('×', t('최근 목록에서 지우기 (대화 기록은 남습니다)'), () => hideRecent(item.path));
+    }
+    return row;
+  }
+
+  function renderFolderDropdown() {
+    folderDropdown.innerHTML = '';
+    const current = currentWorkingDir || defaultWorkingDir;
+    const list = folderListCache;
+    const section = (title) => {
+      const el = document.createElement('div');
+      el.className = 'model-section';
+      const h = document.createElement('div');
+      h.className = 'model-section-title';
+      h.textContent = title;
+      el.appendChild(h);
+      folderDropdown.appendChild(el);
+      return el;
+    };
+
+    if (!list) {
+      const empty = document.createElement('div');
+      empty.className = 'model-empty';
+      empty.textContent = t('불러오는 중…');
+      folderDropdown.appendChild(empty);
+    } else {
+      const favSec = section(t('즐겨찾기'));
+      if (list.favorites.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'model-empty';
+        hint.textContent = t('☆를 눌러 자주 쓰는 폴더를 추가하세요');
+        favSec.appendChild(hint);
+      }
+      for (const f of list.favorites) favSec.appendChild(folderRow(f, { favorite: true }));
+
+      if (list.recent.length) {
+        const recSec = section(t('최근 폴더'));
+        for (const r of list.recent) recSec.appendChild(folderRow(r, { favorite: false }));
+      }
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'folder-actions';
+    const action = (label, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mcp-action-btn';
+      b.textContent = label;
+      b.addEventListener('click', (e) => { e.stopPropagation(); closeFolderDropdown(); onClick(); });
+      actions.appendChild(b);
+    };
+    // 지금 폴더가 즐겨찾기에 없으면 바로 추가할 수 있게 한다
+    if (list && current && !list.favorites.some(f => sameFolder(f.path, current))) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mcp-action-btn';
+      b.textContent = t('☆ 현재 폴더 추가');
+      b.title = current;
+      b.addEventListener('click', (e) => { e.stopPropagation(); setFavorite(current, true); });
+      actions.appendChild(b);
+    }
+    action(t('다른 폴더 열기…'), () => folderIcon.click());
+    action(t('경로 입력'), () => enterEditMode());
+    folderDropdown.appendChild(actions);
+  }
+
+  async function selectFolder(path) {
+    closeFolderDropdown();
+    if (sameFolder(path, currentWorkingDir || defaultWorkingDir)) return;
+    try {
+      await changeWorkingDirectory(async () => ({ directory: path }));
+    } catch (e) {
+      addErrorMessage(t(e.message));
+    }
+    folderListCache = null; // 최근 순서가 바뀌었다
+  }
+
+  async function setFavorite(path, favorite, name) {
+    try {
+      await sendMessageToBackground('set-folder-favorite', { path, favorite, ...(name !== undefined ? { name } : {}) });
+    } catch (e) {
+      addErrorMessage(t(e.message));
+    }
+    await loadFolderList();
+    if (!folderDropdown.classList.contains('hidden')) renderFolderDropdown();
+  }
+
+  async function hideRecent(path) {
+    try { await sendMessageToBackground('hide-recent-folder', { path }); } catch {}
+    await loadFolderList();
+    if (!folderDropdown.classList.contains('hidden')) renderFolderDropdown();
+  }
+
+  function renameFavorite(row, nameEl, item) {
+    const input = document.createElement('input');
+    input.className = 'folder-name-input';
+    input.value = item.name || '';
+    input.placeholder = folderBaseName(item.path);
+    input.maxLength = 60;
+    nameEl.replaceWith(input);
+    row.querySelector('.model-item').disabled = true; // 입력 중 클릭이 폴더 선택이 되지 않게
+    input.focus();
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      if (save) setFavorite(item.path, true, input.value.trim());
+      else renderFolderDropdown();
+    };
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('click', (e) => e.stopPropagation());
+  }
+
+  folderListBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (folderDropdown.classList.contains('hidden')) openFolderDropdown();
+    else closeFolderDropdown();
+  });
+  workingFolderDisplay.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (folderDropdown.classList.contains('hidden')) openFolderDropdown();
+    else closeFolderDropdown();
+  });
+  document.addEventListener('click', (e) => {
+    if (!folderDropdown.classList.contains('hidden') && !folderDropdown.contains(e.target) && !folderListBtn.contains(e.target)) {
+      closeFolderDropdown();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !folderDropdown.classList.contains('hidden')) {
+      closeFolderDropdown();
+      folderListBtn.focus();
+    }
+  });
+
+  // /wd 자동완성: 즐겨찾기(쓸 수 있는 것)와 최근 폴더 중 입력과 맞는 것. 고르면 바로 바꾼다.
+  async function showFolderSuggestions(query) {
+    const list = folderListCache || await loadFolderList();
+    if (!list || !messageInput.value.startsWith('/wd ')) return;
+    const q = query.trim().toLowerCase();
+    const seen = new Set();
+    const items = [
+      ...list.favorites.filter(f => f.available !== false).map(f => ({ path: f.path, label: f.name ? `★ ${f.name}` : '★' })),
+      ...list.recent.map(r => ({ path: r.path, label: '' }))
+    ].filter(i => {
+      if (seen.has(i.path)) return false;
+      seen.add(i.path);
+      return !q || i.path.toLowerCase().includes(q) || i.label.toLowerCase().includes(q);
+    }).slice(0, 8);
+    if (!items.length) { hideCommandDropdown(); return; }
+
+    commandDropdown.innerHTML = items.map((it, i) => `
+      <div class="command-item" data-index="${i}" data-slash="${escapeHtml('/wd ' + it.path)}" data-has-arg="false">
+        <span class="command-name">${escapeHtml(it.label || folderBaseName(it.path))}</span>
+        <span class="command-desc">${escapeHtml(it.path)}</span>
+      </div>
+    `).join('');
+    commandDropdown.querySelectorAll('.command-item').forEach(item => {
+      item.addEventListener('mousedown', e => { e.preventDefault(); selectCommand(item); });
+    });
+    commandDropdown.classList.remove('hidden');
+    isDropdownOpen = true;
+    selectedDropdownIndex = 0;
+    highlightDropdownItem(0);
+  }
 
   async function reinitForTab(tab, reason = 'unknown') {
     currentTabId = tab.id;
@@ -2482,6 +2730,8 @@ I18N.ready.then(function() {
     const val = messageInput.value;
     if (val.startsWith('/') && !val.includes(' ')) {
       showCommandDropdown(val);
+    } else if (val.startsWith('/wd ')) {
+      showFolderSuggestions(val.slice(4));
     } else {
       hideCommandDropdown();
     }
