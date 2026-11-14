@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.22.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.22.0...v2.22.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* 숨은 사이드패널이 다른 탭의 선택 텍스트·탭 전환을 가로채지 않게 수정 ([6c81d0f](https://github.com/fantaXII/opencode_chrome_ext/commit/6c81d0f14d552b7d6882d1a8859baec84a50eff3))
+
 # [2.22.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.21.1...v2.22.0) (2026-11-14)
 
 
