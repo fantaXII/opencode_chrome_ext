@@ -1,5 +1,17 @@
 # Changelog
 
+# [2.23.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.22.1...v2.23.0) (2026-11-15)
+
+
+### Bug Fixes
+
+* 응답 진행 표시·토스트가 모델/폴더 드롭다운·입력 영역과 겹치지 않게 수정 ([265b195](https://github.com/fantaXII/opencode_chrome_ext/commit/265b19538e6c6b23f42141c5568c4a995c2148cb)), closes [#loading-indicator](https://github.com/fantaXII/opencode_chrome_ext/issues/loading-indicator)
+
+
+### Features
+
+* 페이지 빠른 실행 버튼과 브라우저 기준 본문 읽기 ([f5f8c0e](https://github.com/fantaXII/opencode_chrome_ext/commit/f5f8c0e38ed391dc0166aa47812bd77d863e0a7a))
+
 ## [2.22.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.22.0...v2.22.1) (2026-11-14)
 
 
