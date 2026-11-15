@@ -50,6 +50,11 @@
       </div>
     </div>
     <div class="input-area" id="input-area">
+      <!-- 응답 진행 표시. 화면 위에 떠 있으면 위로 열리는 모델·폴더 드롭다운과 겹쳐서 입력 영역 맨 위(흐름 안)에 둔다 -->
+      <div id="loading-indicator" class="loading-indicator hidden">
+        <div class="spinner"></div>
+        <span id="loading-text" data-i18n>응답 대기 중...</span>
+      </div>
       <div id="attachments-bar" class="attachments-bar hidden"></div>
       <div class="selectors-wrapper">
         <div class="agent-model-row">
@@ -83,11 +88,6 @@
         <button id="send-btn" class="send-btn" aria-label="보내기" data-i18n-aria-label disabled><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
       </div>
     </div>
-  </div>
-
-  <div id="loading-indicator" class="loading-indicator hidden">
-    <div class="spinner"></div>
-    <span id="loading-text" data-i18n>응답 대기 중...</span>
   </div>
 
   <div id="connecting-indicator" class="connecting-indicator hidden">

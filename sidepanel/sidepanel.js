@@ -4346,6 +4346,8 @@ I18N.ready.then(function() {
   function showToast(message) {
     const toast = document.getElementById('toast');
     toast.textContent = message;
+    // 입력 영역(진행 표시·모델/폴더 줄 포함) 바로 위에 띄운다. 입력 영역 높이는 진행 표시·첨부·입력 줄 수에 따라 바뀐다.
+    toast.style.bottom = `${(inputArea?.offsetHeight || 112) + 8}px`;
     toast.classList.add('show');
     clearTimeout(toast._hideTimer);
     toast._hideTimer = setTimeout(() => toast.classList.remove('show'), 2500);
