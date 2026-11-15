@@ -9,6 +9,7 @@ export async function startMockOpencode() {
   const state = {
     aborts: [],          // POST /session/{id}/abort를 받은 sessionID
     prompts: [],         // prompt_async를 받은 sessionID
+    promptBodies: [],    // prompt_async 요청 본문(JSON). 받은 순서대로
     statusMap: {},       // GET /session/status 응답
     // 실제 opencode는 세션 상태를 디렉터리 instance별로 둔다(?directory= → x-opencode-directory → 서버 cwd 순).
     // 값을 주면 이 디렉터리로 요청했을 때만 statusMap을, 아니면 {}를 돌려준다(opencode 1.19.4 실측과 같은 동작).
@@ -64,6 +65,11 @@ export async function startMockOpencode() {
     if ((m = p.match(/^\/session\/([^/]+)\/prompt_async$/))) {
       state.prompts.push(m[1]);
       state.promptDirs.push(req.headers['x-opencode-directory'] || null);
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        try { state.promptBodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { state.promptBodies.push(null); }
+      });
       req.resume();
       return state.onPrompt(req, res, m[1]);
     }

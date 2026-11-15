@@ -13,6 +13,7 @@ import { MIN_HOST_VERSION } from './lib/host-version.mjs';
 import { buildFolderList, pushRecent, folderKey, mergeFavorites, parseFavoritesFile, FAVORITES_EXPORT_TYPE } from './lib/folder-list.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
+import { normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf } from './lib/quick-actions.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -38,6 +39,8 @@ const STREAM_QUIET_CHECK_MS = 60000;        // 이만큼 조용하면 /session/s
 const STREAM_SERVER_LOST_CHECKS = 3;        // 상태 확인이 연속 이만큼 실패하면 서버가 사라진 것으로 본다
 const QUEUE_IDLE_GRACE_MS = 3000;           // 대기 메시지가 남은 채 idle이 오면 이만큼 기다렸다 다시 확인한다
 const PROMPT_SEND_TIMEOUT_MS = 15000;       // prompt_async 요청 자체의 제한
+const PAGE_BODY_MAX_CHARS = 50000;          // 브라우저에서 읽어 보내는 페이지 본문 상한
+const PAGE_BODY_MIN_CHARS = 200;            // 이보다 짧으면 본문을 읽지 못한 것으로 보고 안내한다
 
 // ============================================
 // 디버그 로거 (chrome.storage.local 원형버퍼)
@@ -1277,16 +1280,26 @@ async function releaseSession(sessionId, reason) {
  * 프롬프트에 붙일 현재 페이지 정보의 범위 (chrome.storage.local.pageContext)
  *  - 'off'   : 아무것도 붙이지 않음
  *  - 'basic' : 제목·URL (기본값)
- *  - 'full'  : 제목·URL + 본문 일부(제목들, 문단 10개) + 선택한 텍스트.
- *              페이지를 읽으려면 선택적 호스트 권한(<all_urls>)이 필요하고, 사이드패널 설정에서 사용자가 허용한다.
+ *  - 'full'  : 제목·URL + 브라우저에서 읽은 본문(Readability → main → body, PAGE_BODY_MAX_CHARS까지) + 선택한 텍스트.
+ *              페이지를 읽으려면 선택적 호스트 권한(<all_urls> 또는 그 사이트)이 필요하고, 사이드패널에서 사용자가 허용한다.
+ * 이 전역 값보다 우선하는 것: 빠른 실행 버튼·"브라우저 기준으로 읽기"의 일회성 읽기(readPage),
+ * 세션별 설정 storage.session.sessionPageContext[sessionId](= 'full', webfetch 실패 카드의 "이 세션에서 계속").
  */
 const PAGE_CONTEXT_MODES = ['off', 'basic', 'full'];
 
 // 프롬프트 앞에 붙이는 페이지 정보 머리말. sidepanel.js PAGE_CONTEXT_* 패턴과 반드시 같이 고친다.
+// 본문·선택 텍스트는 빈 줄을 포함하므로 <page-content>/<selected-text> 태그로 감싸 끝을 표시한다(히스토리 복원 때 벗겨낸다).
 const PAGE_CONTEXT_LABELS = {
-  ko: { header: '현재 페이지 정보:', title: '제목:', headings: '제목들:', paragraphs: '내용 요약:', selection: '선택한 텍스트:' },
-  en: { header: 'Current page:', title: 'Title:', headings: 'Headings:', paragraphs: 'Content excerpt:', selection: 'Selected text:' }
+  ko: { header: '현재 페이지 정보:', title: '제목:', body: '페이지 본문(브라우저에서 읽음):', bodyTruncated: '페이지 본문(브라우저에서 읽음, 앞 {n}자만):', selection: '선택한 텍스트:' },
+  en: { header: 'Current page:', title: 'Title:', body: 'Page content (read from the browser):', bodyTruncated: 'Page content (read from the browser, first {n} characters):', selection: 'Selected text:' }
 };
+const PAGE_SECTION_TAGS = { body: 'page-content', selection: 'selected-text' };
+
+/** 태그로 감쌀 내용에 닫는 태그가 들어 있으면 끝 표시가 어긋나므로 무력화한다. */
+function wrapPageSection(tag, label, text) {
+  const safe = String(text).replace(/<\/(page-content|selected-text)>/gi, '</ $1>');
+  return `${label}\n<${tag}>\n${safe}\n</${tag}>\n\n`;
+}
 
 async function getUiLang() {
   try {
@@ -1314,25 +1327,115 @@ async function getPageContextMode() {
   }
 }
 
+/** 세션별 페이지 정보 범위('full'만 둔다). 없으면 null → 전역 설정을 따른다. */
+async function getSessionPageContext(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const { sessionPageContext } = await chrome.storage.session.get('sessionPageContext');
+    return sessionPageContext?.[sessionId] === 'full' ? 'full' : null;
+  } catch {
+    return null;
+  }
+}
+
 // 탭 안에서 실행되는 함수 — 바깥 스코프를 참조할 수 없다(executeScript가 직렬화해 주입).
-function readPageContentInTab() {
+// 먼저 주입한 lib/Readability.js의 전역 Readability가 같은 isolated world에 있으면 그것으로 본문을 고른다.
+function readPageContentInTab(maxChars, minChars) {
   const sel = (window.getSelection()?.toString() || '').trim();
+  const BLOCKS = 'p,div,section,article,header,footer,aside,nav,main,h1,h2,h3,h4,h5,h6,li,dt,dd,tr,pre,blockquote,figcaption,table,ul,ol';
+  // HTML 조각을 줄바꿈이 살아 있는 텍스트로 바꾼다. DOMParser 문서는 스크립트를 실행하지 않고 이미지도 받지 않는다.
+  const htmlToText = (html) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script,style,noscript,template').forEach((el) => el.remove());
+    doc.querySelectorAll('br').forEach((el) => el.replaceWith('\n'));
+    doc.querySelectorAll(BLOCKS).forEach((el) => { el.before('\n'); el.after('\n'); });
+    doc.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach((el) => el.prepend('#'.repeat(Number(el.tagName[1])) + ' '));
+    doc.querySelectorAll('li').forEach((el) => el.prepend('- '));
+    return doc.body ? doc.body.textContent : '';
+  };
+  const tidy = (text) => String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .split('\n').map((l) => l.trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  let text = '';
+  let source = '';
+  try {
+    if (typeof Readability === 'function') {
+      // Readability는 넘긴 문서를 고치므로 복제본을 넘긴다.
+      const article = new Readability(document.cloneNode(true), { charThreshold: minChars }).parse();
+      const t = tidy(article?.content ? htmlToText(article.content) : article?.textContent);
+      if (t.length >= minChars) { text = t; source = 'readability'; }
+    }
+  } catch (e) { /* 다음 방법으로 */ }
+  if (!text) {
+    const main = document.querySelector('main, [role="main"], article');
+    const t = tidy(main?.innerText);
+    if (t.length >= minChars) { text = t; source = 'main'; }
+  }
+  if (!text) {
+    text = tidy(document.body?.innerText);
+    source = 'body';
+  }
+  const length = text.length;
+  const truncated = length > maxChars;
   return {
-    headings: Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 30).map(h => h.innerText.trim()).filter(Boolean),
-    paragraphs: Array.from(document.querySelectorAll('p')).slice(0, 10).map(p => p.innerText.trim()).filter(Boolean),
+    text: truncated ? text.slice(0, maxChars) : text,
+    source,
+    length,
+    truncated,
+    tooShort: length < minChars,
     selectedText: sel ? sel.slice(0, 20000) : null
   };
 }
 
+async function loadQuickActions() {
+  try {
+    return normalizeQuickActions((await chrome.storage.local.get('quickActions')).quickActions);
+  } catch {
+    return normalizeQuickActions(undefined);
+  }
+}
+
+/** 저장하고 모든 사이드패널에 알린다(다른 창·탭의 패널도 버튼을 다시 그린다). */
+async function storeQuickActions(list) {
+  await chrome.storage.local.set({ quickActions: list });
+  chrome.runtime.sendMessage({ action: 'quick-actions-updated' }).catch(() => {});
+}
+
+/** 활성 탭에 Readability를 넣고 본문을 읽는다. 권한이 없거나 읽을 수 없는 페이지(chrome://, Web Store 등)면 예외. */
+async function readPageContent(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['lib/Readability.js'] });
+  } catch (e) {
+    // Readability 없이도 main/body로 읽을 수 있으므로 계속한다(권한 문제면 아래 호출도 실패한다).
+    debugLog('INFO', `Readability inject failed - ${e.message}`);
+  }
+  const [injection] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: readPageContentInTab,
+    args: [PAGE_BODY_MAX_CHARS, PAGE_BODY_MIN_CHARS]
+  });
+  if (!injection?.result) throw new Error('no result');
+  return injection.result;
+}
+
 /**
  * 현재 탭 정보를 가져오기
- * @param {{ forPrompt?: boolean }} opts forPrompt면 pageContext 설정에 따라 전송할 범위만 담는다.
+ * @param {{ forPrompt?: boolean, sessionId?: string, readPage?: boolean }} opts
+ *   forPrompt: pageContext 설정(세션별 설정이 있으면 그것)에 따라 전송할 범위만 담는다.
+ *   readPage : 설정과 무관하게 이번 한 번은 본문을 읽는다(빠른 실행 버튼, "브라우저 기준으로 읽기").
+ * 반환값의 pageRead = { mode, status: 'ok'|'short'|'failed'|null, chars, truncated, source }는 사이드패널 안내용이다.
  */
-async function getCurrentTabInfo({ forPrompt = false } = {}) {
+async function getCurrentTabInfo({ forPrompt = false, sessionId = null, readPage = false } = {}) {
   const empty = { tabId: null, url: '', title: '', favIconUrl: '' };
   try {
-    const mode = forPrompt ? await getPageContextMode() : 'basic';
-    if (mode === 'off') return empty;
+    let mode = 'basic';
+    if (readPage) mode = 'full';
+    else if (forPrompt) mode = (await getSessionPageContext(sessionId)) || await getPageContextMode();
+    if (mode === 'off') return { ...empty, pageRead: { mode, status: null } };
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return empty;
@@ -1341,18 +1444,26 @@ async function getCurrentTabInfo({ forPrompt = false } = {}) {
       tabId: tab.id,
       url: tab.url,
       title: tab.title,
-      favIconUrl: tab.favIconUrl
+      favIconUrl: tab.favIconUrl,
+      pageRead: { mode, status: null, url: tab.url }
     };
 
     if (mode === 'full') {
       try {
-        // <all_urls> 선택 권한(또는 activeTab)이 있을 때만 성공한다. chrome://, Web Store 등은 실패 → 제목·URL만 보낸다.
-        const [injection] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: readPageContentInTab
-        });
-        if (injection?.result) result.pageContent = injection.result;
+        // 호스트 권한(<all_urls> 또는 그 사이트)이 있을 때만 성공한다. chrome://, Web Store 등은 실패 → 제목·URL만 보낸다.
+        const content = await readPageContent(tab.id);
+        result.pageContent = content;
+        result.pageRead = {
+          mode,
+          url: tab.url,
+          status: content.tooShort ? 'short' : 'ok',
+          chars: content.text.length,
+          truncated: content.truncated,
+          source: content.source
+        };
+        debugLog('INFO', `page content read - source=${content.source}, chars=${content.length}, truncated=${content.truncated}`);
       } catch (e) {
+        result.pageRead = { mode, status: 'failed', url: tab.url };
         debugLog('INFO', `page content not read - ${e.message}`);
       }
     }
@@ -1420,14 +1531,12 @@ ${L.header}
     }
     if (tabInfo.pageContent) {
       const content = tabInfo.pageContent;
-      if (content.headings?.length) {
-        pageContext += `${L.headings}\n${content.headings.join('\n')}\n\n`;
-      }
-      if (content.paragraphs?.length) {
-        pageContext += `${L.paragraphs}\n${content.paragraphs.join('\n')}\n\n`;
+      if (content.text) {
+        const label = content.truncated ? L.bodyTruncated.replace('{n}', String(content.text.length)) : L.body;
+        pageContext += wrapPageSection(PAGE_SECTION_TAGS.body, label, content.text);
       }
       if (content.selectedText) {
-        pageContext += `${L.selection}\n${content.selectedText}\n\n`;
+        pageContext += wrapPageSection(PAGE_SECTION_TAGS.selection, L.selection, content.selectedText);
       }
     }
     fullMessage = pageContext + message;
@@ -2508,7 +2617,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               });
             }
           }
-          const tabInfo = await getCurrentTabInfo({ forPrompt: true });
+          // readPage: 빠른 실행 버튼·"브라우저 기준으로 읽기" — 이번 한 번은 설정과 무관하게 본문을 읽어 보낸다
+          const tabInfo = await getCurrentTabInfo({ forPrompt: true, sessionId: message.sessionId, readPage: message.readPage === true });
           let replacedSessionId = null;
 
           const doSendMessage = async (sid) => {
@@ -2568,7 +2678,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               throw err;
             }
           }
-          sendResponse({ success: true });
+          sendResponse({ success: true, ...(tabInfo.pageRead && { pageRead: tabInfo.pageRead }) });
           break;
         }
 
@@ -2599,11 +2709,72 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // 응답 중에 보낸 메시지: 진행 중인 구독을 유지한 채 서버 큐에 넣는다(queueMessage 참고).
         case 'queue-message': {
-          const tabInfo = await getCurrentTabInfo({ forPrompt: true });
+          const tabInfo = await getCurrentTabInfo({ forPrompt: true, sessionId: message.sessionId, readPage: message.readPage === true });
           const result = await queueMessage(message.sessionId, message.message, tabInfo);
-          sendResponse({ success: true, ...result });
+          sendResponse({ success: true, ...result, ...(tabInfo.pageRead && { pageRead: tabInfo.pageRead }) });
           break;
         }
+
+        // webfetch 실패 카드의 "이 세션에서 계속": 이 세션은 전역 설정과 무관하게 본문을 읽어 보낸다(브라우저를 닫으면 사라진다).
+        case 'set-session-page-context': {
+          const { sessionId, mode } = message;
+          if (!sessionId) throw new Error('세션이 없습니다.');
+          const { sessionPageContext = {} } = await chrome.storage.session.get('sessionPageContext');
+          if (mode === 'full') sessionPageContext[sessionId] = 'full';
+          else delete sessionPageContext[sessionId];
+          await chrome.storage.session.set({ sessionPageContext });
+          debugLog('INFO', `set-session-page-context: sessionId=${sessionId}, mode=${mode === 'full' ? 'full' : 'default'}`);
+          sendResponse({ success: true });
+          break;
+        }
+
+        case 'get-session-page-context':
+          sendResponse({ success: true, mode: (await getSessionPageContext(message.sessionId)) || null });
+          break;
+
+        // 페이지 말풍선의 빠른 실행 버튼 (lib/quick-actions.mjs). url이 있으면 그 페이지에서 보이는 것만 visible로 표시한다.
+        case 'get-quick-actions': {
+          const list = await loadQuickActions();
+          const host = hostnameOf(message.url || '');
+          sendResponse({
+            success: true,
+            actions: list.map((a) => ({ ...a, visible: isQuickActionVisible(a, host) })),
+            hiddenBuiltins: list.filter((a) => a.builtin && a.enabled === false).length
+          });
+          break;
+        }
+
+        case 'save-quick-action': {
+          const list = await loadQuickActions();
+          const res = upsertQuickAction(list, message.quickAction || {});
+          if (!res.ok) {
+            sendResponse({ success: false, error: res.error, params: res.params });
+            break;
+          }
+          await storeQuickActions(res.list);
+          sendResponse({ success: true, action: res.action });
+          break;
+        }
+
+        case 'delete-quick-action':
+          await storeQuickActions(removeQuickAction(await loadQuickActions(), message.id));
+          sendResponse({ success: true });
+          break;
+
+        case 'set-quick-action-enabled':
+          await storeQuickActions(setQuickActionEnabled(await loadQuickActions(), message.id, message.enabled));
+          sendResponse({ success: true });
+          break;
+
+        case 'show-all-quick-actions':
+          await storeQuickActions(enableAllBuiltins(await loadQuickActions()));
+          sendResponse({ success: true });
+          break;
+
+        case 'move-quick-action':
+          await storeQuickActions(moveQuickAction(await loadQuickActions(), message.id, message.dir, hostnameOf(message.url || '')));
+          sendResponse({ success: true });
+          break;
 
         case 'has-tab-session':
           sendResponse({ has: tabSessions.has(message.tabId) });

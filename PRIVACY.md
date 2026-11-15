@@ -1,6 +1,6 @@
 # Privacy Policy / 개인정보처리방침
 
-**Last updated / 최종 수정일: 2026-11-11**
+**Last updated / 최종 수정일: 2026-11-15**
 
 ---
 
@@ -14,8 +14,8 @@
 |------|------|---------------|
 | Messages you type, files you attach (file paths) | When you send a message | The OpenCode server on your computer (`127.0.0.1`) |
 | Current tab's **title and URL** | When you send a message (default setting "Title & URL") | Same as above |
-| Current tab's **page content** (headings, up to 10 paragraphs) and **selected text** | Only when you choose "Title, URL, content & selection" in ⚙ Settings **and** grant page access | Same as above |
-| Settings (model, working folder, language, runtime, proxy), debug log | Stored on your device | `chrome.storage` in your browser, and a local log file of the native host |
+| Current tab's **page content** (main text extracted from the page as shown in your browser, up to 50,000 characters) and **selected text** | Only when (a) you choose "Title, URL, content & selection" in ⚙ Settings, (b) you click a quick action button on the page bubble (e.g. "Summary") that is set to send page content, or (c) you choose "Read this time" / "Keep for this session" after the server failed to fetch the page — **and** you granted page access (for that site or all sites) | Same as above |
+| Settings (model, working folder, language, runtime, proxy, quick action buttons you created), debug log | Stored on your device | `chrome.storage` in your browser, and a local log file of the native host |
 
 ### Data sent to third parties
 
@@ -27,7 +27,7 @@ You can turn off page information entirely by choosing "Do not send" for **Page 
 
 - No analytics, tracking, advertising, or telemetry.
 - Data is not sold, and is not used for any purpose other than the chat feature you are using.
-- Page content is read only at the moment you send a message, only from the active tab, and only if you enabled it. The extension does not monitor your browsing in the background.
+- Page content is read only at the moment you send a message, only from the active tab, and only if you enabled it or clicked a button that sends it. The extension does not monitor your browsing in the background.
 
 ### Native messaging host
 
@@ -45,8 +45,8 @@ The optional Windows native host (installed separately) only starts/stops the lo
 |--------|------|-----------|
 | 입력한 메시지, 첨부한 파일(경로) | 메시지를 보낼 때 | 사용자 PC의 OpenCode 서버(`127.0.0.1`) |
 | 현재 탭의 **제목·URL** | 메시지를 보낼 때 (기본 설정 "제목·URL") | 위와 같음 |
-| 현재 탭의 **페이지 내용**(제목들, 문단 최대 10개)과 **선택한 텍스트** | ⚙ 설정에서 "제목·URL·본문·선택 텍스트"를 고르고 **페이지 읽기 권한을 허용한 경우에만** | 위와 같음 |
-| 설정값(모델, 작업 폴더, 언어, 실행 환경, 프록시), 디버그 로그 | 기기에 저장 | 브라우저의 `chrome.storage`, Native Host의 로컬 로그 파일 |
+| 현재 탭의 **페이지 내용**(브라우저에 보이는 페이지에서 추출한 본문, 최대 50,000자)과 **선택한 텍스트** | (가) ⚙ 설정에서 "제목·URL·본문·선택 텍스트"를 골랐거나, (나) 페이지 말풍선의 빠른 실행 버튼(예: "요약") 중 본문을 함께 보내도록 된 버튼을 눌렀거나, (다) 서버가 페이지를 가져오지 못했을 때 "이번만 읽기"/"이 세션에서 계속"을 고른 경우로서, **페이지 읽기 권한(그 사이트 또는 모든 사이트)을 허용한 경우에만** | 위와 같음 |
+| 설정값(모델, 작업 폴더, 언어, 실행 환경, 프록시, 직접 만든 빠른 실행 버튼), 디버그 로그 | 기기에 저장 | 브라우저의 `chrome.storage`, Native Host의 로컬 로그 파일 |
 
 ### 제3자에게 전달되는 데이터
 
@@ -58,7 +58,7 @@ OpenCode는 응답을 생성하기 위해 메시지(위와 같이 첨부된 페�
 
 - 분석, 추적, 광고, 원격 측정(telemetry)을 사용하지 않습니다.
 - 데이터를 판매하지 않으며, 사용 중인 채팅 기능 외의 목적으로 사용하지 않습니다.
-- 페이지 내용은 사용자가 켠 경우에만, 메시지를 보내는 순간에, 활성 탭에서만 읽습니다. 백그라운드에서 브라우징을 감시하지 않습니다.
+- 페이지 내용은 사용자가 켰거나 본문을 보내는 버튼을 누른 경우에만, 메시지를 보내는 순간에, 활성 탭에서만 읽습니다. 백그라운드에서 브라우징을 감시하지 않습니다.
 
 ### Native Messaging Host
 

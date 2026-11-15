@@ -70,6 +70,9 @@ I18N.ready.then(function() {
   let currentSessionId = null;
   let currentTabId = null;
   let isLoading = false;
+  let currentPageUrl = ''; // 이 패널이 보여 주는 탭의 현재 페이지(페이지 말풍선·reinit 때 갱신)
+  let lastPromptPage = null; // { key, url, bodySent, mode } — 보낼 때의 페이지(webfetch 실패 제안 판단용)
+  let pageReadOffer = null;  // { kind: 'error'|'completed', url } — 응답이 끝나면 띄울 "브라우저 기준으로 읽기" 제안
   let availableModels = [];
   let selectedModel = null;
   const RECENT_MODELS_MAX = 5;
@@ -587,6 +590,9 @@ I18N.ready.then(function() {
 
   async function reinitForTab(tab, reason = 'unknown') {
     currentTabId = tab.id;
+    currentPageUrl = tab.url || '';
+    lastPromptPage = null;
+    pageReadOffer = null;
     currentSessionId = null;
     setLoadingState(false);
     pendingQueue = []; // 이전 탭 대화의 대기 메시지(말풍선은 아래에서 지워진다)
@@ -723,18 +729,33 @@ I18N.ready.then(function() {
   // 히스토리 복원 시에도 동일하게 이 프리픽스를 벗겨내 일관성을 맞춘다.
   // 머리말은 보낼 때의 언어 설정에 따라 한국어/영어 중 하나다(background.js PAGE_CONTEXT_LABELS와 짝).
   const PAGE_CONTEXT_HEADER_RE = /^\n---\n(?:현재 페이지 정보:\n- 제목: |Current page:\n- Title: ).*\n- URL: .*\n/;
+  // 예전 형식(제목들/내용 요약/선택한 텍스트, 빈 줄로 끝남). 서버 기록에 남아 있으므로 계속 인식한다.
   const PAGE_CONTEXT_SECTION_LABELS = ['제목들:\n', '내용 요약:\n', '선택한 텍스트:\n', 'Headings:\n', 'Content excerpt:\n', 'Selected text:\n'];
+  // 지금 형식: "<라벨>\n<page-content>\n…\n</page-content>\n\n" (본문·선택 텍스트는 빈 줄을 포함하므로 태그로 끝을 표시)
+  const PAGE_CONTEXT_TAGGED_RE = /^[^\n]*:\n<(page-content|selected-text)>\n/;
 
-  function stripPageContext(raw) {
+  /** 페이지 정보 머리말을 벗겨 원문과 본문 포함 여부를 돌려준다. */
+  function parsePageContext(raw) {
     const headerMatch = raw.match(PAGE_CONTEXT_HEADER_RE);
-    if (!headerMatch) return raw;
+    if (!headerMatch) return { text: raw, pageBody: false };
     let rest = raw.slice(headerMatch[0].length);
-    for (const label of PAGE_CONTEXT_SECTION_LABELS) {
-      if (!rest.startsWith(label)) continue;
+    let pageBody = false;
+    for (;;) {
+      const tagged = rest.match(PAGE_CONTEXT_TAGGED_RE);
+      if (tagged) {
+        const close = `\n</${tagged[1]}>\n\n`;
+        const end = rest.indexOf(close, tagged[0].length - 1);
+        if (end === -1) break;
+        if (tagged[1] === 'page-content') pageBody = true;
+        rest = rest.slice(end + close.length);
+        continue;
+      }
+      const label = PAGE_CONTEXT_SECTION_LABELS.find((l) => rest.startsWith(l));
+      if (!label) break;
       const sepIndex = rest.indexOf('\n\n', label.length);
       rest = sepIndex === -1 ? '' : rest.slice(sepIndex + 2);
     }
-    return rest;
+    return { text: rest, pageBody };
   }
 
   // 서버에서 세션의 전체 대화를 가져와 다시 그린다. 탭 전환이 연달아 일어나면
@@ -785,8 +806,10 @@ I18N.ready.then(function() {
         if (!inProgress && m.text && m.text.trim()) { // tool-only 턴 등 텍스트 없는 메시지는 건너뜀
           if (m.role === 'user') {
             // 저장 순서는 pageContext + attachmentBlock + 원문이므로 이 순서대로 벗겨낸다.
-            const { text, attachments } = splitAttachmentBlock(stripPageContext(m.text));
+            const page = parsePageContext(m.text);
+            const { text, attachments } = splitAttachmentBlock(page.text);
             const el = addUserMessage(text, attachments);
+            if (page.pageBody) setPageReadBadge(el, { status: 'ok' });
             if (afterTurnStart) userElsAfterTurn.push(el);
             if (turnId && m.id === turnId) {
               streamAnchorEl = el;
@@ -824,6 +847,8 @@ I18N.ready.then(function() {
       <div class="page-note-url">${escapeHtml(url)}</div>
       <div class="page-note-hint">${escapeHtml(t('이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.'))}</div>
     `;
+    currentPageUrl = url || '';
+    attachQuickActions(div, url);
     messagesContainer.insertBefore(div, messagesContainer.firstChild);
     scrollToBottom();
   }
@@ -836,8 +861,472 @@ I18N.ready.then(function() {
       <div class="page-note-title">${escapeHtml(title)}</div>
       <div class="page-note-url">${escapeHtml(url)}</div>
     `;
+    currentPageUrl = url || '';
+    attachQuickActions(div, url);
     messagesContainer.appendChild(div);
     scrollToBottom();
+  }
+
+  // ============================================
+  // 페이지 말풍선의 빠른 실행 버튼 + 브라우저 기준 읽기
+  // ============================================
+  // 목록·검증은 background(lib/quick-actions.mjs)가 맡는다. 버튼은 가장 최근 페이지 말풍선에만 둔다
+  // (이전 페이지의 말풍선에서 누르면 지금 탭의 다른 페이지를 읽게 되므로).
+  // 기본 버튼의 문구·프롬프트는 UI 언어에 맞춰 여기서 붙인다(저장하지 않는다).
+  const BUILTIN_QUICK_ACTIONS = {
+    summary: { label: '📄 요약', prompt: '이 페이지의 내용을 요약해 주세요.' },
+    keypoints: { label: '💡 핵심 3줄', prompt: '이 페이지의 핵심을 3줄로 정리해 주세요.' },
+    translate: { label: '🌐 번역', prompt: '이 페이지의 본문을 한국어로 번역해 주세요.' }
+  };
+
+  function pageHostOf(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.hostname.toLowerCase() : '';
+    } catch {
+      return '';
+    }
+  }
+
+  // 이 사이트만 읽기 권한을 요청할 때의 match pattern (포트는 패턴에 넣지 않는다 — 모든 포트에 맞는다)
+  function pageOriginPattern(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'http:' || u.protocol === 'https:' ? `${u.protocol}//${u.hostname}/*` : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // webfetch 대상과 현재 페이지가 같은지 비교할 때 쓴다. 모델이 쿼리·해시를 빼고 부르는 경우가 많아 경로까지만 본다.
+  function pageKeyOf(url) {
+    try {
+      const u = new URL(url);
+      return `${u.origin}${u.pathname.replace(/\/+$/, '')}`.toLowerCase();
+    } catch {
+      return '';
+    }
+  }
+
+  function quickActionView(action) {
+    if (action.builtin) {
+      const def = BUILTIN_QUICK_ACTIONS[action.id];
+      return def ? { label: t(def.label), prompt: t(def.prompt), readPage: true } : null;
+    }
+    return { label: action.label, prompt: action.prompt, readPage: action.readPage !== false };
+  }
+
+  function attachQuickActions(noteEl, url) {
+    // 이전 페이지 말풍선의 버튼·폼은 치운다(새 페이지가 chrome:// 등이라 버튼을 달지 않아도)
+    messagesContainer.querySelectorAll('.quick-actions, .qa-form').forEach((el) => el.remove());
+    closeQuickActionMenu();
+    if (!pageHostOf(url)) return;
+    const row = document.createElement('div');
+    row.className = 'quick-actions';
+    row.dataset.url = url;
+    noteEl.appendChild(row);
+    refreshQuickActionRow(row);
+  }
+
+  async function refreshQuickActionRow(row) {
+    const url = row.dataset.url;
+    let res;
+    try {
+      res = await sendMessageToBackground('get-quick-actions', { url });
+    } catch (e) {
+      console.warn('get-quick-actions 실패:', e.message);
+      return;
+    }
+    if (!row.isConnected) return;
+    row.textContent = '';
+    row.dataset.hiddenBuiltins = String(res.hiddenBuiltins || 0);
+    for (const action of res.actions || []) {
+      if (!action.visible) continue;
+      const view = quickActionView(action);
+      if (!view) continue;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'quick-action-btn';
+      btn.textContent = view.label;
+      btn.title = `${view.prompt}\n\n${t('우클릭: 편집·이동·숨기기')}`;
+      btn.addEventListener('click', () => runQuickAction(view, url));
+      btn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showQuickActionMenu(e, action, row);
+      });
+      row.appendChild(btn);
+    }
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'quick-action-btn quick-action-add';
+    add.textContent = '＋';
+    add.title = t('빠른 실행 버튼 추가');
+    add.addEventListener('click', () => openQuickActionForm(row, null));
+    row.appendChild(add);
+  }
+
+  function refreshAllQuickActionRows() {
+    messagesContainer.querySelectorAll('.quick-actions').forEach((row) => refreshQuickActionRow(row));
+  }
+
+  /** 지금 프롬프트를 보낼 수 있는지. 안 되면 이유를 토스트로 알린다. */
+  function canSendPreset() {
+    if (isServerTransitioning() || workingDirBusy || !currentSessionId) {
+      showToast(t('지금은 보낼 수 없습니다. 잠시 후 다시 시도하세요.'));
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 브라우저 본문을 읽을 권한을 요청한다. 반드시 클릭 핸들러에서 await 없이 바로 불러야 한다
+   * (permissions.request는 사용자 제스처 안에서만 동작한다). 이미 허용돼 있으면 묻지 않고 true.
+   */
+  function requestPageAccess(url, { allSites = false } = {}) {
+    const origin = allSites ? '<all_urls>' : pageOriginPattern(url);
+    if (!origin) return Promise.resolve(false);
+    return chrome.permissions.request({ origins: [origin] }).catch(() => false);
+  }
+
+  function runQuickAction(view, url) {
+    if (!canSendPreset()) return;
+    const granted = view.readPage ? requestPageAccess(url) : Promise.resolve(false);
+    granted.then((ok) => {
+      if (view.readPage && !ok) showToast(t('페이지 읽기 권한이 허용되지 않아 제목·URL만 보냅니다.'));
+      sendPresetPrompt(view.prompt, { readPage: view.readPage && ok });
+    });
+  }
+
+  /** 입력창을 건드리지 않고(작성 중인 내용·첨부 유지) 정해진 프롬프트를 보낸다. 응답 중이면 대기 메시지로 보낸다. */
+  async function sendPresetPrompt(text, { readPage = false } = {}) {
+    if (!canSendPreset()) return;
+    if (isLoading) {
+      const entry = { el: addUserMessage(text), payload: text, state: 'sending', readPage };
+      pendingQueue.push(entry);
+      setQueueBadge(entry, 'queued');
+      renderProgress();
+      await submitQueued(entry);
+      return;
+    }
+    const el = addUserMessage(text);
+    await startPrompt(text, { readPage, userEl: el });
+  }
+
+  // 사용자 말풍선 아래에 "페이지 본문 포함" 등 브라우저 읽기 결과를 표시한다.
+  function setPageReadBadge(userEl, pageRead) {
+    if (!userEl || !pageRead) return;
+    let text = '';
+    let warn = false;
+    if (pageRead.status === 'ok') {
+      text = pageRead.chars
+        ? t(pageRead.truncated ? '📄 페이지 본문 포함 ({n}자, 앞부분만)' : '📄 페이지 본문 포함 ({n}자)', { n: pageRead.chars.toLocaleString() })
+        : t('📄 페이지 본문 포함');
+    } else if (pageRead.status === 'short') {
+      text = t('⚠ 페이지 본문을 거의 읽지 못했습니다. 원하는 부분을 선택한 뒤 다시 요청하세요.');
+      warn = true;
+    } else if (pageRead.status === 'failed') {
+      text = t('⚠ 이 페이지는 읽을 수 없어 제목·URL만 보냈습니다.');
+      warn = true;
+    } else {
+      return;
+    }
+    const content = userEl.querySelector('.message-content');
+    if (!content) return;
+    let badge = content.querySelector('.page-read-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'page-read-badge';
+      content.appendChild(badge);
+    }
+    badge.classList.toggle('warn', warn);
+    badge.textContent = text;
+  }
+
+  // ---- webfetch 실패 폴백 ----
+  // 본문 없이(제목·URL만) 보낸 프롬프트에 모델이 현재 페이지를 webfetch로 가져오려 했다면, 응답이 끝난 뒤
+  // "브라우저에 열린 내용으로 읽을까요?"를 제안한다. webfetch는 브라우저 쿠키 없이 서버에서 요청하므로
+  // 로그인·사내망 페이지는 실패하거나 로그인 화면을 받아온다. 성공해도 로그인 화면인지 알 수 없어 작게 제안한다.
+  // lastPromptPage·pageReadOffer는 파일 앞쪽(상태 변수)에 있다
+
+  function notePromptPage(pageRead) {
+    if (!pageRead) { lastPromptPage = null; return; }
+    lastPromptPage = {
+      key: pageKeyOf(pageRead.url || ''),
+      url: pageRead.url || '',
+      bodySent: pageRead.status === 'ok' || pageRead.status === 'short',
+      mode: pageRead.mode
+    };
+  }
+
+  function notePageFetchPart(part) {
+    if (part.kind !== 'tool' || part.tool !== 'webfetch') return;
+    if (part.status !== 'error' && part.status !== 'completed') return;
+    if (!lastPromptPage || lastPromptPage.bodySent || lastPromptPage.mode === 'off' || !lastPromptPage.key) return;
+    const target = part.input && typeof part.input.url === 'string' ? part.input.url : '';
+    if (!target || pageKeyOf(target) !== lastPromptPage.key) return;
+    const kind = part.status === 'error' ? 'error' : 'completed';
+    if (pageReadOffer?.kind === 'error') return; // 실패 제안이 우선
+    pageReadOffer = { kind, url: lastPromptPage.url };
+  }
+
+  function showPageReadOffer() {
+    if (!pageReadOffer || isLoading) return;
+    const offer = pageReadOffer;
+    pageReadOffer = null;
+    messagesContainer.querySelectorAll('.page-read-offer').forEach((el) => el.remove());
+
+    const card = document.createElement('div');
+    card.className = `message page-read-offer ${offer.kind}`;
+    const msg = document.createElement('div');
+    msg.className = 'page-read-offer-text';
+    msg.textContent = offer.kind === 'error'
+      ? t('⚠ 서버가 이 페이지를 읽지 못했습니다(로그인·사내망 등). 브라우저에 열린 내용으로 읽을까요?')
+      : t('서버가 가져온 내용이 화면과 다를 수 있습니다(로그인이 필요한 페이지 등).');
+    card.appendChild(msg);
+
+    const actions = document.createElement('div');
+    actions.className = 'page-read-offer-actions';
+    const mkBtn = (label, cls, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls;
+      b.textContent = label;
+      b.addEventListener('click', onClick);
+      actions.appendChild(b);
+      return b;
+    };
+    const prompt = offer.kind === 'error'
+      ? t('서버에서 이 페이지를 가져오지 못했습니다. 브라우저에서 읽은 본문을 바탕으로 다시 답해 주세요.')
+      : t('서버가 가져온 내용 대신 브라우저에서 읽은 본문을 바탕으로 다시 답해 주세요.');
+    const stillSamePage = () => {
+      if (pageKeyOf(currentPageUrl) === pageKeyOf(offer.url)) return true;
+      showToast(t('페이지가 바뀌어 이 페이지를 다시 읽을 수 없습니다.'));
+      card.remove();
+      return false;
+    };
+    const readOnce = (allSites) => {
+      if (!canSendPreset() || !stillSamePage()) return null;
+      return requestPageAccess(offer.url, { allSites });
+    };
+    if (offer.kind === 'error') {
+      mkBtn(t('이번만 읽기'), 'primary', () => {
+        const granted = readOnce(false);
+        if (!granted) return;
+        granted.then((ok) => {
+          if (!ok) { showToast(t('페이지 읽기 권한이 허용되지 않았습니다.')); return; }
+          card.remove();
+          sendPresetPrompt(prompt, { readPage: true });
+        });
+      });
+      mkBtn(t('이 세션에서 계속'), '', () => {
+        // 이 세션의 다른 사이트에서도 읽어야 하므로 모든 사이트 권한을 요청한다
+        const granted = readOnce(true);
+        if (!granted) return;
+        granted.then(async (ok) => {
+          if (!ok) { showToast(t('페이지 읽기 권한이 허용되지 않았습니다.')); return; }
+          card.remove();
+          try {
+            await sendMessageToBackground('set-session-page-context', { sessionId: currentSessionId, mode: 'full' });
+            showToast(t('이 세션은 메시지를 보낼 때마다 페이지 본문을 함께 보냅니다.'));
+          } catch (e) {
+            showToast(t(e.message));
+          }
+          sendPresetPrompt(prompt, { readPage: true });
+        });
+      });
+    } else {
+      mkBtn(t('↻ 브라우저 기준으로 다시 읽기'), '', () => {
+        const granted = readOnce(false);
+        if (!granted) return;
+        granted.then((ok) => {
+          if (!ok) { showToast(t('페이지 읽기 권한이 허용되지 않았습니다.')); return; }
+          card.remove();
+          sendPresetPrompt(prompt, { readPage: true });
+        });
+      });
+    }
+    mkBtn('×', 'page-read-offer-close', () => card.remove()).title = t('닫기');
+    card.appendChild(actions);
+    messagesContainer.appendChild(card);
+    scrollToBottom();
+  }
+
+  // ---- 빠른 실행 버튼 우클릭 메뉴 ----
+  let quickActionMenu = null;
+  function closeQuickActionMenu() {
+    quickActionMenu?.remove();
+    quickActionMenu = null;
+  }
+  document.addEventListener('click', (e) => {
+    if (quickActionMenu && !quickActionMenu.contains(e.target)) closeQuickActionMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && quickActionMenu) closeQuickActionMenu();
+  });
+  messagesContainer.addEventListener('scroll', closeQuickActionMenu);
+
+  function showQuickActionMenu(event, action, row) {
+    closeQuickActionMenu();
+    const url = row.dataset.url;
+    const menu = document.createElement('div');
+    menu.className = 'qa-menu';
+    const item = (label, onClick, cls = '') => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `qa-menu-item ${cls}`.trim();
+      b.textContent = label;
+      b.addEventListener('click', async () => {
+        closeQuickActionMenu();
+        try {
+          await onClick();
+        } catch (e) {
+          showToast(t(e.message));
+        }
+      });
+      menu.appendChild(b);
+    };
+    if (!action.builtin) item(t('✏️ 편집'), () => openQuickActionForm(row, action));
+    item(t('← 앞으로'), () => sendMessageToBackground('move-quick-action', { id: action.id, dir: -1, url }));
+    item(t('→ 뒤로'), () => sendMessageToBackground('move-quick-action', { id: action.id, dir: 1, url }));
+    if (action.builtin) {
+      item(t('🙈 숨기기'), () => sendMessageToBackground('set-quick-action-enabled', { id: action.id, enabled: false }));
+    } else {
+      item(t('🗑 삭제'), async () => {
+        const ok = await showConfirm(t('빠른 실행 버튼 삭제'), t('"{label}" 버튼을 삭제할까요?', { label: action.label }), { okText: t('삭제') });
+        if (ok) await sendMessageToBackground('delete-quick-action', { id: action.id });
+      }, 'danger');
+    }
+    document.body.appendChild(menu);
+    // 화면 밖으로 나가지 않게 위치를 맞춘다
+    const rect = menu.getBoundingClientRect();
+    const x = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+    const y = Math.min(event.clientY, window.innerHeight - rect.height - 8);
+    menu.style.left = `${Math.max(8, x)}px`;
+    menu.style.top = `${Math.max(8, y)}px`;
+    quickActionMenu = menu;
+  }
+
+  // ---- 빠른 실행 버튼 추가·편집 폼 (페이지 말풍선 안에 펼친다) ----
+  function openQuickActionForm(row, action) {
+    messagesContainer.querySelectorAll('.qa-form').forEach((el) => el.remove());
+    const url = row.dataset.url;
+    const host = pageHostOf(url);
+    const existingSites = action?.sites || [];
+    const keepSites = existingSites.length > 0 && !(existingSites.length === 1 && existingSites[0] === host);
+
+    const form = document.createElement('div');
+    form.className = 'qa-form';
+    const field = (labelText, input) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'qa-field';
+      const span = document.createElement('span');
+      span.textContent = labelText;
+      wrap.append(span, input);
+      form.appendChild(wrap);
+    };
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.maxLength = 30;
+    labelInput.placeholder = t('예: 🔍 코드 리뷰 요약');
+    labelInput.value = action?.label || '';
+    field(t('이름'), labelInput);
+
+    const promptInput = document.createElement('textarea');
+    promptInput.rows = 3;
+    promptInput.maxLength = 2000;
+    promptInput.placeholder = t('예: 이 PR의 변경 내용을 리뷰 관점에서 요약하고, 위험한 변경을 짚어 주세요.');
+    promptInput.value = action?.prompt || '';
+    field(t('프롬프트'), promptInput);
+
+    const sites = document.createElement('div');
+    sites.className = 'qa-sites';
+    const radioName = `qa-site-${Date.now()}`;
+    const radio = (value, text, checked) => {
+      const l = document.createElement('label');
+      const r = document.createElement('input');
+      r.type = 'radio';
+      r.name = radioName;
+      r.value = value;
+      r.checked = checked;
+      l.append(r, document.createTextNode(` ${text}`));
+      sites.appendChild(l);
+    };
+    const siteTitle = document.createElement('span');
+    siteTitle.className = 'qa-sites-title';
+    siteTitle.textContent = t('표시할 곳');
+    sites.appendChild(siteTitle);
+    radio('all', t('모든 사이트'), existingSites.length === 0);
+    radio('site', t('이 사이트만 ({host})', { host }), !keepSites && existingSites.length > 0);
+    if (keepSites) radio('keep', t('지정한 사이트: {sites}', { sites: existingSites.join(', ') }), true);
+    form.appendChild(sites);
+
+    const readLabel = document.createElement('label');
+    readLabel.className = 'qa-read';
+    const readInput = document.createElement('input');
+    readInput.type = 'checkbox';
+    readInput.checked = action ? action.readPage !== false : true;
+    readLabel.append(readInput, document.createTextNode(` ${t('페이지 본문을 함께 보내기')}`));
+    form.appendChild(readLabel);
+
+    const error = document.createElement('div');
+    error.className = 'qa-error';
+    form.appendChild(error);
+
+    const actions = document.createElement('div');
+    actions.className = 'qa-form-actions';
+    const hidden = Number(row.dataset.hiddenBuiltins || 0);
+    if (!action && hidden > 0) {
+      const restore = document.createElement('button');
+      restore.type = 'button';
+      restore.className = 'qa-link';
+      restore.textContent = t('숨긴 기본 버튼 다시 표시 ({n})', { n: hidden });
+      restore.addEventListener('click', async () => {
+        try { await sendMessageToBackground('show-all-quick-actions'); } catch (e) { showToast(t(e.message)); }
+        form.remove();
+      });
+      actions.appendChild(restore);
+    }
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = t('취소');
+    cancel.addEventListener('click', () => form.remove());
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'primary';
+    save.textContent = t('저장');
+    save.addEventListener('click', async () => {
+      const choice = form.querySelector(`input[name="${radioName}"]:checked`)?.value || 'all';
+      const siteList = choice === 'site' ? [host] : choice === 'keep' ? existingSites : [];
+      save.disabled = true;
+      try {
+        await sendMessageToBackground('save-quick-action', {
+          quickAction: {
+            ...(action && { id: action.id }),
+            label: labelInput.value,
+            prompt: promptInput.value,
+            sites: siteList,
+            readPage: readInput.checked
+          }
+        });
+        form.remove(); // quick-actions-updated로 버튼 줄이 다시 그려진다
+      } catch (e) {
+        error.textContent = t(e.message, { max: 30 });
+        save.disabled = false;
+      }
+    });
+    actions.append(cancel, save);
+    form.appendChild(actions);
+
+    // 폼 안의 Shift+Tab은 에이전트 전환(전역 단축키) 대신 포커스 이동으로 쓴다. Esc는 폼을 닫는다.
+    form.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') e.stopPropagation();
+      if (e.key === 'Escape') { e.stopPropagation(); form.remove(); }
+    });
+
+    row.after(form);
+    labelInput.focus();
+    form.scrollIntoView({ block: 'nearest' });
   }
 
   async function loadModels() {
@@ -1495,8 +1984,8 @@ I18N.ready.then(function() {
     if (!currentSessionId) return;
 
     const { payload, attachments } = takeComposedMessage(message);
-    addUserMessage(message, attachments);
-    await startPrompt(payload);
+    const userEl = addUserMessage(message, attachments);
+    await startPrompt(payload, { userEl });
   }
 
   // 문장 속의 exit에는 반응하지 않도록 입력 전체가 정확히 일치할 때만 종료로 본다.
@@ -1538,14 +2027,18 @@ I18N.ready.then(function() {
     return { payload: attachmentBlock + message, attachments };
   }
 
-  async function startPrompt(payload) {
+  async function startPrompt(payload, { readPage = false, userEl = null } = {}) {
     setLoadingState(true);
     addTypingIndicator();
+    pageReadOffer = null;
     try {
-      await sendMessageToBackground('send-message', {
+      const res = await sendMessageToBackground('send-message', {
         sessionId: currentSessionId,
-        message: payload
+        message: payload,
+        ...(readPage && { readPage: true })
       });
+      notePromptPage(res.pageRead);
+      setPageReadBadge(userEl, res.pageRead);
     } catch (error) {
       console.error('메시지 전송 실패:', error);
       removeTypingIndicator();
@@ -1600,9 +2093,18 @@ I18N.ready.then(function() {
   async function submitQueued(entry) {
     entry.state = 'sending';
     try {
-      const res = await sendMessageToBackground('queue-message', { sessionId: currentSessionId, message: entry.payload });
+      const res = await sendMessageToBackground('queue-message', {
+        sessionId: currentSessionId,
+        message: entry.payload,
+        ...(entry.readPage && { readPage: true })
+      });
       if (!pendingQueue.includes(entry)) return; // 그 사이 응답이 중단·완료돼 정리됨
       entry.state = res.queued ? 'queued' : 'local';
+      // 큐에 넣지 못했으면(local) 완료 후 일반 전송 때 다시 읽으므로 그때 표시한다
+      if (res.queued) {
+        notePromptPage(res.pageRead);
+        setPageReadBadge(entry.el, res.pageRead);
+      }
       if (!res.queued && !isLoading) flushLocalQueue();
     } catch (error) {
       if (!pendingQueue.includes(entry)) return;
@@ -1623,7 +2125,7 @@ I18N.ready.then(function() {
     setQueueBadge(first, null);
     // 응답 말풍선(typing indicator)이 보낸 메시지 바로 아래에, 나머지 대기 메시지는 그 뒤에 오도록 옮긴다
     messagesContainer.appendChild(first.el);
-    const started = startPrompt(first.payload); // typing indicator를 동기적으로 먼저 붙인다
+    const started = startPrompt(first.payload, { readPage: first.readPage === true, userEl: first.el }); // typing indicator를 동기적으로 먼저 붙인다
     for (const q of rest) messagesContainer.appendChild(q.el);
     if (!(await started)) return;
     for (const q of rest) await submitQueued(q);
@@ -2272,6 +2774,7 @@ I18N.ready.then(function() {
     if (!modelDropdown.classList.contains('hidden')) openModelDropdown();
     if (!mcpDropdown.classList.contains('hidden')) renderMcpDropdown();
     renderSettingsDropdown();
+    refreshAllQuickActionRows();
   }
 
   // 서버 프로세스가 실제로 가진 프록시(WSL만 조회 가능). host가 powershell/wsl.exe를 여러 번 띄워 느리므로
@@ -3732,6 +4235,7 @@ I18N.ready.then(function() {
       if (isLoading) handleTurnStart(message.part);
     } else if (message.action === 'message-part' && message.sessionId === currentSessionId) {
       const part = message.part || {};
+      notePageFetchPart(part);
       const earlier = ['tool', 'subagent', 'reasoning-start', 'reasoning-delta'].includes(part.kind)
         ? earlierSegmentFor(part) : null;
       if (earlier) {
@@ -3832,6 +4336,10 @@ I18N.ready.then(function() {
       activeBlocksContainer = null;
       settleQueue({ recovered: !!message.recovered });
       flushLocalQueue();
+      if (!message.error) showPageReadOffer(); // 대기 메시지를 이어 보냈으면(isLoading) 그 응답이 끝난 뒤
+      else pageReadOffer = null;
+    } else if (message.action === 'quick-actions-updated') {
+      refreshAllQuickActionRows();
     }
   }
 
