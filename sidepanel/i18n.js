@@ -119,6 +119,12 @@
     '내보낼 즐겨찾기가 없습니다.': 'There are no favorites to export.',
     '즐겨찾기 {count}개를 내보냈습니다.': 'Exported {count} favorite(s).',
     '즐겨찾기 파일 형식이 올바르지 않습니다': 'The favorites file format is invalid',
+    '빠른 실행 버튼': 'Quick action buttons',
+    '페이지 말풍선에 추가한 버튼을 파일로 백업하거나 다른 PC로 옮길 수 있습니다. 가져오면 기존 버튼에 합쳐집니다.': 'Back up the buttons you added to page bubbles, or move them to another PC. Importing merges them with your existing buttons.',
+    '내보낼 사용자 버튼이 없습니다.': 'There are no custom buttons to export.',
+    '버튼 {count}개를 내보냈습니다.': 'Exported {count} button(s).',
+    '빠른 실행 버튼 파일 형식이 올바르지 않습니다': 'The quick action file format is invalid',
+    '{added}개를 추가했습니다 (건너뜀 {skipped}개, 사용자 버튼 {total}개).': 'Added {added} (skipped {skipped}, {total} custom button(s) total).',
     '{added}개를 추가했습니다 (전체 {total}개).': 'Added {added} (total {total}).',
 
     // ---- MCP ----

@@ -13,7 +13,7 @@ import { MIN_HOST_VERSION } from './lib/host-version.mjs';
 import { buildFolderList, pushRecent, folderKey, mergeFavorites, parseFavoritesFile, FAVORITES_EXPORT_TYPE } from './lib/folder-list.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
-import { normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf } from './lib/quick-actions.mjs';
+import { normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -2770,6 +2770,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await storeQuickActions(enableAllBuiltins(await loadQuickActions()));
           sendResponse({ success: true });
           break;
+
+        // 빠른 실행 버튼 내보내기/가져오기(⚙). 가져오기는 합치기다(lib/quick-actions.mjs mergeQuickActions).
+        case 'export-quick-actions':
+          sendResponse({ success: true, data: exportQuickActions(await loadQuickActions()) });
+          break;
+
+        case 'import-quick-actions': {
+          let incoming;
+          try {
+            if (typeof message.text !== 'string' || message.text.length > 1_000_000) throw new Error('invalid-format');
+            incoming = parseQuickActionsFile(message.text);
+          } catch {
+            sendResponse({ success: false, error: '빠른 실행 버튼 파일 형식이 올바르지 않습니다' });
+            break;
+          }
+          const { list, added, skipped } = mergeQuickActions(await loadQuickActions(), incoming);
+          if (added) await storeQuickActions(list);
+          debugLog('INFO', `import-quick-actions: added=${added}, skipped=${skipped}`);
+          sendResponse({ success: true, added, skipped, total: list.filter((a) => !a.builtin).length });
+          break;
+        }
 
         case 'move-quick-action':
           await storeQuickActions(moveQuickAction(await loadQuickActions(), message.id, message.dir, hostnameOf(message.url || '')));

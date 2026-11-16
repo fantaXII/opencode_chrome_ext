@@ -2842,46 +2842,96 @@ I18N.ready.then(function() {
     refreshAppliedProxyLine();
   }
 
-  // ---- 작업 폴더 즐겨찾기 내보내기/가져오기 ----
-  let favoritesIoText = null; // { text, error } — 설정 드롭다운을 다시 그려도 결과 문구를 유지한다
+  // ---- ⚙ 내보내기/가져오기 (작업 폴더 즐겨찾기 'fav', 빠른 실행 버튼 'qa') ----
+  // 결과 문구는 설정 드롭다운을 다시 그려도 유지한다. 파일 입력은 드롭다운 밖(sidepanel.html)에 하나만 둔다:
+  // 드롭다운 안에 두면 파일을 고르는 동안 재렌더로 요소가 바뀌어 change 이벤트가 사라진다.
+  const settingsIoText = {}; // kind → { text, error }
+  const settingsImportFile = document.getElementById('settings-import-file');
+  let settingsImportKind = null;
 
-  function setFavoritesIoText(text, error = false) {
-    favoritesIoText = text ? { text, error } : null;
+  const SETTINGS_IO = {
+    fav: {
+      exportAction: 'export-folder-favorites',
+      importAction: 'import-folder-favorites',
+      fileName: 'opencode-folder-favorites',
+      count: (data) => data?.favorites?.length || 0,
+      emptyText: () => t('내보낼 즐겨찾기가 없습니다.'),
+      exportedText: (count) => t('즐겨찾기 {count}개를 내보냈습니다.', { count }),
+      formatError: '즐겨찾기 파일 형식이 올바르지 않습니다',
+      imported: (res) => {
+        folderListCache = null;
+        return t('{added}개를 추가했습니다 (전체 {total}개).', { added: res.added, total: res.total });
+      }
+    },
+    qa: {
+      exportAction: 'export-quick-actions',
+      importAction: 'import-quick-actions',
+      fileName: 'opencode-quick-actions',
+      count: (data) => data?.quickActions?.length || 0,
+      emptyText: () => t('내보낼 사용자 버튼이 없습니다.'),
+      exportedText: (count) => t('버튼 {count}개를 내보냈습니다.', { count }),
+      formatError: '빠른 실행 버튼 파일 형식이 올바르지 않습니다',
+      // 버튼 줄은 background의 quick-actions-updated로 다시 그려진다
+      imported: (res) => t('{added}개를 추가했습니다 (건너뜀 {skipped}개, 사용자 버튼 {total}개).',
+        { added: res.added, skipped: res.skipped, total: res.total })
+    }
+  };
+
+  function setSettingsIoText(kind, text, error = false) {
+    if (text) settingsIoText[kind] = { text, error };
+    else delete settingsIoText[kind];
     if (!settingsDropdown.classList.contains('hidden')) renderSettingsDropdown();
   }
 
-  async function exportFavorites() {
+  async function exportSettingsData(kind) {
+    const io = SETTINGS_IO[kind];
     try {
-      const res = await sendMessageToBackground('export-folder-favorites');
-      const count = res?.data?.favorites?.length || 0;
-      if (!count) { setFavoritesIoText(t('내보낼 즐겨찾기가 없습니다.')); return; }
+      const res = await sendMessageToBackground(io.exportAction);
+      const count = io.count(res?.data);
+      if (!count) { setSettingsIoText(kind, io.emptyText()); return; }
       const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `opencode-folder-favorites-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `${io.fileName}-${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      setFavoritesIoText(t('즐겨찾기 {count}개를 내보냈습니다.', { count }));
+      setSettingsIoText(kind, io.exportedText(count));
     } catch (e) {
-      setFavoritesIoText(t('실패: {error}', { error: t(e.message) }), true);
+      setSettingsIoText(kind, t('실패: {error}', { error: t(e.message) }), true);
     }
   }
 
-  async function importFavorites(file) {
-    if (!file) return;
-    try {
-      if (file.size > 1_000_000) throw new Error(t('즐겨찾기 파일 형식이 올바르지 않습니다'));
-      const res = await sendMessageToBackground('import-folder-favorites', { text: await file.text() });
-      if (!res?.success) throw new Error(res?.error || 'unknown');
-      folderListCache = null;
-      setFavoritesIoText(t('{added}개를 추가했습니다 (전체 {total}개).', { added: res.added, total: res.total }));
-    } catch (e) {
-      setFavoritesIoText(t('실패: {error}', { error: t(e.message) }), true);
-    }
+  function pickSettingsImportFile(kind) {
+    settingsImportKind = kind;
+    settingsImportFile.value = ''; // 같은 파일을 다시 골라도 change가 오게
+    settingsImportFile.click();
   }
+
+  // 드롭다운 밖 요소라 document click 핸들러가 설정 드롭다운을 닫지 않게 막는다(.click()도 click 이벤트를 낸다).
+  settingsImportFile.addEventListener('click', (e) => e.stopPropagation());
+  settingsImportFile.addEventListener('change', async () => {
+    const kind = settingsImportKind;
+    const file = settingsImportFile.files?.[0];
+    settingsImportKind = null;
+    settingsImportFile.value = '';
+    if (!kind || !file) return;
+    const io = SETTINGS_IO[kind];
+    try {
+      if (file.size > 1_000_000) throw new Error(io.formatError);
+      const res = await sendMessageToBackground(io.importAction, { text: await file.text() });
+      if (!res?.success) throw new Error(res?.error || 'unknown');
+      setSettingsIoText(kind, io.imported(res));
+    } catch (e) {
+      setSettingsIoText(kind, t('실패: {error}', { error: t(e.message) }), true);
+    }
+  });
+
+  const settingsIoTextHtml = (kind) => settingsIoText[kind]
+    ? `<div class="settings-current${settingsIoText[kind].error ? ' warn' : ''}">${escapeHtml(settingsIoText[kind].text)}</div>`
+    : '';
 
   async function renderSettingsDropdown() {
     let info;
@@ -3004,9 +3054,17 @@ I18N.ready.then(function() {
         <div class="settings-buttons">
           <button id="fav-export-btn" class="mcp-action-btn">${t('내보내기')}</button>
           <button id="fav-import-btn" class="mcp-action-btn">${t('가져오기')}</button>
-          <input id="fav-import-file" type="file" accept=".json,application/json" class="hidden">
         </div>
-        ${favoritesIoText ? `<div class="settings-current${favoritesIoText.error ? ' warn' : ''}">${escapeHtml(favoritesIoText.text)}</div>` : ''}
+        ${settingsIoTextHtml('fav')}
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">${t('빠른 실행 버튼')}</div>
+        <div class="settings-current">${t('페이지 말풍선에 추가한 버튼을 파일로 백업하거나 다른 PC로 옮길 수 있습니다. 가져오면 기존 버튼에 합쳐집니다.')}</div>
+        <div class="settings-buttons">
+          <button id="qa-export-btn" class="mcp-action-btn">${t('내보내기')}</button>
+          <button id="qa-import-btn" class="mcp-action-btn">${t('가져오기')}</button>
+        </div>
+        ${settingsIoTextHtml('qa')}
       </div>
       <div class="mcp-actions">
         <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
@@ -3029,10 +3087,10 @@ I18N.ready.then(function() {
       </div>`;
     applyMcpActionStatus();
 
-    document.getElementById('fav-export-btn')?.addEventListener('click', exportFavorites);
-    const favFile = document.getElementById('fav-import-file');
-    document.getElementById('fav-import-btn')?.addEventListener('click', () => favFile?.click());
-    favFile?.addEventListener('change', () => importFavorites(favFile.files?.[0]));
+    document.getElementById('fav-export-btn')?.addEventListener('click', () => exportSettingsData('fav'));
+    document.getElementById('fav-import-btn')?.addEventListener('click', () => pickSettingsImportFile('fav'));
+    document.getElementById('qa-export-btn')?.addEventListener('click', () => exportSettingsData('qa'));
+    document.getElementById('qa-import-btn')?.addEventListener('click', () => pickSettingsImportFile('qa'));
 
     document.getElementById('lang-select')?.addEventListener('change', (e) => {
       I18N.setLang(e.target.value);

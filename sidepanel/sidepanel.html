@@ -32,6 +32,8 @@
         <div class="mcp-wrapper">
           <button id="settings-btn" class="mcp-btn icon-only" title="설정" aria-label="설정" data-i18n-title data-i18n-aria-label><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></button>
           <div id="settings-dropdown" class="mcp-dropdown settings-dropdown hidden"></div>
+          <!-- ⚙ 가져오기용. 설정 드롭다운은 다시 그려지므로(호스트 버전 확인 완료 등) 파일을 고르는 동안 사라지지 않게 밖에 둔다. -->
+          <input id="settings-import-file" type="file" accept=".json,application/json" class="hidden">
         </div>
       </div>
     </header>

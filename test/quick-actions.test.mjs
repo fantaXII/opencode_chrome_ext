@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import {
   BUILTIN_QUICK_ACTION_IDS, QUICK_ACTION_LIMITS, defaultQuickActions, hostnameOf, normalizeSitePattern, siteMatches,
   isQuickActionVisible, validateQuickActionInput, normalizeQuickActions, upsertQuickAction, removeQuickAction,
-  setQuickActionEnabled, enableAllBuiltins, moveQuickAction
+  setQuickActionEnabled, enableAllBuiltins, moveQuickAction,
+  QUICK_ACTIONS_EXPORT_TYPE, exportQuickActions, parseQuickActionsFile, mergeQuickActions
 } from '../lib/quick-actions.mjs';
 
 const user = (id, extra = {}) => ({ id, label: id, prompt: `p-${id}`, sites: [], readPage: true, ...extra });
@@ -132,4 +133,56 @@ test('moveQuickAction: 이 페이지에서 보이는 이웃과 자리를 바꾼�
   assert.equal(moveQuickAction(list, 'summary', -1, 'a.com'), list);
   assert.equal(moveQuickAction(list, 'nope', 1, 'a.com'), list);
   assert.equal(moveQuickAction(list, 'all', 2, 'a.com'), list);
+});
+
+test('exportQuickActions: 사용자 버튼만, id 없이 내보낸다', () => {
+  const list = [...defaultQuickActions(), user('qa_1', { sites: ['github.com'], readPage: false })];
+  const data = exportQuickActions(list, new Date('2026-01-01T00:00:00Z'));
+  assert.equal(data.type, QUICK_ACTIONS_EXPORT_TYPE);
+  assert.equal(data.exportedAt, '2026-01-01T00:00:00.000Z');
+  assert.deepEqual(data.quickActions, [{ label: 'qa_1', prompt: 'p-qa_1', sites: ['github.com'], readPage: false }]);
+});
+
+test('parseQuickActionsFile: 내보낸 형식·배열을 받고, 그 외는 throw', () => {
+  assert.deepEqual(parseQuickActionsFile('{"quickActions":[{"label":"a"}]}'), [{ label: 'a' }]);
+  assert.deepEqual(parseQuickActionsFile('[1]'), [1]);
+  assert.throws(() => parseQuickActionsFile('{"favorites":[]}'));
+  assert.throws(() => parseQuickActionsFile('not json'));
+});
+
+test('mergeQuickActions: 내보낸 파일을 다시 가져오면 왕복되고, 같은 버튼은 건너뛴다', () => {
+  const src = [...defaultQuickActions(), user('qa_1', { sites: ['*.example.com'] }), user('qa_2')];
+  const file = JSON.stringify(exportQuickActions(src));
+  // 빈 목록(새 PC)에 가져오기
+  const fresh = mergeQuickActions(defaultQuickActions(), parseQuickActionsFile(file), { now: 5 });
+  assert.equal(fresh.added, 2);
+  assert.equal(fresh.skipped, 0);
+  assert.deepEqual(exportQuickActions(fresh.list).quickActions, exportQuickActions(src).quickActions);
+  assert.deepEqual(fresh.list.filter((a) => !a.builtin).map((a) => a.id), ['qa_5', 'qa_5_1']);
+  // 같은 파일을 다시 가져오면 아무것도 추가되지 않는다
+  const again = mergeQuickActions(fresh.list, parseQuickActionsFile(file), { now: 6 });
+  assert.equal(again.added, 0);
+  assert.equal(again.skipped, 2);
+  assert.deepEqual(again.list, fresh.list);
+});
+
+test('mergeQuickActions: 기존 순서·숨김은 유지, 잘못된 항목·기본 버튼·최대 초과는 건너뛴다', () => {
+  const base = setQuickActionEnabled([...defaultQuickActions(), user('mine')], 'translate', false);
+  const incoming = [
+    { builtin: true, id: 'summary' }, null, 'x', { label: '', prompt: 'p' }, { label: 'L', prompt: 'p', sites: ['bad host!'] },
+    { label: 'ok', prompt: 'do it', sites: ['https://A.example.com/path'] },
+    { id: 'mine', label: 'other', prompt: 'p2' } // 파일의 id는 무시하고 새 버튼으로 추가
+  ];
+  const res = mergeQuickActions(base, incoming, { now: 1 });
+  assert.equal(res.added, 2);
+  assert.equal(res.skipped, 5);
+  assert.deepEqual(res.list.slice(0, 4), base);
+  assert.deepEqual(res.list[4], { id: 'qa_1', label: 'ok', prompt: 'do it', sites: ['a.example.com'], readPage: true });
+  assert.equal(res.list[5].label, 'other');
+  assert.notEqual(res.list[5].id, 'mine');
+
+  const many = Array.from({ length: QUICK_ACTION_LIMITS.max + 3 }, (_, i) => ({ label: `b${i}`, prompt: 'p' }));
+  const full = mergeQuickActions(defaultQuickActions(), many, { now: 2 });
+  assert.equal(full.added, QUICK_ACTION_LIMITS.max);
+  assert.equal(full.skipped, 3);
 });
