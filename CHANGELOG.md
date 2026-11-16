@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.24.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.23.0...v2.24.0) (2026-11-16)
+
+
+### Features
+
+* 빠른 실행 버튼 내보내기/가져오기와 ⚙ 가져오기 파일 선택 유실 수정 ([d66072b](https://github.com/fantaXII/opencode_chrome_ext/commit/d66072b94292f2051705e2025c7a0447091d9eb6))
+
 # [2.23.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.22.1...v2.23.0) (2026-11-15)
 
 
