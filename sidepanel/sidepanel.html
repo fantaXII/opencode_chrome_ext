@@ -38,6 +38,23 @@
       </div>
     </header>
 
+    <!-- 현재 페이지 줄 + 빠른 실행. 첫 화면(대화 없음)에서는 펼치고, 대화가 시작되면 한 줄로 접는다.
+         접힌 상태에서 ⚡를 누르면 버튼 영역이 대화 위에 겹쳐 뜬다(레이아웃이 밀리지 않게). -->
+    <div id="page-bar" class="page-bar hidden">
+      <div class="page-bar-head">
+        <span class="page-bar-icon" id="page-bar-icon" aria-hidden="true">📄</span>
+        <div class="page-bar-text">
+          <span class="page-bar-title" id="page-bar-title"></span>
+          <span class="page-bar-url" id="page-bar-url"></span>
+        </div>
+        <span class="page-bar-new hidden" id="page-bar-new" data-i18n>새 페이지</span>
+        <button type="button" id="page-bar-toggle" class="page-bar-toggle hidden" aria-expanded="false" aria-controls="page-bar-panel"></button>
+      </div>
+      <div id="page-bar-panel" class="page-bar-panel hidden">
+        <div id="quick-actions-row" class="quick-actions"></div>
+      </div>
+    </div>
+
     <div id="messages-container" class="messages-container">
       <div class="welcome-section">
         <div class="welcome-logo">

@@ -306,6 +306,7 @@ I18N.ready.then(function() {
     if (!result?.newSessionId) return;
     currentSessionId = result.newSessionId;
     messagesContainer.innerHTML = '';
+    setPageBarMode('expanded'); // 빈 대화 = 첫 화면
     addBotMessage(t('작업 디렉토리가 변경되어 새 세션을 시작합니다. 이전 대화는 /sessions로 다시 열 수 있습니다.'));
   }
 
@@ -485,6 +486,7 @@ I18N.ready.then(function() {
       const set = await sendMessageToBackground('set-working-directory', { directory: path });
       if (set?.success === false) throw new Error(workingDirError(set));
       messagesContainer.innerHTML = '';
+      setPageBarMode('expanded');
       const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
       currentSessionId = result.success ? result.sessionId : null;
       await refreshWorkingDirectory();
@@ -590,7 +592,8 @@ I18N.ready.then(function() {
 
   async function reinitForTab(tab, reason = 'unknown') {
     currentTabId = tab.id;
-    currentPageUrl = tab.url || '';
+    // 맨 윗줄은 이 탭의 페이지로 바꾸고 일단 접는다. 대화가 비어 있으면 addPageContextMessage가 펼친다.
+    setPageBar(tab.title || '', tab.url || '', { expand: false });
     lastPromptPage = null;
     pageReadOffer = null;
     currentSessionId = null;
@@ -836,42 +839,37 @@ I18N.ready.then(function() {
     }
   }
 
+  // 대화가 비어 있을 때의 안내. 페이지 제목·URL은 맨 윗줄(page-bar)에 있으므로 여기엔 안내만 둔다.
   function addPageContextMessage(title, url) {
     const welcome = messagesContainer.querySelector('.welcome-section');
     if (welcome) welcome.remove();
 
     const div = document.createElement('div');
     div.className = 'message page-note';
-    div.innerHTML = `
-      <div class="page-note-title">${escapeHtml(title)}</div>
-      <div class="page-note-url">${escapeHtml(url)}</div>
-      <div class="page-note-hint">${escapeHtml(t('이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.'))}</div>
-    `;
-    currentPageUrl = url || '';
-    attachQuickActions(div, url);
+    div.innerHTML = `<div class="page-note-hint">${escapeHtml(t('이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.'))}</div>`;
     messagesContainer.insertBefore(div, messagesContainer.firstChild);
+    setPageBar(title, url, { expand: true });
     scrollToBottom();
   }
 
+  // 대화 중 페이지 이동: 대화에는 기록용 구분선 한 줄만 남기고, 맨 윗줄은 펼치지 않고 잠깐 강조한다.
   function addPageChangedMessage(title, url) {
     const div = document.createElement('div');
-    div.className = 'message page-note changed';
-    div.innerHTML = `
-      <div class="page-note-hint">${escapeHtml(t('페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.'))}</div>
-      <div class="page-note-title">${escapeHtml(title)}</div>
-      <div class="page-note-url">${escapeHtml(url)}</div>
-    `;
-    currentPageUrl = url || '';
-    attachQuickActions(div, url);
+    div.className = 'message page-divider';
+    div.title = `${t('페이지가 변경되었습니다. 이 세션은 이전 페이지에서 이어지는 대화입니다.')}\n${url || ''}`;
+    const label = document.createElement('span');
+    label.textContent = t('페이지 변경: {title}', { title: title || url || '' });
+    div.appendChild(label);
     messagesContainer.appendChild(div);
+    setPageBar(title, url, { flash: true });
     scrollToBottom();
   }
 
   // ============================================
   // 페이지 말풍선의 빠른 실행 버튼 + 브라우저 기준 읽기
   // ============================================
-  // 목록·검증은 background(lib/quick-actions.mjs)가 맡는다. 버튼은 가장 최근 페이지 말풍선에만 둔다
-  // (이전 페이지의 말풍선에서 누르면 지금 탭의 다른 페이지를 읽게 되므로).
+  // 목록·검증은 background(lib/quick-actions.mjs)가 맡는다. 버튼은 맨 윗줄(page-bar) 하나에만 두고
+  // 항상 지금 탭의 페이지 기준으로 다시 계산한다(대화 속에 두면 스크롤로 사라지고, 예전 페이지 기준이 된다).
   // 기본 버튼의 문구·프롬프트는 UI 언어에 맞춰 여기서 붙인다(저장하지 않는다).
   const BUILTIN_QUICK_ACTIONS = {
     summary: { label: '📄 요약', prompt: '이 페이지의 내용을 요약해 주세요.' },
@@ -916,20 +914,107 @@ I18N.ready.then(function() {
     return { label: action.label, prompt: action.prompt, readPage: action.readPage !== false };
   }
 
-  function attachQuickActions(noteEl, url) {
-    // 이전 페이지 말풍선의 버튼·폼은 치운다(새 페이지가 chrome:// 등이라 버튼을 달지 않아도)
-    messagesContainer.querySelectorAll('.quick-actions, .qa-form').forEach((el) => el.remove());
+  // ---- 맨 윗줄: 현재 페이지 + 빠른 실행 ----
+  // 상태: expanded(흐름 안에서 펼침, 첫 화면) | collapsed(한 줄) | overlay(접힌 채 버튼 영역만 대화 위에 겹쳐 띄움)
+  const pageBar = document.getElementById('page-bar');
+  const pageBarIcon = document.getElementById('page-bar-icon');
+  const pageBarTitle = document.getElementById('page-bar-title');
+  const pageBarUrl = document.getElementById('page-bar-url');
+  const pageBarNew = document.getElementById('page-bar-new');
+  const pageBarToggle = document.getElementById('page-bar-toggle');
+  const pageBarPanel = document.getElementById('page-bar-panel');
+  const quickActionsRow = document.getElementById('quick-actions-row');
+  let pageBarMode = 'collapsed';
+  let pageBarFlashTimer = null;
+  let quickActionCount = 0;
+  let quickActionLimits = { label: 30, prompt: 20000 }; // get-quick-actions의 limits로 갱신
+
+  function setPageBar(title, url, { expand = null, flash = false } = {}) {
+    currentPageUrl = url || '';
+    if (!title && !url) {
+      pageBar.classList.add('hidden');
+      return;
+    }
+    const web = !!pageHostOf(url);
+    pageBar.classList.remove('hidden');
+    pageBarIcon.textContent = web ? '📄' : '🌐';
+    pageBarTitle.textContent = title || url;
+    pageBarTitle.title = title || '';
+    pageBarUrl.textContent = web ? url.replace(/^https?:\/\//, '') : '';
+    pageBarUrl.title = url || '';
+    if (expand !== null) pageBarMode = expand ? 'expanded' : 'collapsed';
+    else if (pageBarMode === 'overlay' && !pageBarPanel.querySelector('.qa-form')) pageBarMode = 'collapsed';
+    clearTimeout(pageBarFlashTimer);
+    pageBarNew.classList.add('hidden');
+    pageBar.classList.remove('flash');
+    if (flash && pageBarMode === 'collapsed') {
+      pageBarNew.classList.remove('hidden');
+      pageBar.classList.add('flash');
+      pageBarFlashTimer = setTimeout(() => {
+        pageBarNew.classList.add('hidden');
+        pageBar.classList.remove('flash');
+      }, 3000);
+    }
     closeQuickActionMenu();
-    if (!pageHostOf(url)) return;
-    const row = document.createElement('div');
-    row.className = 'quick-actions';
-    row.dataset.url = url;
-    noteEl.appendChild(row);
-    refreshQuickActionRow(row);
+    pageBarPanel.querySelectorAll('.qa-form').forEach((el) => el.remove()); // 다른 페이지 기준의 폼은 버린다
+    quickActionsRow.dataset.url = web ? url : '';
+    quickActionsRow.textContent = '';
+    quickActionCount = 0;
+    renderPageBar();
+    if (web) refreshQuickActionRow(quickActionsRow);
   }
+
+  function setPageBarMode(mode) {
+    if (pageBarMode === mode) return;
+    pageBarMode = mode;
+    if (mode === 'collapsed') closeQuickActionMenu();
+    renderPageBar();
+  }
+
+  /** 대화가 시작되면(메시지를 보내거나 기록을 다시 그림) 한 줄로 접는다. 폼을 쓰는 중이면 그대로 둔다. */
+  function collapsePageBar() {
+    if (pageBarMode === 'collapsed' || pageBarPanel.querySelector('.qa-form')) return;
+    setPageBarMode('collapsed');
+  }
+
+  function renderPageBar() {
+    const web = !!quickActionsRow.dataset.url;
+    const open = web && pageBarMode !== 'collapsed';
+    pageBar.classList.toggle('expanded', web && pageBarMode === 'expanded');
+    pageBar.classList.toggle('overlay', web && pageBarMode === 'overlay');
+    pageBarPanel.classList.toggle('hidden', !open);
+    pageBarToggle.classList.toggle('hidden', !web);
+    pageBarToggle.setAttribute('aria-expanded', String(open));
+    pageBarToggle.textContent = `⚡ ${quickActionCount} ${open ? '▴' : '▾'}`;
+    pageBarToggle.title = open ? t('빠른 실행 접기') : t('빠른 실행 펼치기');
+  }
+
+  pageBarToggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (pageBarMode === 'collapsed') {
+      setPageBarMode('overlay');
+      pageBarNew.classList.add('hidden');
+      pageBar.classList.remove('flash');
+    } else {
+      pageBarPanel.querySelectorAll('.qa-form').forEach((el) => el.remove());
+      setPageBarMode('collapsed');
+    }
+  });
+  // 겹쳐 뜬 버튼 영역은 바깥 클릭·Esc로 닫는다. 폼을 쓰는 중이거나 우클릭 메뉴·확인 창 안의 클릭은 닫지 않는다.
+  document.addEventListener('click', (e) => {
+    if (pageBarMode !== 'overlay' || pageBar.contains(e.target)) return;
+    if (e.target.closest?.('.qa-menu, .confirm-dialog') || pageBarPanel.querySelector('.qa-form')) return;
+    setPageBarMode('collapsed');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || pageBarMode !== 'overlay' || quickActionMenu) return;
+    if (pageBarPanel.querySelector('.qa-form')) return; // 폼의 Esc는 폼만 닫는다
+    setPageBarMode('collapsed');
+  });
 
   async function refreshQuickActionRow(row) {
     const url = row.dataset.url;
+    if (!url) return;
     let res;
     try {
       res = await sendMessageToBackground('get-quick-actions', { url });
@@ -937,9 +1022,11 @@ I18N.ready.then(function() {
       console.warn('get-quick-actions 실패:', e.message);
       return;
     }
-    if (!row.isConnected) return;
+    if (!row.isConnected || row.dataset.url !== url) return; // 그 사이 페이지가 바뀜
+    if (res.limits) quickActionLimits = res.limits;
     row.textContent = '';
     row.dataset.hiddenBuiltins = String(res.hiddenBuiltins || 0);
+    let count = 0;
     for (const action of res.actions || []) {
       if (!action.visible) continue;
       const view = quickActionView(action);
@@ -955,7 +1042,10 @@ I18N.ready.then(function() {
         showQuickActionMenu(e, action, row);
       });
       row.appendChild(btn);
+      count++;
     }
+    quickActionCount = count;
+    renderPageBar();
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'quick-action-btn quick-action-add';
@@ -966,7 +1056,8 @@ I18N.ready.then(function() {
   }
 
   function refreshAllQuickActionRows() {
-    messagesContainer.querySelectorAll('.quick-actions').forEach((row) => refreshQuickActionRow(row));
+    renderPageBar(); // 언어 전환 시 토글 문구
+    refreshQuickActionRow(quickActionsRow);
   }
 
   /** 지금 프롬프트를 보낼 수 있는지. 안 되면 이유를 토스트로 알린다. */
@@ -990,6 +1081,7 @@ I18N.ready.then(function() {
 
   function runQuickAction(view, url) {
     if (!canSendPreset()) return;
+    collapsePageBar(); // 누르면 바로 접는다(겹쳐 뜬 상태든 첫 화면이든)
     const granted = view.readPage ? requestPageAccess(url) : Promise.resolve(false);
     granted.then((ok) => {
       if (view.readPage && !ok) showToast(t('페이지 읽기 권한이 허용되지 않아 제목·URL만 보냅니다.'));
@@ -1208,7 +1300,8 @@ I18N.ready.then(function() {
 
   // ---- 빠른 실행 버튼 추가·편집 폼 (페이지 말풍선 안에 펼친다) ----
   function openQuickActionForm(row, action) {
-    messagesContainer.querySelectorAll('.qa-form').forEach((el) => el.remove());
+    pageBarPanel.querySelectorAll('.qa-form').forEach((el) => el.remove());
+    if (pageBarMode === 'collapsed') setPageBarMode('overlay'); // 우클릭 편집은 접힌 상태에서도 열 수 있다
     const url = row.dataset.url;
     const host = pageHostOf(url);
     const existingSites = action?.sites || [];
@@ -1232,12 +1325,15 @@ I18N.ready.then(function() {
     labelInput.value = action?.label || '';
     field(t('이름'), labelInput);
 
+    // maxLength는 붙여넣기를 말없이 잘라서(3400자 → 2000자) 쓰지 않는다. 대신 글자 수를 보여 주고 넘으면 저장을 막는다.
     const promptInput = document.createElement('textarea');
     promptInput.rows = 3;
-    promptInput.maxLength = 2000;
     promptInput.placeholder = t('예: 이 PR의 변경 내용을 리뷰 관점에서 요약하고, 위험한 변경을 짚어 주세요.');
     promptInput.value = action?.prompt || '';
     field(t('프롬프트'), promptInput);
+    const promptCount = document.createElement('div');
+    promptCount.className = 'qa-count';
+    form.appendChild(promptCount);
 
     const sites = document.createElement('div');
     sites.className = 'qa-sites';
@@ -1318,6 +1414,19 @@ I18N.ready.then(function() {
     actions.append(cancel, save);
     form.appendChild(actions);
 
+    const max = quickActionLimits.prompt;
+    const updateCount = () => {
+      // 저장 검증(lib)은 앞뒤 공백을 뺀 길이로 잰다
+      const n = promptInput.value.trim().length;
+      const over = n > max;
+      promptCount.textContent = `${n.toLocaleString()} / ${max.toLocaleString()}`;
+      promptCount.classList.toggle('over', over);
+      save.disabled = over;
+      save.title = over ? t('프롬프트가 너무 깁니다. ({n} / {max}자)', { n: n.toLocaleString(), max: max.toLocaleString() }) : '';
+    };
+    promptInput.addEventListener('input', updateCount);
+    updateCount();
+
     // 폼 안의 Shift+Tab은 에이전트 전환(전역 단축키) 대신 포커스 이동으로 쓴다. Esc는 폼을 닫는다.
     form.addEventListener('keydown', (e) => {
       if (e.key === 'Tab') e.stopPropagation();
@@ -1326,7 +1435,6 @@ I18N.ready.then(function() {
 
     row.after(form);
     labelInput.focus();
-    form.scrollIntoView({ block: 'nearest' });
   }
 
   async function loadModels() {
@@ -1850,6 +1958,7 @@ I18N.ready.then(function() {
 
     if (slash === '/clear') {
       messagesContainer.innerHTML = '';
+      setPageBarMode('expanded');
       try {
         // tabId를 넘겨야 이 탭이 새 세션에 연결된다(안 넘기면 탭 전환 후 이전 세션으로 돌아갔다)
         const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
@@ -1868,6 +1977,7 @@ I18N.ready.then(function() {
     if (slash === '/new') {
       if (isLoading) { addBotMessage(t('응답 중에는 새 세션을 시작할 수 없습니다.')); sendBtn.disabled = false; return; }
       messagesContainer.innerHTML = '';
+      setPageBarMode('expanded');
       try {
         const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
         currentSessionId = result.success ? result.sessionId : null;
@@ -2178,6 +2288,7 @@ I18N.ready.then(function() {
       <div class="message-content">${escapeHtml(content)}</div>
     `;
     messageDiv.dataset.prompt = content; // ↑/↓ 입력 기록(현재 세션 화면의 사용자 입력)
+    collapsePageBar(); // 대화가 시작되면(보냄·기록 다시 그림) 맨 윗줄을 한 줄로 접는다
     if (attachments.length > 0) {
       const contentDiv = messageDiv.querySelector('.message-content');
       const list = document.createElement('div');

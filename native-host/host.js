@@ -135,6 +135,37 @@ function withWindowsPath(env, pathValue) {
 }
 
 /**
+ * WSL PATH 정리: 실행 파일 폴더를 맨 앞에 두고, 인자 전달에서 깨질 수 있는 항목(공백·따옴표·`$` 등이
+ * 든 경로, 주로 /mnt/c/Program Files/... 같은 Windows interop 경로)과 중복을 뺀다.
+ */
+function buildWslPath(opencodePath, pathEnv) {
+  const dir = path.posix.dirname(opencodePath);
+  const out = [];
+  for (const entry of [dir, ...String(pathEnv || '').split(':')]) {
+    if (!/^\/[^\s"'`$\\;&|<>()]*$/.test(entry)) continue;
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return out.join(':');
+}
+
+/**
+ * WSL에서 opencode를 실행할 wsl.exe 인자. 탐색 셸의 PATH가 있으면(nvm·로그인 셸로 찾음)
+ * `--exec env PATH=... <경로>`로 셸 없이 그 PATH를 준다(Windows 쪽 withWindowsPath와 같은 역할).
+ */
+function wslSpawnArgs(found, port) {
+  const serve = [found.path, 'serve', '--port', String(port)];
+  if (!found.pathEnv) return serve;
+  return ['--exec', 'env', `PATH=${buildWslPath(found.path, found.pathEnv)}`, ...serve];
+}
+
+/** 서버가 뜨기 전에 프로세스가 끝났을 때의 오류 문구(stderr 마지막 줄을 붙여 원인이 보이게). */
+function earlyExitMessage(code, signal, outputTail) {
+  const last = String(outputTail || '').split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
+  const status = code !== null && code !== undefined ? `code=${code}` : `signal=${signal}`;
+  return `opencode 프로세스가 시작 중에 종료됨 (${status})${last ? `: ${last.substring(0, 200)}` : ''}`;
+}
+
+/**
  * Windows에서 opencode를 실행할 spawn 인자. .cmd/.bat은 셸이 필요하고(최신 Node는 셸 없이
  * 띄우면 EINVAL), shell:true는 `cmd /d /s /c "<명령> <인자>"`로 이어 붙이기만 하므로
  * 경로에 공백이 있으면(C:\Users\홍 길동\...) 깨진다. 그래서 경로를 따옴표로 감싼다.
@@ -230,8 +261,12 @@ function interpretWslResult(result) {
     const noDistro = /WSL_E_DEFAULT_DISTRO_NOT_FOUND|WSL_E_DISTRO_NOT_FOUND|no installed distributions/i.test(message);
     return { kind: noDistro ? 'no-wsl' : 'transient', path: null, message };
   }
-  const last = stdout.split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
-  if (last.startsWith('/')) return { kind: 'found', path: last, message };
+  const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || '';
+  // 탐색 셸의 PATH(`env | grep ^PATH=`). nvm 등으로 찾은 opencode는 실행할 때도 이 PATH가 있어야 node를 찾는다.
+  const pathLine = lines.filter(l => l.startsWith('PATH=')).pop();
+  const pathEnv = pathLine ? pathLine.slice(5) : null;
+  if (last.startsWith('/')) return { kind: 'found', path: last, pathEnv, message };
   return { kind: result.status === 0 ? 'transient' : 'final', path: null, message };
 }
 
@@ -242,8 +277,11 @@ async function findWslOpenCode(diagnostic) {
   diagnostic.wsl.checked = true;
   const wslStrategies = [
     ['bash', '-c', 'test -x "$HOME/.opencode/bin/opencode" && echo "$HOME/.opencode/bin/opencode"'],
-    ['bash', '-c', '. "$HOME/.nvm/nvm.sh" 2>/dev/null; which opencode 2>/dev/null'],
-    ['bash', '-ilc', 'which opencode 2>/dev/null'],
+    // 2·3은 셸 초기화(nvm·로그인 셸)를 거쳐야 보이는 opencode다. 그 PATH를 함께 출력해 실행에 쓴다
+    // (wsl.exe <경로>로 띄우는 셸은 초기화를 하지 않아 npm opencode의 `#!/usr/bin/env node`가 exit 127로 죽었다).
+    // `$PATH`는 wsl.exe 인자 전달 중 바깥 셸이 먼저 확장할 수 있어 쓰지 않고 env 출력에서 읽는다.
+    ['bash', '-c', '. "$HOME/.nvm/nvm.sh" 2>/dev/null; command -v opencode >/dev/null 2>&1 && env | grep ^PATH=; which opencode 2>/dev/null'],
+    ['bash', '-ilc', 'command -v opencode >/dev/null 2>&1 && env | grep ^PATH=; which opencode 2>/dev/null'],
   ];
 
   // 확실히 없다고 답한 전략은 다음 회차에서 건너뛴다.
@@ -266,7 +304,7 @@ async function findWslOpenCode(diagnostic) {
         if (wslPath) {
           diagnostic.wsl.found = true;
           fileLog('INFO', `findOpenCodePath: Found in WSL: ${wslPath}`);
-          return { path: wslPath, isWSL: true, diagnostic };
+          return { path: wslPath, isWSL: true, pathEnv: r.pathEnv || null, diagnostic };
         }
       } catch (error) {
         kind = 'transient';
@@ -396,8 +434,9 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
     fileLog('INFO', `startOpenCodeServer: proxy http=${!!p.http} https=${!!p.https} noProxy=${!!p.noProxy}`);
 
     if (isWSL) {
-      fileLog('INFO', `startOpenCodeServer: Spawning via WSL: wsl.exe ${found.path} serve --port ${port}`);
-      opencodeProcess = spawn('wsl.exe', [found.path, 'serve', '--port', port.toString()], {
+      const args = wslSpawnArgs(found, port);
+      fileLog('INFO', `startOpenCodeServer: Spawning via WSL: wsl.exe ${args.join(' ')}`);
+      opencodeProcess = spawn('wsl.exe', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: spawnEnv
       });
@@ -413,18 +452,27 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
       });
     }
 
+    // 서버가 뜨기 전에 프로세스가 끝나면(node 없음 등) 30초를 기다리지 않고 바로 실패한다.
+    // 예전에는 exit 127로 즉사해도 "서버 시작 시간 초과"만 남았다.
+    let outputTail = '';
+    let exited = null;
+    const keepTail = (data) => { outputTail = (outputTail + data.toString()).slice(-2000); };
     opencodeProcess.stdout.on('data', (data) => {
+      keepTail(data);
       fileLog('INFO', `[opencode] ${data.toString().trimEnd()}`);
     });
     opencodeProcess.stderr.on('data', (data) => {
+      keepTail(data);
       fileLog('INFO', `[opencode] ${data.toString().trimEnd()}`);
     });
     opencodeProcess.on('exit', (code, signal) => {
       fileLog(code === 0 ? 'INFO' : 'ERROR', `OpenCode process exited: code=${code}, signal=${signal}`);
+      exited = exited || { code, signal };
       opencodeProcess = null;
     });
     opencodeProcess.on('error', (error) => {
       fileLog('ERROR', `OpenCode process spawn error: ${error.message}`);
+      exited = exited || { code: null, signal: null, error: error.message };
       opencodeProcess = null;
     });
 
@@ -433,6 +481,13 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
     while (attempts < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       const available = await checkOpenCodeServer(port);
+      if (!available && exited) {
+        // stdout/stderr의 마지막 조각이 exit 뒤에 도착할 수 있어 잠깐 기다린다.
+        await new Promise(resolve => setTimeout(resolve, 200));
+        throw new Error(exited.error
+          ? `opencode 실행 실패: ${exited.error}`
+          : earlyExitMessage(exited.code, exited.signal, outputTail));
+      }
       if (available) {
         fileLog('INFO', `startOpenCodeServer: Server ready on port ${port} after ${attempts + 1}s`);
         recordServerListener(port, spawnEnv);
@@ -1146,5 +1201,5 @@ if (require.main === module) {
   main();
 } else {
   // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
-  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory, mergeWindowsPath, parseRegistryPathOutput, windowsKnownOpenCodeDirs, withWindowsPath, windowsSpawnCommand, interpretWslResult, wslStdout };
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory, mergeWindowsPath, parseRegistryPathOutput, windowsKnownOpenCodeDirs, withWindowsPath, windowsSpawnCommand, interpretWslResult, wslStdout, buildWslPath, wslSpawnArgs, earlyExitMessage };
 }

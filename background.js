@@ -13,7 +13,7 @@ import { MIN_HOST_VERSION } from './lib/host-version.mjs';
 import { buildFolderList, pushRecent, folderKey, mergeFavorites, parseFavoritesFile, FAVORITES_EXPORT_TYPE } from './lib/folder-list.mjs';
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
-import { normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
+import { QUICK_ACTION_LIMITS, normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -2739,7 +2739,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({
             success: true,
             actions: list.map((a) => ({ ...a, visible: isQuickActionVisible(a, host) })),
-            hiddenBuiltins: list.filter((a) => a.builtin && a.enabled === false).length
+            hiddenBuiltins: list.filter((a) => a.builtin && a.enabled === false).length,
+            limits: QUICK_ACTION_LIMITS // 편집 폼의 글자 수 표시·한도(사이드패널은 lib을 불러오지 않는다)
           });
           break;
         }

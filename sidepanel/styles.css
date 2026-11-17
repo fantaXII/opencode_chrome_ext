@@ -1025,10 +1025,108 @@ button, select, input, textarea {
   font-size: 11.5px;
 }
 
-.message.page-note.changed .page-note-hint {
-  color: var(--accent-text);
+/* 대화 중 페이지 이동 기록(제목·URL은 맨 윗줄에 있으므로 한 줄 구분선만) */
+.message.page-divider {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.message.page-divider::before,
+.message.page-divider::after {
+  content: '';
+  flex: 1 1 16px;
+  min-width: 16px;
+  border-top: 1px solid var(--border);
+}
+.message.page-divider span {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ============================================
+   맨 윗줄: 현재 페이지 + 빠른 실행
+   ============================================ */
+.page-bar {
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  margin: 0 12px 4px;
+  padding: 5px 6px 5px 10px;
+  background: var(--bg-pill);
+  border-radius: var(--radius-s);
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: box-shadow 0.3s;
+}
+.page-bar.flash { box-shadow: 0 0 0 2px var(--accent); }
+.page-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+}
+.page-bar-icon { flex-shrink: 0; font-size: 12px; }
+.page-bar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.page-bar-title, .page-bar-url {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.page-bar-title { font-weight: 600; color: var(--text-primary); }
+.page-bar-url { display: none; font-size: 11px; opacity: 0.85; }
+.page-bar.expanded .page-bar-url:not(:empty) { display: block; }
+.page-bar-new {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10.5px;
   font-weight: 600;
 }
+.page-bar-toggle {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.page-bar-toggle:hover { border-color: var(--accent); color: var(--accent-text); }
+.page-bar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.page-bar-panel { margin-top: 6px; }
+/* 접힌 상태에서 연 버튼 영역: 대화 위에 겹쳐 띄워 레이아웃(스크롤 위치)이 바뀌지 않게 한다 */
+.page-bar.overlay .page-bar-panel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  max-height: 65vh;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-pop);
+}
+.page-bar.expanded .page-bar-panel { max-height: 55vh; overflow-y: auto; }
 
 /* ============================================
    마크다운
@@ -2572,14 +2670,12 @@ button, select, input, textarea {
 }
 
 /* ============================================
-   페이지 말풍선의 빠른 실행 버튼 / 추가·편집 폼 / 우클릭 메뉴
+   빠른 실행 버튼(맨 윗줄) / 추가·편집 폼 / 우클릭 메뉴
    ============================================ */
 .quick-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
   gap: 6px;
-  margin-top: 8px;
 }
 .quick-action-btn {
   max-width: 100%;
@@ -2632,6 +2728,8 @@ button, select, input, textarea {
 .qa-sites { display: flex; flex-direction: column; gap: 3px; }
 .qa-sites label, .qa-read { display: flex; align-items: center; gap: 4px; cursor: pointer; overflow-wrap: anywhere; }
 .qa-sites input, .qa-read input { accent-color: var(--accent); flex-shrink: 0; }
+.qa-count { margin-top: -4px; text-align: right; font-size: 11px; color: var(--text-secondary); }
+.qa-count.over { color: var(--error); font-weight: 600; }
 .qa-error { color: var(--error); min-height: 0; }
 .qa-error:empty { display: none; }
 .qa-form-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }

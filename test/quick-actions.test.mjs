@@ -186,3 +186,12 @@ test('mergeQuickActions: 기존 순서·숨김은 유지, 잘못된 항목·기�
   assert.equal(full.added, QUICK_ACTION_LIMITS.max);
   assert.equal(full.skipped, 3);
 });
+
+test('긴 프롬프트: 3400자(공백 포함)는 저장되고 20,000자를 넘으면 거절', () => {
+  assert.equal(QUICK_ACTION_LIMITS.prompt, 20000);
+  const long = '가 나다 '.repeat(680); // 3400자
+  assert.equal(long.length, 3400);
+  const r = validateQuickActionInput({ label: '긴 지시', prompt: long });
+  assert.ok(r.ok);
+  assert.equal(validateQuickActionInput({ label: 'a', prompt: 'x'.repeat(20001) }).error, '프롬프트가 너무 깁니다.');
+});
