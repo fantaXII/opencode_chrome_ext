@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.24.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.0...v2.24.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* WSL nvm opencode 실행 실패 수정, 빠른 실행을 맨 윗줄로 이동 ([1f5bab3](https://github.com/fantaXII/opencode_chrome_ext/commit/1f5bab36b051be4e55bcac25d9948ffe0ec881c6))
+* 인스톨러가 프록시를 사용자 환경변수에 영구 저장하지 않게 수정 ([de55b1a](https://github.com/fantaXII/opencode_chrome_ext/commit/de55b1ac248437005091bea75beddd84cfcb8245))
+
 # [2.24.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.23.0...v2.24.0) (2026-11-16)
 
 
