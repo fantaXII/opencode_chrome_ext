@@ -3487,23 +3487,23 @@ I18N.ready.then(function() {
     return list;
   }
 
-  function setInputFromHistory(text) {
+  // ↑로 불러오면 커서를 맨 앞에, ↓로 불러오면 맨 뒤에 둔다. 그래야 같은 방향을 계속 누르면 바로 다음 기록으로 넘어간다.
+  function setInputFromHistory(text, direction) {
     messageInput.value = text;
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-    const end = text.length;
-    messageInput.setSelectionRange(end, end);
+    const pos = direction < 0 ? 0 : text.length;
+    messageInput.setSelectionRange(pos, pos);
     updateSendButtonState();
   }
 
-  // 기록을 불러온 뒤 고치지 않았으면 커서 위치와 상관없이 넘긴다. 직접 입력 중이면 여러 줄 편집을 깨지 않도록
-  // ↑는 커서가 첫 줄에 있을 때, ↓는 마지막 줄에 있을 때만 기록을 넘긴다.
+  // TUI(opencode prompt)와 같이 ↑는 커서가 입력 맨 앞(0)일 때, ↓는 맨 끝일 때만 기록을 넘긴다.
+  // 그 밖의 위치에서는 기본 동작(줄/커서 이동)이라, 한 줄 입력이면 ↑ 한 번은 맨 앞으로 가고 다음 ↑부터 기록을 넘긴다.
   function navigatePromptHistory(direction) {
     const { selectionStart, selectionEnd, value } = messageInput;
-    if (historyIndex === -1) {
-      if (direction > 0) return false; // 최신보다 아래는 없다
-      if (selectionStart !== selectionEnd || value.slice(0, selectionStart).includes('\n')) return false;
-    }
+    if (selectionStart !== selectionEnd) return false;
+    if (direction < 0 ? selectionStart !== 0 : selectionStart !== value.length) return false;
+    if (historyIndex === -1 && direction > 0) return false; // 최신보다 아래는 없다
     const history = getPromptHistory();
     if (history.length === 0) return false;
     if (historyIndex === -1) {
@@ -3514,12 +3514,12 @@ I18N.ready.then(function() {
       if (next < 0) return true; // 가장 오래된 기록에서 멈춤
       if (next >= history.length) {
         historyIndex = -1;
-        setInputFromHistory(historyDraft);
+        setInputFromHistory(historyDraft, direction);
         return true;
       }
       historyIndex = next;
     }
-    setInputFromHistory(history[historyIndex]);
+    setInputFromHistory(history[historyIndex], direction);
     return true;
   }
 
