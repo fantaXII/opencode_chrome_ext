@@ -423,30 +423,17 @@ if (Test-Path $privateConfigPath) {
     Write-Host "config.private.json 없음 - MCP/Proxy 설정 SKIP" -ForegroundColor Gray
 }
 
+# proxy는 이 설치 프로세스 안에서만 쓴다(Install-NodeJS → Configure-Proxy가 Node.js 다운로드에 사용).
+# NSIS는 이 스크립트를 창 없이 실행하므로 수동 프록시 입력이 동작하지 않아, 이 값이 유일한 경로다.
+# 예전에는 사용자 환경변수(HTTP_PROXY 등)에도 영구 저장했지만, 모든 프로그램에 프록시가 걸리고
+# ⚙에서 프록시를 지워도 서버가 계속 그 값을 물려받아 쓰지 않는다. opencode 서버의 프록시는
+# 아래 proxy.json → 확장 ⚙ 설정으로 넘어가 서버를 띄울 때 주입된다(WSL에도 적용).
 if ($privateConfig -and $privateConfig.proxy) {
     $p = $privateConfig.proxy
-    if ($p.http) {
-        $env:http_proxy = $p.http;  $env:HTTP_PROXY  = $p.http
-        [System.Environment]::SetEnvironmentVariable('http_proxy', $p.http,  'User')
-        [System.Environment]::SetEnvironmentVariable('HTTP_PROXY',  $p.http,  'User')
-    }
-    if ($p.https) {
-        $env:https_proxy = $p.https; $env:HTTPS_PROXY = $p.https
-        [System.Environment]::SetEnvironmentVariable('https_proxy', $p.https, 'User')
-        [System.Environment]::SetEnvironmentVariable('HTTPS_PROXY', $p.https, 'User')
-    }
-    if ($p.noProxy) {
-        # NO_PROXY는 기존 항목 보존 + 신규 항목 추가 (중복 제거)
-        $existingNoProxy = [System.Environment]::GetEnvironmentVariable('NO_PROXY', 'User')
-        $merged = (@($existingNoProxy -split ',') + @($p.noProxy -split ',') |
-                   Where-Object { $_ -match '\S' } |
-                   ForEach-Object { $_.Trim() } |
-                   Select-Object -Unique) -join ','
-        $env:no_proxy = $merged;  $env:NO_PROXY = $merged
-        [System.Environment]::SetEnvironmentVariable('no_proxy', $merged, 'User')
-        [System.Environment]::SetEnvironmentVariable('NO_PROXY',  $merged, 'User')
-    }
-    Write-Host "Proxy 환경변수 설정 완료 (HTTP=$($p.http)) - 사용자 환경변수에 영구 저장됨" -ForegroundColor Gray
+    if ($p.http)    { $env:http_proxy  = $p.http;    $env:HTTP_PROXY  = $p.http }
+    if ($p.https)   { $env:https_proxy = $p.https;   $env:HTTPS_PROXY = $p.https }
+    if ($p.noProxy) { $env:no_proxy    = $p.noProxy; $env:NO_PROXY    = $p.noProxy }
+    Write-Host "Proxy 설정 로드 (HTTP=$($p.http)) - 설치 중 다운로드와 확장 ⚙ 설정 초기값에 사용" -ForegroundColor Gray
 
     # config.private.json은 설치 끝에 삭제되므로, 확장이 설정 화면에 보여줄 수 있게 proxy 섹션만 따로 남긴다.
     try {

@@ -128,7 +128,9 @@ Chrome Web Store에서 **OpenCode Chrome Extension**을 설치합니다. 확장 
 
 Native Host가 없으면 사이드패널이 설치 안내와 다운로드 링크를 보여줍니다. 설치된 host가 확장보다 구버전이면 업데이트 안내가 뜹니다(host는 Web Store가 갱신하지 못하므로 새 `.exe`를 기존 설치 위에 다시 설치하면 됩니다).
 
-> **사내 사용자**: `config.private.json`(`config.private.json.sample` 참고)을 `.exe`와 같은 폴더에 두고 실행하면 프록시·MCP 설정이 함께 적용됩니다. 파일은 설치가 끝나면 삭제되고, 프록시 값은 `%LOCALAPPDATA%\OpenCodeChrome\proxy.json`에 남아 확장의 ⚙ 설정으로 한 번 가져옵니다.
+> **사내 사용자**: 배포받은 `config.private.json`(`config.private.json.sample` 참고)이 있으면 `.exe`와 같은 폴더에 두고 실행하세요. MCP 설정이 Windows·WSL의 `~/.mcp.json`에 합쳐집니다. 프록시는 설치 후 ⚙ 설정에서 지정하면 되고, 이 파일의 `proxy`는 선택입니다. 넣으면 (1) PC에 Node.js가 없어 설치 중 내려받아야 할 때 그 다운로드에 쓰이고(설치는 창 없이 진행돼 프록시를 물어볼 수 없으므로), (2) `%LOCALAPPDATA%\OpenCodeChrome\proxy.json`에 남아 ⚙ 설정의 초기값이 됩니다(⚙ 값을 한 번도 저장하지 않았을 때 서버를 처음 띄우거나 ⚙를 열 때 가져옵니다). 파일은 설치가 끝나면 삭제됩니다.
+>
+> 이전 버전 인스톨러는 이 프록시를 Windows 사용자 환경변수(`HTTP_PROXY`·`HTTPS_PROXY`·`NO_PROXY`와 소문자 이름)에도 영구 저장했습니다. ⚙에서 프록시를 지웠는데도 서버가 프록시를 쓰면, Windows "계정의 환경 변수 편집"에서 이 변수들을 지우고 Chrome을 다시 시작하세요.
 
 ### 3. 작동 확인
 

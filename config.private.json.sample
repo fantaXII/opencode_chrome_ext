@@ -1,5 +1,6 @@
 {
-  "_comment": "이 파일을 config.private.json으로 복사 후 값을 채우세요. git에 커밋하지 마세요.",
+  "_comment": "이 파일을 config.private.json으로 복사 후 값을 채우세요. git에 커밋하지 마세요. 필요 없는 섹션은 지워도 됩니다.",
+  "_comment_proxy": "선택. opencode 서버의 프록시는 설치 후 확장 ⚙ 설정에서 지정합니다. 여기 값은 (1) 설치 중 Node.js를 내려받을 때(PC에 Node.js가 없고 시스템 프록시로 접속되지 않는 경우)와 (2) ⚙ 설정 초기값에만 쓰입니다. 사용자 환경변수에는 저장하지 않습니다.",
   "proxy": {
     "http": "http://proxy.example.com:8080",
     "https": "http://proxy.example.com:8080",

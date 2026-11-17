@@ -449,7 +449,33 @@ async function getPreferredRuntime() {
 const PROXY_KEYS = ['http', 'https', 'noProxy'];
 
 /** 저장된 프록시 설정. 비어 있으면 host가 기존 시스템 환경변수를 그대로 쓴다. */
+// 인스톨러가 config.private.json의 proxy를 남겨 둔 proxy.json을 ⚙ 값이 한 번도 저장된 적 없을 때만 가져온다.
+// 서버를 띄울 때도 부른다: 인스톨러는 더 이상 사용자 환경변수에 프록시를 쓰지 않으므로, ⚙를 열지 않은
+// 사용자도 첫 서버부터 프록시가 적용되게 한다. proxy.json이 없으면 SW가 살아 있는 동안 다시 묻지 않는다.
+let _installedProxyChecked = false;
+async function importInstalledProxyIfUnset() {
+  if (_installedProxyChecked) return false;
+  try {
+    const { proxy: stored } = await chrome.storage.local.get('proxy');
+    if (stored !== undefined) { _installedProxyChecked = true; return false; }
+    const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-installed-proxy' });
+    _installedProxyChecked = true; // host가 응답했으면(값이 없어도) 확인 끝
+    const p = res?.status === 'success' ? res.proxy : null;
+    if (p && !validateProxyUrl(p.http) && !validateProxyUrl(p.https)) {
+      const next = {};
+      for (const k of PROXY_KEYS) next[k] = typeof p[k] === 'string' ? p[k].trim() : '';
+      await chrome.storage.local.set({ proxy: next });
+      debugLog('INFO', 'Proxy: config.private.json 값을 가져와 저장');
+      return true;
+    }
+  } catch (e) {
+    debugLog('WARN', `Proxy: 설치된 proxy 조회 실패 - ${e.message}`);
+  }
+  return false;
+}
+
 async function getProxy() {
+  await importInstalledProxyIfUnset();
   const out = { http: '', https: '', noProxy: '' };
   try {
     const { proxy } = await chrome.storage.local.get('proxy');
@@ -3226,23 +3252,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 프록시 설정 조회
         case 'get-proxy': {
           // 저장된 값이 한 번도 없으면 인스톨러가 남긴 config.private.json의 proxy를 가져와 저장한다.
-          let imported = false;
-          try {
-            const { proxy: stored } = await chrome.storage.local.get('proxy');
-            if (stored === undefined) {
-              const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'get-installed-proxy' });
-              const p = res?.status === 'success' ? res.proxy : null;
-              if (p && !validateProxyUrl(p.http) && !validateProxyUrl(p.https)) {
-                const next = {};
-                for (const k of PROXY_KEYS) next[k] = typeof p[k] === 'string' ? p[k].trim() : '';
-                await chrome.storage.local.set({ proxy: next });
-                imported = true;
-                debugLog('INFO', 'Proxy: config.private.json 값을 가져와 저장');
-              }
-            }
-          } catch (e) {
-            debugLog('WARN', `Proxy: 설치된 proxy 조회 실패 - ${e.message}`);
-          }
+          const imported = await importInstalledProxyIfUnset();
           sendResponse({ success: true, proxy: await getProxy(), imported });
           break;
         }

@@ -23,7 +23,7 @@
     '<code>.exe</code> 파일을 실행합니다': 'Run the <code>.exe</code> file',
     'SmartScreen 경고 → <strong>추가 정보</strong> → <strong>실행</strong> 클릭': 'If SmartScreen warns you: <strong>More info</strong> → <strong>Run anyway</strong>',
     '설치 완료 후 아래 <strong>다시 연결</strong> 버튼을 누릅니다': 'After installing, press <strong>Reconnect</strong> below',
-    '<strong>사내 사용자:</strong> <code>config.private.json</code> 파일을 <code>.exe</code>와 같은 폴더에 두고 실행하세요. (proxy/MCP 자동 설정)': '<strong>Corporate users:</strong> put <code>config.private.json</code> in the same folder as the <code>.exe</code> and run it. (configures proxy/MCP automatically)',
+    '<strong>사내 사용자:</strong> 배포받은 <code>config.private.json</code>이 있으면 <code>.exe</code>와 같은 폴더에 두고 실행하세요(MCP 자동 설정). 프록시는 설치 후 ⚙ 설정에서 지정합니다.': '<strong>Corporate users:</strong> if you were given a <code>config.private.json</code>, put it in the same folder as the <code>.exe</code> and run it (configures MCP automatically). Set the proxy in ⚙ Settings after installing.',
     '⬇ 인스톨러 다운로드': '⬇ Download installer',
     '↺ 다시 연결': '↺ Reconnect',
     '나중에': 'Later',
