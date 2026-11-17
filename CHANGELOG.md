@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.24.2](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.1...v2.24.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* 입력 기록 ↑/↓를 TUI처럼 입력 맨 앞·맨 끝에서만 동작하게 수정 ([164fc88](https://github.com/fantaXII/opencode_chrome_ext/commit/164fc88e040fdc269a045c9a06d0f7c437aa90cc))
+
 ## [2.24.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.0...v2.24.1) (2026-11-17)
 
 
