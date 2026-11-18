@@ -669,6 +669,23 @@ button, select, input, textarea {
   flex-shrink: 1;
 }
 
+/* 제목 + 버튼 묶음 줄(백업의 내보내기/가져오기 등): 한 줄에 안 들어가면 글자·버튼 문구를 꺾지 않고
+   버튼 묶음 전체를 다음 줄 오른쪽으로 내린다. select 줄은 위처럼 select가 줄어드는 쪽이라 제외한다. */
+.settings-row:has(> .settings-row-end) {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.settings-row:has(> .settings-row-end) > :first-child {
+  white-space: nowrap;
+}
+.settings-row > .settings-row-end {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.settings-dropdown .mcp-action-btn {
+  white-space: nowrap;
+}
+
 .settings-row-end {
   display: flex;
   align-items: center;
