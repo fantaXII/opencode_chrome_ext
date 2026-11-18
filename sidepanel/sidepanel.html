@@ -55,6 +55,8 @@
       </div>
     </div>
 
+    <!-- 버튼을 스크롤 영역 위에 띄우려고 감싼다(스크롤 영역 안에 두면 내용과 같이 움직인다) -->
+    <div class="messages-wrap">
     <div id="messages-container" class="messages-container">
       <div class="welcome-section">
         <div class="welcome-logo">
@@ -67,6 +69,12 @@
         <p class="welcome-desc" data-i18n-html>페이지 요약, 설명, 검색 등을<br>요청해보세요.</p>
         <p class="welcome-hint" data-i18n-html>메시지를 입력하거나 <kbd>/</kbd> 로 커맨드를 실행하세요.</p>
       </div>
+    </div>
+    <button type="button" id="scroll-bottom-btn" class="scroll-bottom-btn hidden" title="맨 아래로 (Ctrl+End)" aria-label="맨 아래로" data-i18n-title data-i18n-aria-label>
+      <span class="scroll-bottom-dot" aria-hidden="true"></span>
+      <span class="scroll-bottom-arrow" aria-hidden="true">↓</span>
+      <span class="scroll-bottom-label" id="scroll-bottom-label"></span>
+    </button>
     </div>
     <div class="input-area" id="input-area">
       <!-- 응답 진행 표시. 화면 위에 떠 있으면 위로 열리는 모델·폴더 드롭다운과 겹쳐서 입력 영역 맨 위(흐름 안)에 둔다 -->

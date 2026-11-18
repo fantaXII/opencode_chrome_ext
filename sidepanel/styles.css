@@ -889,14 +889,63 @@ button, select, input, textarea {
 /* ============================================
    메시지 목록
    ============================================ */
+.messages-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .messages-container {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
+
+/* 위로 스크롤해 자동 스크롤이 멈췄을 때만 보이는 "맨 아래로" 버튼 */
+.scroll-bottom-btn {
+  position: absolute;
+  right: 16px;
+  bottom: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 10px;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-l);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.scroll-bottom-btn.hidden { display: none; }
+.scroll-bottom-btn:hover { border-color: var(--accent); color: var(--accent-text); }
+.scroll-bottom-arrow { font-size: 15px; line-height: 1; }
+.scroll-bottom-label:empty, .scroll-bottom-dot { display: none; }
+.scroll-bottom-btn.has-new .scroll-bottom-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.scroll-bottom-btn.needs-attention {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.scroll-bottom-btn.needs-attention .scroll-bottom-dot { background: var(--warn); }
 
 .welcome-section {
   text-align: center;

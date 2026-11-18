@@ -29,6 +29,13 @@ I18N.ready.then(function() {
   }
 
   const messagesContainer = document.getElementById('messages-container');
+  // 자동 스크롤 상태 — 설명은 scrollToBottom() 위 주석 참고
+  const SCROLL_FOLLOW_THRESHOLD_PX = 40;
+  const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
+  const scrollBottomLabel = document.getElementById('scroll-bottom-label');
+  let followBottom = true;
+  let scrollNotice = null; // null | 'new' | 'attention'(권한·질문 카드처럼 답이 필요한 내용)
+  let lastScrollTop = 0;
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
   const modelSelect = document.getElementById('model-select');
@@ -306,6 +313,7 @@ I18N.ready.then(function() {
     if (!result?.newSessionId) return;
     currentSessionId = result.newSessionId;
     messagesContainer.innerHTML = '';
+    resetScrollFollow();
     setPageBarMode('expanded'); // 빈 대화 = 첫 화면
     addBotMessage(t('작업 디렉토리가 변경되어 새 세션을 시작합니다. 이전 대화는 /sessions로 다시 열 수 있습니다.'));
   }
@@ -486,6 +494,7 @@ I18N.ready.then(function() {
       const set = await sendMessageToBackground('set-working-directory', { directory: path });
       if (set?.success === false) throw new Error(workingDirError(set));
       messagesContainer.innerHTML = '';
+      resetScrollFollow();
       setPageBarMode('expanded');
       const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
       currentSessionId = result.success ? result.sessionId : null;
@@ -711,6 +720,7 @@ I18N.ready.then(function() {
   function clearStaleTranscript() {
     if (messagesContainer.querySelector('.message')) {
       messagesContainer.innerHTML = '';
+      resetScrollFollow();
     }
   }
 
@@ -774,6 +784,7 @@ I18N.ready.then(function() {
       const welcome = messagesContainer.querySelector('.welcome-section');
       if (welcome) welcome.remove();
       messagesContainer.innerHTML = ''; // 이중 안전장치
+      resetScrollFollow();
 
       const messages = (res.success && res.messages) || [];
       const notices = (res.success && res.notices) || [];
@@ -849,7 +860,7 @@ I18N.ready.then(function() {
     div.innerHTML = `<div class="page-note-hint">${escapeHtml(t('이 페이지에 대해 요약, 설명, 검색 등을 요청해보세요.'))}</div>`;
     messagesContainer.insertBefore(div, messagesContainer.firstChild);
     setPageBar(title, url, { expand: true });
-    scrollToBottom();
+    scrollToBottom({ force: true });
   }
 
   // 대화 중 페이지 이동: 대화에는 기록용 구분선 한 줄만 남기고, 맨 윗줄은 펼치지 않고 잠깐 강조한다.
@@ -1893,7 +1904,7 @@ I18N.ready.then(function() {
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(content);
     messagesContainer.appendChild(messageDiv);
-    scrollToBottom();
+    scrollToBottom({ force: true });
   }
 
   function showModelPicker() {
@@ -1935,7 +1946,7 @@ I18N.ready.then(function() {
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(content);
     messagesContainer.appendChild(messageDiv);
-    scrollToBottom();
+    scrollToBottom({ force: true });
   }
 
   async function executeCommand(input) {
@@ -1958,6 +1969,7 @@ I18N.ready.then(function() {
 
     if (slash === '/clear') {
       messagesContainer.innerHTML = '';
+      resetScrollFollow();
       setPageBarMode('expanded');
       try {
         // tabId를 넘겨야 이 탭이 새 세션에 연결된다(안 넘기면 탭 전환 후 이전 세션으로 돌아갔다)
@@ -1977,6 +1989,7 @@ I18N.ready.then(function() {
     if (slash === '/new') {
       if (isLoading) { addBotMessage(t('응답 중에는 새 세션을 시작할 수 없습니다.')); sendBtn.disabled = false; return; }
       messagesContainer.innerHTML = '';
+      resetScrollFollow();
       setPageBarMode('expanded');
       try {
         const result = await sendMessageToBackground('create-session', { title: 'Chrome Extension Chat', tabId: currentTabId });
@@ -2303,7 +2316,7 @@ I18N.ready.then(function() {
       contentDiv.appendChild(list);
     }
     messagesContainer.appendChild(messageDiv);
-    scrollToBottom();
+    scrollToBottom({ force: true });
     return messageDiv;
   }
 
@@ -3421,9 +3434,89 @@ I18N.ready.then(function() {
     }
   });
 
-  function scrollToBottom() {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  // ===== 자동 스크롤 (TUI처럼 바닥에 있을 때만 따라간다) =====
+  // 예전에는 스트리밍 렌더가 프레임마다 무조건 바닥으로 내려서, 응답 중에는 위로 올라갈 수 없었다.
+  // followBottom이 꺼져 있으면 응답이 와도 내리지 않고 "맨 아래로" 버튼에 새 내용 표시만 단다.
+  // - 끔: 사용자가 위로 스크롤(휠 위로는 즉시, 스크롤바·키보드·터치는 scroll 이벤트의 방향으로 판단)
+  // - 켬: 사용자가 바닥 근처(SCROLL_FOLLOW_THRESHOLD_PX)까지 내려옴, 버튼·Ctrl+End,
+  //       force 호출(메시지 전송, 기록 다시 그림, 선택기 표시 등 사용자가 시작한 동작)
+  // 상태 변수(followBottom 등)는 초기화 중에도 쓰이므로 파일 앞쪽 messagesContainer 옆에 둔다.
+
+  function distanceFromBottom() {
+    return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight;
   }
+
+  function updateScrollBottomBtn() {
+    const show = !followBottom && distanceFromBottom() > SCROLL_FOLLOW_THRESHOLD_PX;
+    scrollBottomBtn.classList.toggle('hidden', !show);
+    scrollBottomBtn.classList.toggle('has-new', show && !!scrollNotice);
+    scrollBottomBtn.classList.toggle('needs-attention', show && scrollNotice === 'attention');
+    scrollBottomLabel.textContent = !show || !scrollNotice ? ''
+      : scrollNotice === 'attention' ? t('응답 필요') : t('새 응답');
+  }
+
+  function setFollowBottom(on) {
+    followBottom = on;
+    if (on) scrollNotice = null;
+    updateScrollBottomBtn();
+  }
+
+  // 따라가는 중이 아닐 때 아래에 새 내용이 생겼음을 버튼에 표시한다. attention은 new보다 우선한다.
+  function noteContentBelow(kind = 'new') {
+    if (followBottom) return;
+    if (kind === 'attention' || !scrollNotice) scrollNotice = kind;
+    updateScrollBottomBtn();
+  }
+
+  function scrollToBottom({ force = false, smooth = false } = {}) {
+    if (!force && !followBottom) {
+      noteContentBelow('new');
+      return;
+    }
+    setFollowBottom(true);
+    if (smooth) messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
+    else messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    lastScrollTop = messagesContainer.scrollTop;
+  }
+
+  // 대화를 비우고 새로 그릴 때. 남아 있던 "멈춤" 상태가 새 대화의 자동 스크롤을 막지 않게 한다.
+  function resetScrollFollow() {
+    lastScrollTop = 0;
+    setFollowBottom(true);
+  }
+
+  messagesContainer.addEventListener('wheel', (e) => {
+    // 스크롤 애니메이션이 진행되는 동안 다음 렌더가 바닥으로 되돌리지 않게, scroll 이벤트를 기다리지 않고 끈다.
+    if (e.deltaY < 0 && messagesContainer.scrollHeight > messagesContainer.clientHeight) setFollowBottom(false);
+  }, { passive: true });
+
+  messagesContainer.addEventListener('scroll', () => {
+    const top = messagesContainer.scrollTop;
+    const dist = distanceFromBottom();
+    if (dist <= SCROLL_FOLLOW_THRESHOLD_PX) {
+      // 위로 가는 중(휠 애니메이션의 첫 프레임 등)에는 다시 켜지 않는다. 내용이 줄어 위치가 당겨진 경우도 바닥이라 그대로 둔다.
+      if (top >= lastScrollTop && !followBottom) setFollowBottom(true);
+    } else if (top < lastScrollTop) {
+      if (followBottom) setFollowBottom(false);
+    }
+    lastScrollTop = top;
+    updateScrollBottomBtn();
+  }, { passive: true });
+
+  // 패널 크기가 바뀌어도(창 크기 조절 등) 따라가는 중이면 바닥을 유지한다.
+  new ResizeObserver(() => {
+    if (followBottom) messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    updateScrollBottomBtn();
+  }).observe(messagesContainer);
+
+  scrollBottomBtn.addEventListener('click', () => scrollToBottom({ force: true, smooth: true }));
+
+  document.addEventListener('keydown', (e) => {
+    // 입력창에서는 기본 동작(커서를 입력 끝으로)도 그대로 둔다.
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key === 'End') {
+      scrollToBottom({ force: true });
+    }
+  });
 
   function renderMarkdown(raw) {
     const text = raw || '';
@@ -3764,7 +3857,7 @@ I18N.ready.then(function() {
     loadingDiv.className = 'message bot-message';
     loadingDiv.innerHTML = `<div class="message-avatar">🔍</div><div class="message-content">${t('디버그 로그 수집 중...')}</div>`;
     messagesContainer.appendChild(loadingDiv);
-    scrollToBottom();
+    scrollToBottom({ force: true });
 
     let result;
     try {
@@ -3895,6 +3988,7 @@ I18N.ready.then(function() {
     messagesContainer.appendChild(card);
     if (isLoading) addTypingIndicator(); // 이어지는 응답은 카드 아래에 그려진다
     scrollToBottom();
+    noteContentBelow('attention'); // 따라가는 중이 아니면 끌어내리지 않고 버튼만 강조한다
   }
 
   function interactionCardShell(title, subtitle) {
@@ -4375,7 +4469,7 @@ I18N.ready.then(function() {
     }
     if (stream.retry) showRetryStatus(stream.retry);
     renderProgress();
-    scrollToBottom();
+    scrollToBottom({ force: true });
   }
 
   function handleRuntimeMessage(message) {
