@@ -658,6 +658,17 @@ button, select, input, textarea {
   gap: 8px;
 }
 
+/* 메뉴 폭(280px)에서 select가 자리를 먼저 차지하면 제목이 "페이지 컨텍스트 / ⓘ"처럼 두 줄로 꺾인다.
+   제목은 한 줄로 두고, 긴 선택값은 select가 줄어들며 말줄임(…)으로 보인다. */
+.settings-row > .settings-title {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.settings-row > .settings-select {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
 .settings-row-end {
   display: flex;
   align-items: center;
