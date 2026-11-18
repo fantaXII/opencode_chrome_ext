@@ -468,12 +468,14 @@ button, select, input, textarea {
 
 .mcp-action-btn.danger {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--error);
+  border: 1px solid var(--error);
+  font-weight: 700;
 }
 
 .mcp-action-btn.danger:hover:not(:disabled) {
-  background: var(--error-bg);
-  color: var(--error);
+  background: var(--error);
+  color: #fff;
 }
 
 /* 다른 탭의 응답을 기다리는 동안 상태 문구 옆에 붙는 취소 버튼 */
@@ -697,6 +699,46 @@ button, select, input, textarea {
 
 .settings-collapse[open] {
   gap: 8px;
+}
+
+/* 서버 그룹 안에 들어간 프록시처럼 섹션 안의 접힘 블록 */
+.settings-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+/* 섹션 묶음 제목(서버·정보) */
+.settings-group-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* 고정 설명은 ⓘ에 마우스를 올리면 보인다 */
+.settings-info {
+  display: inline-block;
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+.settings-info:hover { color: var(--accent-text); }
+
+.settings-restart-btn {
+  text-align: center;
+  margin-top: 2px;
+}
+
+.settings-mini-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: var(--radius-pill);
 }
 
 .settings-update {

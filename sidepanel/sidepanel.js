@@ -2831,6 +2831,7 @@ I18N.ready.then(function() {
 
   // 정보 섹션 상태: 패널을 여는 동안 유지한다.
   let proxyOpen = false;          // 프록시 섹션 펼침 여부(다시 그려도 유지)
+  let backupOpen = false;         // 백업 섹션 펼침 여부(가져오기 결과 표시로 다시 그려도 유지)
   let proxyCache = null;          // 저장된 프록시 값(null = 아직 읽지 않음, 패널을 열 때마다 새로 읽는다)
   let proxyDraft = null;          // 저장하지 않은 입력값(재렌더 시 유지)
   let hostInfo = null;            // check-host-version 결과 캐시
@@ -3094,6 +3095,9 @@ I18N.ready.then(function() {
 
     loadHostInfo();
 
+    // 고정 설명은 제목 옆 ⓘ 툴팁으로 두고, 현재 상태·경고만 본문에 보인다(메뉴 높이 줄이기).
+    const tip = (text) => `<span class="settings-info" title="${escapeHtml(text)}" aria-label="${escapeHtml(text)}">ⓘ</span>`;
+
     settingsDropdown.innerHTML = `
       <div class="settings-section">
         <label class="settings-row">
@@ -3103,33 +3107,28 @@ I18N.ready.then(function() {
             <option value="en"${I18N.getLang() === 'en' ? ' selected' : ''}>English</option>
           </select>
         </label>
-      </div>
-      <div class="settings-section">
         <label class="settings-row">
-          <span class="settings-title">${t('페이지 컨텍스트')}</span>
+          <span class="settings-title">${t('페이지 컨텍스트')} ${tip(t('메시지를 보낼 때 현재 탭 정보를 함께 보냅니다. 이 정보는 OpenCode를 거쳐 설정한 AI 제공자에게 전달됩니다.'))}</span>
           <select id="page-context-select" class="settings-select">
             <option value="off"${pageContextMode === 'off' ? ' selected' : ''}>${t('보내지 않음')}</option>
             <option value="basic"${pageContextMode === 'basic' ? ' selected' : ''}>${t('제목·URL')}</option>
             <option value="full"${pageContextMode === 'full' ? ' selected' : ''}>${t('제목·URL·본문·선택 텍스트')}</option>
           </select>
         </label>
-        <div class="settings-current">${t('메시지를 보낼 때 현재 탭 정보를 함께 보냅니다. 이 정보는 OpenCode를 거쳐 설정한 AI 제공자에게 전달됩니다.')}</div>
         ${pageContextMode === 'full' && !pageAccessGranted
           ? `<div class="settings-current warn">${t('⚠ 페이지 읽기 권한이 없어 제목·URL만 보냅니다. 다시 선택하면 권한을 요청합니다.')}</div>`
           : ''}
-      </div>
-      <div class="settings-section">
         <label class="settings-row">
-          <span class="settings-title">${t('응답 제한 시간')}</span>
+          <span class="settings-title">${t('응답 제한 시간')} ${tip(responseTimeoutMin === 0
+            ? t('응답이 오래 걸려도 끊지 않습니다. 서버가 처리 중인지 주기적으로 확인하고, 멈추면 ■로 중단하세요.')
+            : t('이 시간 동안 아무 진행이 없으면 응답을 중단합니다. 다음 메시지부터 적용됩니다.'))}</span>
           <select id="response-timeout-select" class="settings-select">
             ${RESPONSE_TIMEOUT_CHOICES_MIN.map((m) => `<option value="${m}"${responseTimeoutMin === m ? ' selected' : ''}>${m === 0 ? t('없음') : t('{min}분', { min: m })}</option>`).join('')}
           </select>
         </label>
-        <div class="settings-current">${responseTimeoutMin === 0
-          ? t('응답이 오래 걸려도 끊지 않습니다. 서버가 처리 중인지 주기적으로 확인하고, 멈추면 ■로 중단하세요.')
-          : t('이 시간 동안 아무 진행이 없으면 응답을 중단합니다. 다음 메시지부터 적용됩니다.')}</div>
       </div>
       <div class="settings-section">
+        <div class="settings-group-title">${t('서버')}</div>
         <label class="settings-row">
           <span class="settings-title">${t('실행 환경')}</span>
           <select id="runtime-pref" class="settings-select"${dis}>
@@ -3139,51 +3138,50 @@ I18N.ready.then(function() {
           </select>
         </label>
         <div class="settings-current">${escapeHtml(currentText)}</div>
-      </div>
-      <details id="proxy-details" class="settings-section settings-collapse"${proxyOpen ? ' open' : ''}>
-        <summary class="settings-title">${t('프록시')} <span class="settings-muted">${proxySet ? t('(설정됨)') : t('(미설정)')}</span></summary>
-        <label class="settings-field">HTTP
-          <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${dis}>
-        </label>
-        <label class="settings-field">HTTPS
-          <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${dis}>
-        </label>
-        <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
-          <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
-        </label>
-        <div id="proxy-applied" class="proxy-applied hidden"></div>
-        <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
-        <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
-        <div class="settings-buttons">
-          <button id="proxy-reset-btn" class="mcp-action-btn"${dis}>${t('초기화')}</button>
-          <button id="proxy-save-btn" class="mcp-action-btn"${dis}>${t('저장')}</button>
-        </div>
-      </details>
-      <div class="settings-section">
-        <div class="settings-title">${t('작업 폴더 즐겨찾기')}</div>
-        <div class="settings-current">${t('확장을 삭제하면 즐겨찾기도 지워집니다. 파일로 백업해 두고 다시 가져올 수 있습니다.')}</div>
-        <div class="settings-buttons">
-          <button id="fav-export-btn" class="mcp-action-btn">${t('내보내기')}</button>
-          <button id="fav-import-btn" class="mcp-action-btn">${t('가져오기')}</button>
-        </div>
-        ${settingsIoTextHtml('fav')}
-      </div>
-      <div class="settings-section">
-        <div class="settings-title">${t('빠른 실행 버튼')}</div>
-        <div class="settings-current">${t('페이지 말풍선에 추가한 버튼을 파일로 백업하거나 다른 PC로 옮길 수 있습니다. 가져오면 기존 버튼에 합쳐집니다.')}</div>
-        <div class="settings-buttons">
-          <button id="qa-export-btn" class="mcp-action-btn">${t('내보내기')}</button>
-          <button id="qa-import-btn" class="mcp-action-btn">${t('가져오기')}</button>
-        </div>
-        ${settingsIoTextHtml('qa')}
-      </div>
-      <div class="mcp-actions">
-        <button id="settings-hard-restart-btn" class="mcp-action-btn danger"${dis}
-                title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('서버 강제 재시작')}</button>
+        <details id="proxy-details" class="settings-collapse settings-sub"${proxyOpen ? ' open' : ''}>
+          <summary class="settings-title">${t('프록시')} <span class="settings-muted">${proxySet ? t('(설정됨)') : t('(미설정)')}</span></summary>
+          <label class="settings-field">HTTP
+            <input id="proxy-http" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.http)}"${dis}>
+          </label>
+          <label class="settings-field">HTTPS
+            <input id="proxy-https" type="text" spellcheck="false" autocomplete="off" placeholder="http://host:8080" value="${escapeHtml(proxy.https)}"${dis}>
+          </label>
+          <label class="settings-field">${t('제외 목록 (NO_PROXY)')}
+            <input id="proxy-no" type="text" spellcheck="false" autocomplete="off" placeholder="localhost,127.0.0.1,*.internal" value="${escapeHtml(proxy.noProxy)}"${dis}>
+          </label>
+          <div id="proxy-applied" class="proxy-applied hidden"></div>
+          <div class="settings-current" title="${escapeHtml(t('계정이 필요하면 http://user:pass@host:port (비밀번호의 @ : / # % 는 %40 등으로 인코딩). 비워 두면 시스템 환경변수를 사용합니다.'))}">${t('계정: http://user:pass@host:port · 비우면 시스템 환경변수 사용')}</div>
+          <div class="settings-current warn">${t('⚠ 입력값은 브라우저에 평문으로 저장됩니다.')}</div>
+          <div class="settings-buttons">
+            <button id="proxy-reset-btn" class="mcp-action-btn"${dis}>${t('초기화')}</button>
+            <button id="proxy-save-btn" class="mcp-action-btn"${dis}>${t('저장')}</button>
+          </div>
+        </details>
+        <button id="settings-hard-restart-btn" class="mcp-action-btn danger settings-restart-btn"${dis}
+                title="${t('opencode 서버 프로세스를 종료하고 다시 시작합니다')}">${t('⟳ 서버 강제 재시작')}</button>
         <div id="settings-action-status" class="mcp-action-status hidden"></div>
       </div>
+      <details id="backup-details" class="settings-section settings-collapse"${backupOpen ? ' open' : ''}>
+        <summary class="settings-title">${t('백업')} <span class="settings-muted">${t('(즐겨찾기 · 빠른 실행)')}</span></summary>
+        <div class="settings-row">
+          <span>${t('작업 폴더 즐겨찾기')} ${tip(t('확장을 삭제하면 즐겨찾기도 지워집니다. 파일로 백업해 두고 다시 가져올 수 있습니다.'))}</span>
+          <span class="settings-row-end">
+            <button id="fav-export-btn" class="mcp-action-btn settings-mini-btn">${t('내보내기')}</button>
+            <button id="fav-import-btn" class="mcp-action-btn settings-mini-btn">${t('가져오기')}</button>
+          </span>
+        </div>
+        ${settingsIoTextHtml('fav')}
+        <div class="settings-row">
+          <span>${t('빠른 실행 버튼')} ${tip(t('페이지 말풍선에 추가한 버튼을 파일로 백업하거나 다른 PC로 옮길 수 있습니다. 가져오면 기존 버튼에 합쳐집니다.'))}</span>
+          <span class="settings-row-end">
+            <button id="qa-export-btn" class="mcp-action-btn settings-mini-btn">${t('내보내기')}</button>
+            <button id="qa-import-btn" class="mcp-action-btn settings-mini-btn">${t('가져오기')}</button>
+          </span>
+        </div>
+        ${settingsIoTextHtml('qa')}
+      </details>
       <div class="settings-section">
-        <div class="settings-title">${t('정보')}</div>
+        <div class="settings-group-title">${t('정보')}</div>
         <div class="settings-row">
           <span>${t('확장 v{version}', { version: escapeHtml(currentVersion) })}</span>
           <button id="update-check-btn" class="mcp-action-btn"${updateCheckBusy ? ' disabled' : ''}>${updateCheckBusy ? t('확인 중…') : t('업데이트 확인')}</button>
@@ -3230,6 +3228,7 @@ I18N.ready.then(function() {
     });
 
     document.getElementById('proxy-details')?.addEventListener('toggle', (e) => { proxyOpen = e.target.open; });
+    document.getElementById('backup-details')?.addEventListener('toggle', (e) => { backupOpen = e.target.open; });
     refreshAppliedProxyLine();
     // 패널을 그린 뒤 백그라운드로 조회를 시작한다(기다리지 않음). 사용자가 프록시 섹션을 펼칠 때
     // 아직 끝나지 않았으면 "확인 중…"이 보이고, 끝나면 그 줄만 갱신된다. 이미 조회했으면 무시된다.
