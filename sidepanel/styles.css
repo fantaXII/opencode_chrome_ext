@@ -2232,6 +2232,27 @@ button, select, input, textarea {
   font-weight: 600;
 }
 
+/* 연결 실패 안내의 보조 문구·명령(opencode 2.x 미지원 안내) */
+.connecting-detail {
+  margin-top: 8px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+.connecting-cmd {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: var(--radius-s);
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 400;
+  cursor: copy;
+  user-select: all;
+}
+
 .connecting-spinner {
   width: 44px;
   height: 44px;
