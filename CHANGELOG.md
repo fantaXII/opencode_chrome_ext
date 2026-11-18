@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.25.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.25.0...v2.25.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* opencode 2.x 서버를 감지해 서버를 계속 띄우지 않고 1.x로 내리라고 안내 ([39754bf](https://github.com/fantaXII/opencode_chrome_ext/commit/39754bf8153fe77216951d7c847eef8b5d9c669a))
+
 # [2.25.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.2...v2.25.0) (2026-11-18)
 
 
