@@ -1,5 +1,18 @@
 # Changelog
 
+# [2.25.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.2...v2.25.0) (2026-11-18)
+
+
+### Bug Fixes
+
+* ⚙ 백업 줄의 제목·버튼 문구가 두 줄로 꺾이지 않게 수정 ([ce43471](https://github.com/fantaXII/opencode_chrome_ext/commit/ce43471474a4638e169a7cfe616977d781fe0428))
+* ⚙ 설정 메뉴의 항목 제목이 두 줄로 꺾이지 않게 수정 ([db4d7e4](https://github.com/fantaXII/opencode_chrome_ext/commit/db4d7e402a3a5013606f87153ebb45984314860e))
+
+
+### Features
+
+* 응답 중 위로 스크롤하면 자동 스크롤을 멈추고 맨 아래로 버튼 표시 ([7250f33](https://github.com/fantaXII/opencode_chrome_ext/commit/7250f33b24ec34a50ce4fd24968b3f31f40ad9d6))
+
 ## [2.24.2](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.24.1...v2.24.2) (2026-11-17)
 
 
