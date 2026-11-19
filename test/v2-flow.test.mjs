@@ -199,3 +199,76 @@ test('탭 전환 복원: 응답 중 기록의 진행 중 턴(parentID)이 스냅
   assert.deepEqual(inTurn.map((m) => m.id), ['a_step1', 'a_step2'], '사이드패널이 빼고 스냅샷으로 다시 그릴 메시지');
   assert.ok(res.stream.text.length > 0);
 });
+
+// 3단계: 권한·질문(form). 이벤트·목록 형식은 2.3.2 실측(docs/opencode_v2_support_plan.md). 응답 엔드포인트는 mock 기준.
+const permissionAsked = (sid, id = 'per_1') => ({ id: `evt_${id}`, type: 'permission.asked', data: { id, sessionID: sid, action: 'shell', resources: ['echo spike-bash'], save: ['echo *'], source: { type: 'tool', messageID: 'msg_x', id: 'call_x' } } });
+const questionForm = (sid, id = 'frm_1') => ({
+  id, sessionID: sid, title: 'Questions', metadata: { kind: 'question', tool: { messageID: 'msg_x', id: 'call_q' } },
+  fields: [
+    { key: 'q0', title: 'Color', description: 'Pick a color', type: 'string', options: [{ value: 'blue', label: 'Blue' }, { value: 'red', label: 'Red' }], custom: true },
+    { key: 'q1', title: 'Langs', description: 'Pick languages', type: 'multiselect', options: [{ value: 'js', label: 'JavaScript' }, { value: 'py', label: 'Python' }], custom: false }
+  ]
+});
+
+test('권한·질문 카드: v2 요청을 1.x 카드로 보이고, 응답을 v2 엔드포인트로 보낸다(다른 세션의 요청은 거른다)', async (t) => {
+  const { srv, bg, sid, complete, parts, done } = await setup();
+  t.after(done);
+  const called = TOOL_TURN.findIndex((e) => e.type === 'session.tool.called');
+  srv.state.onPrompt = (sessionId) => srv.replay(TOOL_TURN, sessionId, { to: called + 1 });
+  await bg.send({ action: 'send-message', sessionId: sid, message: 'run it' });
+  await waitFor(() => parts('tool').some((p) => p.status === 'running'), 3000, 'tool running');
+
+  srv.emit(permissionAsked(sid));
+  srv.emit({ id: 'evt_other', type: 'form.created', data: { form: questionForm('ses_other', 'frm_other') } });
+  srv.emit({ id: 'evt_q', type: 'form.created', data: { form: questionForm(sid) } });
+  srv.emit({ id: 'evt_u', type: 'form.created', data: { form: { id: 'frm_u', sessionID: sid, title: 'Login', metadata: { kind: 'mcp' }, fields: [{ key: 'ok', type: 'boolean' }] } } });
+  await waitFor(() => parts('question').length === 2 && parts('permission').length === 1, 3000, 'cards');
+
+  const [perm] = parts('permission');
+  assert.deepEqual([perm.id, perm.permission, perm.patterns, perm.always, perm.fromSubagent], ['per_1', 'shell', ['echo spike-bash'], ['echo *'], false]);
+  const [q, unsupported] = parts('question');
+  assert.equal(q.id, 'frm_1', '다른 세션의 form은 보이지 않는다');
+  assert.deepEqual(q.questions.map((x) => [x.header, x.question, x.multiple, x.options.map((o) => o.label)]),
+    [['Color', 'Pick a color', false, ['Blue', 'Red']], ['Langs', 'Pick languages', true, ['JavaScript', 'Python']]]);
+  assert.equal(unsupported.unsupported, true);
+  assert.equal(unsupported.title, 'Login');
+
+  // 재오픈 시 카드 복원(메모리 보관분)
+  const pending = await bg.send({ action: 'get-pending-interactions', sessionId: sid });
+  assert.deepEqual(pending.items.map((i) => i.id).sort(), ['frm_1', 'frm_u', 'per_1']);
+
+  assert.deepEqual(await bg.send({ action: 'reply-permission', sessionId: sid, requestId: 'per_1', requestSessionId: sid, reply: 'always' }), { success: true });
+  assert.deepEqual(srv.state.permissionReplies, [{ sessionId: sid, requestId: 'per_1', body: { decision: 'always' } }]);
+  srv.emit({ id: 'evt_pr', type: 'permission.replied', data: { sessionID: sid, requestID: 'per_1', reply: 'always' } });
+
+  assert.deepEqual(await bg.send({ action: 'reply-question', sessionId: sid, requestId: 'frm_1', answers: [['Blue', 'teal'], ['JavaScript', 'Python']] }), { success: true });
+  assert.deepEqual(srv.state.formReplies, [{ sessionId: sid, formId: 'frm_1', body: { answer: { q0: 'teal', q1: ['js', 'py'] } } }]);
+  srv.emit({ id: 'evt_fr', type: 'form.replied', data: { sessionID: sid, formID: 'frm_1' } });
+
+  assert.deepEqual(await bg.send({ action: 'reject-question', sessionId: sid, requestId: 'frm_u' }), { success: true });
+  assert.deepEqual(srv.state.formDeletes, [{ sessionId: sid, formId: 'frm_u' }]);
+
+  await waitFor(() => parts('interaction-resolved').length === 2, 3000, 'resolved');
+  assert.deepEqual(parts('interaction-resolved').map((p) => p.id), ['per_1', 'frm_1']);
+
+  await srv.replay(TOOL_TURN, sid, { from: called + 1 });
+  await waitFor(() => complete(), 5000, 'message-complete');
+  assert.equal(complete().error, undefined);
+});
+
+test('SW 재시작 후: 대기 중 권한·form을 서버 목록(세션 폴더)에서 복원하고, form 응답 key도 목록에서 찾는다', async (t) => {
+  const { srv, bg, sid, done } = await setup();
+  t.after(done);
+  srv.state.pendingPermissions = [permissionAsked(sid).data, permissionAsked('ses_other', 'per_other').data];
+  srv.state.pendingForms = [questionForm(sid)];
+
+  const pending = await bg.send({ action: 'get-pending-interactions', sessionId: sid });
+  assert.deepEqual(pending.items.map((i) => [i.kind, i.id]), [['permission', 'per_1'], ['question', 'frm_1']]);
+  assert.equal(pending.items[0].permission, 'shell');
+  assert.equal(pending.items[1].questions[1].multiple, true);
+  assert.ok(srv.state.listDirectories.length >= 2 && srv.state.listDirectories.every((l) => /work/.test(l.directory || '')),
+    JSON.stringify(srv.state.listDirectories));
+
+  assert.deepEqual(await bg.send({ action: 'reply-question', sessionId: sid, requestId: 'frm_1', answers: [['Red'], []] }), { success: true });
+  assert.deepEqual(srv.state.formReplies[0].body, { answer: { q0: 'red', q1: [] } });
+});

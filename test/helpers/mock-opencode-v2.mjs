@@ -29,6 +29,13 @@ export async function startMockOpencodeV2({ password = null, version = '2.3.2', 
     activeRequests: 0,
     eventConnections: 0,
     unauthorized: [],    // 인증 없이 들어온 /api/ 경로
+    // 대기 중 권한·form 목록(GET /api/permission/request, /api/form). 실측상 location별이라 x-opencode-directory를 기록한다.
+    pendingPermissions: [],
+    pendingForms: [],
+    listDirectories: [], // [{ path, directory }]
+    permissionReplies: [], // [{ sessionId, requestId, body }]
+    formReplies: [],     // [{ sessionId, formId, body }]
+    formDeletes: [],     // [{ sessionId, formId }]
     // (sessionId, body) => void. 기본은 아무 일도 하지 않는다(테스트가 replay로 이벤트를 보낸다)
     onPrompt: () => {}
   };
@@ -82,6 +89,25 @@ export async function startMockOpencodeV2({ password = null, version = '2.3.2', 
       const id = `msg_user${state.prompts.length}`;
       json(res, 200, { data: { id, sessionID: sessionId, time: { created: Date.now() }, type: 'user', payload: { text: body?.text }, delivery: body?.delivery || 'steer' } });
       setTimeout(() => state.onPrompt(sessionId, body, id), 5);
+      return;
+    }
+    if (p === '/api/permission/request' || p === '/api/form') {
+      state.listDirectories.push({ path: p, directory: req.headers['x-opencode-directory'] || null });
+      return json(res, 200, { data: p === '/api/form' ? state.pendingForms : state.pendingPermissions });
+    }
+    if ((m = p.match(/^\/api\/session\/([^/]+)\/permission\/([^/]+)\/reply$/)) && req.method === 'POST') {
+      state.permissionReplies.push({ sessionId: decodeURIComponent(m[1]), requestId: decodeURIComponent(m[2]), body: await readBody(req) });
+      res.writeHead(204); res.end();
+      return;
+    }
+    if ((m = p.match(/^\/api\/session\/([^/]+)\/form\/([^/]+)\/reply$/)) && req.method === 'POST') {
+      state.formReplies.push({ sessionId: decodeURIComponent(m[1]), formId: decodeURIComponent(m[2]), body: await readBody(req) });
+      res.writeHead(204); res.end();
+      return;
+    }
+    if ((m = p.match(/^\/api\/session\/([^/]+)\/form\/([^/]+)$/)) && req.method === 'DELETE') {
+      state.formDeletes.push({ sessionId: decodeURIComponent(m[1]), formId: decodeURIComponent(m[2]) });
+      res.writeHead(204); res.end();
       return;
     }
     if ((m = p.match(/^\/api\/session\/([^/]+)\/interrupt$/))) {

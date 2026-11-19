@@ -15,7 +15,7 @@ import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatu
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 import { QUICK_ACTION_LIMITS, normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
 import { createPasswordStore, createServerFetch, probeV2 } from './lib/opencode-api.mjs';
-import { createV2EventAdapter, v2ActiveToStatusMap, flattenV2History, v2FallbackFromMessages } from './lib/opencode-v2.mjs';
+import { createV2EventAdapter, v2ActiveToStatusMap, flattenV2History, v2FallbackFromMessages, v2PermissionToAsk, v2FormToAsk, v2FormAnswer, v2List } from './lib/opencode-v2.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -2026,6 +2026,33 @@ async function checkSessionExists(port, sessionId) {
 // 사이드패널이 탭 전환·재오픈으로 카드를 잃어도 다시 그릴 수 있게 SW가 보관한다(get-pending-interactions).
 const pendingInteractions = new Map();
 
+// v2 form에서 온 질문 카드의 추가 정보(lib/opencode-v2.mjs v2FormToAsk). fields는 응답을 {answer:{key:…}}로
+// 만들 때, unsupported는 확장에서 응답할 수 없는 form(사이드패널이 안내 + 건너뛰기만 보인다)에 쓴다.
+function v2FormPartFields(p) {
+  if (!p?.v2Form) return {};
+  return { v2Form: true, title: p.title || '', fields: Array.isArray(p.fields) ? p.fields : [], ...(p.unsupported && { unsupported: true }) };
+}
+
+// 서버의 대기 중 권한·질문 목록 → 1.x permission.asked / question.asked properties 모양.
+// 목록은 location(작업 폴더)별이라 세션 폴더 헤더로 묻는다(1.x instance, v2 location 모두 — 2.3.2 실측).
+async function fetchPendingAsks(port, sessionId) {
+  const v2 = (await apiFor(port)) === 'v2';
+  const headers = {};
+  const dirHeader = buildDirectoryHeader(await getSessionDirectory(sessionId, port));
+  if (dirHeader) headers['x-opencode-directory'] = dirHeader;
+  const list = async (path) => {
+    try {
+      const r = await ocFetch(`http://127.0.0.1:${port}${path}`, { headers, signal: AbortSignal.timeout(3000) });
+      return r.ok ? v2List(await r.json()) : [];
+    } catch { return []; }
+  };
+  if (!v2) return { permissions: await list('/permission'), questions: await list('/question') };
+  return {
+    permissions: (await list('/api/permission/request')).map(v2PermissionToAsk).filter(Boolean),
+    questions: (await list('/api/form')).map(v2FormToAsk).filter(Boolean)
+  };
+}
+
 /**
  * SSE 이벤트 구독 (/global/event + Last-Event-ID 재연결)
  * server.connected 수신 시 resolve → 이후 prompt_async 전송
@@ -2318,8 +2345,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       onPart?.(part);
     }
 
-    // permission.asked / question.asked 와 그 응답 이벤트를 사이드패널로 전달한다.
-    // 처리했으면 true. (v2 이벤트는 아직 opencode 기본 경로가 아니라 다루지 않는다.)
+    // permission.asked / question.asked 와 그 응답 이벤트를 사이드패널로 전달한다. 처리했으면 true.
+    // v2의 permission.asked·form.*는 v2Adapter가 같은 1.x 이벤트로 바꿔 넘긴다(form 응답용 fields·unsupported 포함).
     function handleInteractionEvent(evt) {
       const p = evt.properties || {};
       switch (evt.type) {
@@ -2346,7 +2373,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
             id: p.id,
             sessionID: p.sessionID,
             fromSubagent: p.sessionID !== sessionId,
-            questions: Array.isArray(p.questions) ? p.questions : []
+            questions: Array.isArray(p.questions) ? p.questions : [],
+            ...v2FormPartFields(p)
           });
           return true;
         case 'permission.replied':
@@ -2829,23 +2857,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const listPort = sessions.get(sid)?.port ?? serverState.port;
           const items = [];
           if (sid && listPort) {
-            const headers = {};
-            const dirHeader = buildDirectoryHeader(await getSessionDirectory(sid, listPort));
-            if (dirHeader) headers['x-opencode-directory'] = dirHeader;
-            const list = async (path) => {
-              try {
-                const r = await ocFetch(`http://127.0.0.1:${listPort}${path}`, { headers, signal: AbortSignal.timeout(3000) });
-                return r.ok ? await r.json() : [];
-              } catch { return []; }
-            };
-            for (const p of await list('/permission')) {
+            const { permissions, questions } = await fetchPendingAsks(listPort, sid);
+            for (const p of permissions) {
               if (p?.sessionID !== sid) continue;
               items.push({ kind: 'permission', id: p.id, sessionID: p.sessionID, fromSubagent: false,
                 permission: p.permission, patterns: p.patterns || [], always: p.always || [] });
             }
-            for (const q of await list('/question')) {
+            for (const q of questions) {
               if (q?.sessionID !== sid) continue;
-              items.push({ kind: 'question', id: q.id, sessionID: q.sessionID, fromSubagent: false, questions: q.questions || [] });
+              items.push({ kind: 'question', id: q.id, sessionID: q.sessionID, fromSubagent: false, questions: q.questions || [], ...v2FormPartFields(q) });
             }
           }
           sendResponse({ success: true, items });
@@ -2858,16 +2878,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'reject-question': {
           const replyPort = sessions.get(message.sessionId)?.port ?? serverState.port;
           if (!replyPort) throw new Error('OpenCode 서버 연결 실패');
-          const requestId = encodeURIComponent(message.requestId || '');
+          const rawRequestId = message.requestId || '';
+          const requestId = encodeURIComponent(rawRequestId);
           const headers = { 'Content-Type': 'application/json' };
           const dirHeader = buildDirectoryHeader(await getSessionDirectory(message.sessionId, replyPort));
           if (dirHeader) headers['x-opencode-directory'] = dirHeader;
-          const post = (path, body) => ocFetch(`http://127.0.0.1:${replyPort}${path}`, {
-            method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(5000)
+          const send = (path, body, method = 'POST') => ocFetch(`http://127.0.0.1:${replyPort}${path}`, {
+            method, headers, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(5000)
           });
+          const post = (path, body) => send(path, body);
+          const v2 = (await apiFor(replyPort)) === 'v2';
 
           let res;
-          if (message.action === 'reply-permission') {
+          if (v2) {
+            // v2는 요청이 세션 아래에 있다. 하위 에이전트의 요청이면 그 하위 세션 id를 써야 하므로 카드의 sessionID를 찾는다.
+            // SW가 재시작돼 메모리에 없으면 서버 대기 목록에서 다시 찾는다(form 응답에는 필드 key가 필요하다).
+            let part = pendingInteractions.get(message.sessionId)?.get(rawRequestId) || null;
+            if (!part && message.action !== 'reply-permission') {
+              const { questions } = await fetchPendingAsks(replyPort, message.sessionId);
+              part = questions.find((q) => q.id === rawRequestId) || null;
+            }
+            const reqSession = encodeURIComponent(part?.sessionID || message.requestSessionId || message.sessionId);
+            if (message.action === 'reply-permission') {
+              const decision = ['once', 'always', 'reject'].includes(message.reply) ? message.reply : 'reject';
+              res = await post(`/api/session/${reqSession}/permission/${requestId}/reply`, { decision });
+            } else if (message.action === 'reply-question') {
+              if (!part?.fields?.length) throw new Error('질문 정보를 찾지 못했습니다');
+              res = await post(`/api/session/${reqSession}/form/${requestId}/reply`, { answer: v2FormAnswer(part.fields, message.answers) });
+            } else {
+              res = await send(`/api/session/${reqSession}/form/${requestId}`, undefined, 'DELETE');
+            }
+          } else if (message.action === 'reply-permission') {
             const reply = ['once', 'always', 'reject'].includes(message.reply) ? message.reply : 'reject';
             res = await post(`/permission/${requestId}/reply`, { reply });
             // 구버전 opencode는 세션 하위 경로만 있다.

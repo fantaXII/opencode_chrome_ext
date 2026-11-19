@@ -173,7 +173,7 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - 테스트: `test/opencode-v2.test.mjs`(어댑터·기록·폴백), `test/v2-flow.test.mjs`(실제 `background.js` + `test/helpers/mock-opencode-v2.mjs`: 도구 턴·대기 메시지·중단·기록 페이지·quiet check·재연결·SW 재시작 복구·탭 전환 복원). 응답 턴은 실제 2.3.2 기록(`test/fixtures/v2-turn-*.jsonl`, 경로 익명화)을 재생한다. 하네스에 `session`(storage.session 초기값) 옵션 추가. 전체 135개 통과.
 - 실제 opencode 2.3.2(무료 모델)에 실제 `background.js`를 붙여 확인: 연결·세션 생성(작업 폴더)·도구 카드·대기 메시지(새 말풍선, 완료 내용 `QUEUED-OK`)·중단(`active` 비워짐)·기록·세션 전환. 이 확인에서 기록 페이지 넘김 버그(cursor+order 400)를 찾아 고쳤고 mock도 실제 규칙을 따르게 했다.
 
-남은 것(다음 단계): 권한·질문(form) 카드(3단계), 모델 목록·변경 UI(`set-model`은 아직 v1 `PATCH /config`)·에이전트·명령·MCP·폴더 목록(4단계). 사이드패널은 바꾸지 않았다.
+남은 것(다음 단계): 권한·질문(form) 카드(3단계 — 완료), 모델 목록·변경 UI(`set-model`은 아직 v1 `PATCH /config`)·에이전트·명령·MCP·폴더 목록(4단계). 사이드패널은 바꾸지 않았다.
 
 원래 계획:
 - 세션 생성/조회/폴더(`getSessionDirectory`, `createSession`, `set-working-directory`의 `resolve-directory` 유지)
@@ -184,7 +184,17 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - 완료 판정: `session.execution.succeeded/failed/interrupted`만 쓴다(`session.status`·`session.idle`은 오지 않았다). quiet check·재연결 후 확인은 `/api/session/active`에 세션이 없으면 idle.
 - 전송은 항상 `delivery`를 명시한다(평소 `queue`, 기본값 `steer`는 실행 중 턴에 끼워 넣는다).
 
-### 3단계: 상호작용
+### 3단계: 상호작용 — 완료 (2026-11-20)
+
+구현한 것:
+- `lib/opencode-v2.mjs`: `v2PermissionToAsk`(`action`/`resources`/`save` → `permission`/`patterns`/`always`), `v2FormToAsk`(question form → 질문 목록 + 응답용 `fields:[{key, multiple, options:[{label, value}]}]`, 그 밖의 form·필드 종류는 `unsupported`), `v2FormAnswer`(사이드패널의 라벨 답 → `{<key>: value | [values]}`, 한 개 고르기에 옵션과 직접 입력이 함께 오면 직접 입력), `v2List`(배열·`{data}`). 어댑터가 `permission.asked/replied`·`form.created/replied`를 1.x `permission.*`·`question.*` 이벤트로 바꾼다 — `form.created`의 세션 id(`data.form.sessionID`)를 `properties.sessionID`로 올려 세션 필터가 동작한다. 스트림 카드와 재오픈 복원 카드가 같은 변환을 쓴다.
+- `background.js`: `handleInteractionEvent`가 v2 form 정보(`v2Form`·`title`·`fields`·`unsupported`)를 카드에 넘긴다(`v2FormPartFields`). `fetchPendingAsks`가 v1 `/permission`·`/question`, v2 `/api/permission/request`·`/api/form`을 세션 폴더 헤더로 묻는다(`get-pending-interactions`). 응답은 v2면 `POST /api/session/{sid}/permission/{rid}/reply {decision}`, `POST /api/session/{sid}/form/{fid}/reply {answer}`, 건너뛰기는 `DELETE /api/session/{sid}/form/{fid}`. `sid`는 카드의 `sessionID`(하위 에이전트 요청이면 하위 세션)이고, SW 재시작으로 카드가 메모리에 없으면 form 목록에서 다시 찾는다(필드 key가 필요하다).
+- `sidepanel/sidepanel.js`: `unsupported` form은 "확장에서 응답할 수 없습니다 — TUI에서 응답하거나 건너뛰세요" 안내와 건너뛰기만 보이는 카드(`buildUnsupportedFormCard`). i18n EN 추가.
+- 대기 메시지는 2단계에서 이미 동작한다(어댑터가 `inbox.delivered`의 `inboxID`로 user `message.updated`를 내고 `delivery:'queue'`로 보낸다, `v2-flow` 대기 메시지 테스트). 추가 변경 없음.
+- 테스트: `test/opencode-v2.test.mjs`(변환·응답 만들기·어댑터), `test/v2-flow.test.mjs`(실제 `background.js`: 카드 표시·다른 세션 form 거르기·세 가지 응답 엔드포인트·`interaction-resolved`·SW 재시작 후 목록 복원과 form 응답). mock에 목록·응답·DELETE 경로 추가. 전체 143개 통과.
+- **실제 2.x 서버로는 확인하지 못했다**: 이 환경에 2.3.2 바이너리가 없어 mock으로만 확인했다. 응답 엔드포인트·`permission.replied`·`form.replied`는 0단계 실측 형식을 따랐다. 건너뛰기(DELETE) 뒤 오는 이벤트 이름은 실측하지 못해 `form.cancelled`/`canceled`/`rejected`/`deleted`/`dismissed`를 모두 "닫힘"으로 본다. 목록 응답이 배열인지 `{data}`인지도 확인하지 못해 둘 다 받는다. 5단계 E2E에서 확인한다.
+
+원래 계획:
 - 권한 카드: `permission.asked`의 `action`/`resources`/`save` → 사이드패널이 쓰는 `permission`/`patterns`/`always`로 변환. 응답값은 1.x와 같은 `once`/`always`/`reject`(실측).
 - 질문: `metadata.kind:'question'` form은 필드마다 기존 질문 하나로 변환한다(`title`→`header`, `description`→`question`, `options[].label/description`, `type:'multiselect'`→`multiple`, `custom`). 응답은 `{answer:{<key>: label | [labels]}}`. 그 밖의 form(boolean/number/external 필드)은 1차에서 "TUI에서 응답" 안내 + 거절 버튼만 둔다.
 - 대기 메시지: `queue-message`는 `delivery:'queue'`로 보내고, `session.inbox.delivered`의 `inboxID`로 대기 말풍선을 찾아 `turn-start`를 보낸다(1.x의 "user 메시지 id 순서로 부모 찾기"보다 단순하다). 큐가 빈 뒤 완료가 한 번만 오는 점은 1.x와 같아서 `QUEUE_IDLE_GRACE_MS` 처리는 그대로 둔다.

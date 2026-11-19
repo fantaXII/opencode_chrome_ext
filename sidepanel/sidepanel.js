@@ -4081,6 +4081,7 @@ I18N.ready.then(function() {
   }
 
   function buildQuestionCard(part) {
+    if (part.unsupported) return buildUnsupportedFormCard(part);
     const el = interactionCardShell(t('에이전트의 질문'), part.fromSubagent ? t('하위 에이전트의 요청입니다.') : '');
     const readers = []; // 질문별 선택값을 읽는 함수
     (part.questions || []).forEach((q, qi) => {
@@ -4140,6 +4141,28 @@ I18N.ready.then(function() {
     skip.textContent = t('건너뛰기');
     skip.addEventListener('click', () => sendInteraction(el, 'reject-question', { requestId: part.id }));
     buttons.appendChild(send);
+    buttons.appendChild(skip);
+    el.appendChild(buttons);
+    el.appendChild(el._status);
+    return el;
+  }
+
+  // opencode 2.x의 질문 도구가 아닌 입력 요청(form). 필드 종류가 달라 확장에서는 답할 수 없어, 안내와 건너뛰기만 둔다.
+  function buildUnsupportedFormCard(part) {
+    const el = interactionCardShell(
+      part.title ? t('입력 요청: {title}', { title: part.title }) : t('입력 요청'),
+      part.fromSubagent ? t('하위 에이전트의 요청입니다.') : ''
+    );
+    const note = document.createElement('div');
+    note.className = 'interaction-q-text';
+    note.textContent = t('이 요청은 확장에서 응답할 수 없습니다. 터미널(TUI)에서 응답하거나 건너뛰세요.');
+    el.appendChild(note);
+    const buttons = document.createElement('div');
+    buttons.className = 'interaction-buttons';
+    const skip = document.createElement('button');
+    skip.className = 'mcp-action-btn danger';
+    skip.textContent = t('건너뛰기');
+    skip.addEventListener('click', () => sendInteraction(el, 'reject-question', { requestId: part.id }));
     buttons.appendChild(skip);
     el.appendChild(buttons);
     el.appendChild(el._status);
