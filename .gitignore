@@ -6,7 +6,8 @@ dist/
 *.exe
 
 # documents
-docs/
+docs/*
+!docs/opencode_v2_support_plan.md
 
 # dependencies
 node_modules/
