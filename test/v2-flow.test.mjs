@@ -12,8 +12,9 @@ const TOOL_TURN = loadFixture('v2-turn-tool.jsonl');
 const QUEUED_TURN = loadFixture('v2-turn-queued.jsonl');
 const INTERRUPTED_TURN = loadFixture('v2-turn-interrupted.jsonl');
 
-async function setup({ local = {}, constants = {}, server = {} } = {}) {
+async function setup({ local = {}, constants = {}, server = {}, before } = {}) {
   const srv = await startMockOpencodeV2({ password: PW, ...server });
+  before?.(srv);
   const bg = await loadBackground({
     port: srv.port,
     constants: { V2_ENABLED: 'true', ...constants },
@@ -243,7 +244,7 @@ test('권한·질문 카드: v2 요청을 1.x 카드로 보이고, 응답을 v2 
 
   assert.deepEqual(await bg.send({ action: 'reply-question', sessionId: sid, requestId: 'frm_1', answers: [['Blue', 'teal'], ['JavaScript', 'Python']] }), { success: true });
   assert.deepEqual(srv.state.formReplies, [{ sessionId: sid, formId: 'frm_1', body: { answer: { q0: 'teal', q1: ['js', 'py'] } } }]);
-  srv.emit({ id: 'evt_fr', type: 'form.replied', data: { sessionID: sid, formID: 'frm_1' } });
+  srv.emit({ id: 'evt_fr', type: 'form.replied', data: { sessionID: sid, id: 'frm_1', answer: { q0: 'teal' } } });
 
   assert.deepEqual(await bg.send({ action: 'reject-question', sessionId: sid, requestId: 'frm_u' }), { success: true });
   assert.deepEqual(srv.state.formDeletes, [{ sessionId: sid, formId: 'frm_u' }]);
@@ -271,4 +272,143 @@ test('SW 재시작 후: 대기 중 권한·form을 서버 목록(세션 폴더)�
 
   assert.deepEqual(await bg.send({ action: 'reply-question', sessionId: sid, requestId: 'frm_1', answers: [['Red'], []] }), { success: true });
   assert.deepEqual(srv.state.formReplies[0].body, { answer: { q0: 'red', q1: [] } });
+});
+
+// 4단계: 모델·에이전트·명령·skill·MCP·재시작·세션 목록·하위 에이전트. 형식은 OpenAPI 2.3.2(목록 {location, data}).
+test('모델: 목록을 providers[]로, 고른 모델이 없으면 서버 기본 모델, 바꾸면 지금 세션에 바로 적용', async (t) => {
+  const { srv, bg, sid, done } = await setup({
+    local: { selectedModel: null },
+    before: (s) => {
+      s.state.models = [{ id: 'tidepool-alpha-free', providerID: 'opencode', name: 'Tidepool', type: 'chat' }, { id: 'gpt-5', providerID: 'openai', name: 'GPT-5' }, { id: 'img', providerID: 'openai', type: 'image' }];
+      s.state.providers = [{ id: 'opencode', name: 'OpenCode Zen' }, { id: 'openai', name: 'OpenAI' }];
+      s.state.defaultModel = { id: 'gpt-5', providerID: 'openai' };
+    }
+  });
+  t.after(done);
+  assert.deepEqual((await bg.send({ action: 'get-current-model' })).model, { providerID: 'openai', modelID: 'gpt-5' });
+  assert.deepEqual(srv.state.created[0].model, { id: 'gpt-5', providerID: 'openai' }, '새 세션은 그 모델로 만든다');
+
+  const { models } = await bg.send({ action: 'get-models' });
+  assert.deepEqual(models.map((p) => [p.id, p.name, Object.keys(p.models)]), [['opencode', 'OpenCode Zen', ['tidepool-alpha-free']], ['openai', 'OpenAI', ['gpt-5']]]);
+
+  assert.deepEqual(await bg.send({ action: 'set-model', providerId: 'opencode', modelName: 'tidepool-alpha-free', sessionId: sid }), { success: true });
+  assert.deepEqual(srv.state.modelSets.at(-1), { sessionId: sid, model: { id: 'tidepool-alpha-free', providerID: 'opencode' } });
+  const created = await bg.send({ action: 'create-session', tabId: 2 });
+  assert.deepEqual(srv.state.created.at(-1).model, { id: 'tidepool-alpha-free', providerID: 'opencode' });
+  assert.ok(created.success);
+});
+
+test('에이전트·명령(skill 합침)·명령 실행·MCP 목록/토글을 v2 경로로, 세션 폴더 기준으로 묻는다', async (t) => {
+  const { srv, bg, sid, done } = await setup({
+    before: (s) => {
+      s.state.agents = [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }, { id: 'explore', name: 'Explore', mode: 'subagent' }, { id: 'plan', name: 'Plan', mode: 'primary', hidden: true }];
+      s.state.commands = [{ name: 'init', description: 'Init project' }];
+      s.state.skills = [{ id: 'sk_pdf', name: 'pdf', description: 'PDF skill', path: '/s', content: '' }];
+      s.state.mcp = [{ name: 'github', status: { status: 'disabled' } }, { name: 'bad', status: { status: 'failed', error: 'boom' } }];
+    }
+  });
+  t.after(done);
+  const agents = await bg.send({ action: 'get-agents', sessionId: sid });
+  assert.deepEqual(agents.agents.map((a) => a.name), ['build'], 'primary·숨기지 않은 것만, 키는 id');
+  assert.match(srv.state.listHeaders['/api/agent'] || '', /work/);
+  assert.deepEqual(await bg.send({ action: 'set-agent', sessionId: sid, agentName: 'build' }), { success: true, agent: 'build' });
+  assert.deepEqual(srv.state.agentSets, [{ sessionId: sid, agent: 'build' }]);
+
+  const cmds = await bg.send({ action: 'get-commands', sessionId: sid });
+  assert.deepEqual(cmds.commands.map((c) => c.name), ['init', 'pdf']);
+  assert.match(srv.state.listHeaders['/api/skill'] || '', /work/);
+  assert.deepEqual(await bg.send({ action: 'run-command', sessionId: sid, commandId: 'init' }), { success: true, status: 204 });
+  assert.deepEqual(srv.state.commandRuns, [{ sessionId: sid, body: { name: 'init', text: '', delivery: 'queue' } }]);
+
+  const mcp = await bg.send({ action: 'get-mcp-status', sessionId: sid });
+  assert.deepEqual(mcp, { success: true, servers: { github: { status: 'disabled' }, bad: { status: 'failed', error: 'boom' } } });
+  const toggled = await bg.send({ action: 'toggle-mcp', sessionId: sid, name: 'github', connect: true });
+  assert.equal(toggled.success, true);
+  assert.equal(toggled.servers.github.status, 'connected');
+  assert.equal(srv.state.mcpToggles[0].action, 'connect');
+  assert.match(srv.state.mcpToggles[0].directory || '', /work/);
+});
+
+test('소프트 재시작은 /api/location/reload(세션 폴더 헤더) 한 번이다', async (t) => {
+  const { srv, bg, sid, done } = await setup();
+  t.after(done);
+  const res = await bg.send({ action: 'restart-instance', sessionId: sid });
+  assert.equal(res.success, true, JSON.stringify(res));
+  assert.equal(res.mode, 'soft');
+  assert.equal(srv.state.reloads.length, 1);
+  assert.match(srv.state.reloads[0] || '', /work/);
+});
+
+test('세션 목록·최근 폴더: 커서로 넘기며(order 없이) root 세션만 모으고, 대화가 있는 세션만 /sessions에 보인다', async (t) => {
+  const { srv, bg, sid, done } = await setup({ server: { pageSize: 2 } });
+  t.after(done);
+  const now = Date.now();
+  const add = (id, dir, updated, extra = {}) => { srv.state.sessions[id] = { id, title: id, location: { directory: dir }, time: { created: updated, updated }, ...extra }; };
+  add('ses_a', '/proj/a', now - 1000);
+  add('ses_b', '/proj/b', now - 2000);
+  add('ses_child', '/proj/a', now - 500, { parentID: 'ses_a' });
+  add('ses_c', '/proj/c', now - 3000);
+  // 하위 에이전트 세션이 많아도 root 수를 채운다(limit은 root만 센다)
+  for (let i = 0; i < 5; i++) add(`ses_kid${i}`, '/proj/a', now - 100 - i, { parentID: 'ses_a' });
+  srv.state.messages.ses_a = [{ type: 'user', id: 'msg_1', text: 'hi' }];
+  srv.state.messages.ses_c = [{ type: 'user', id: 'msg_2', text: 'yo' }];
+
+  const folders = await bg.send({ action: 'get-folder-list' });
+  assert.ok(folders.success);
+  const recentPaths = (folders.recent || []).map((r) => r.path);
+  for (const d of ['/proj/a', '/proj/b', '/proj/c']) assert.ok(recentPaths.includes(d), `${d} in ${JSON.stringify(recentPaths)}`);
+  assert.ok(srv.state.sessionListRequests.length >= 3, '여러 페이지');
+  assert.ok(srv.state.sessionListRequests.every((q) => !('order' in q)), 'order를 보내지 않는다');
+
+  const list = await bg.send({ action: 'list-sessions' });
+  assert.deepEqual(list.sessions.map((x) => [x.id, x.directory]), [['ses_a', '/proj/a'], ['ses_c', '/proj/c']]);
+  const filtered = await bg.send({ action: 'list-sessions', directory: '/proj/c' });
+  assert.deepEqual(filtered.sessions.map((x) => x.id), ['ses_c']);
+  assert.ok(!list.sessions.some((x) => x.id === sid), '대화가 없는 세션은 뺀다');
+});
+
+test('서버 정보: 응답 중 세션 수는 /api/session/active, 실행 환경 정보에 apiVersion', async (t) => {
+  const { srv, bg, sid, done } = await setup();
+  t.after(done);
+  srv.state.active = { [sid]: { type: 'running' } };
+  const origin = await bg.send({ action: 'get-server-origin' });
+  assert.equal(origin.busy, 1);
+  const info = await bg.send({ action: 'get-runtime-info' });
+  assert.equal(info.apiVersion, 'v2');
+});
+
+test('하위 에이전트: subagent 도구가 먼저 끝나도 하위 세션이 끝날 때까지 진행 중(running)으로 보인다', async (t) => {
+  const { srv, bg, sid, complete, parts, done } = await setup();
+  t.after(done);
+  const CHILD = 'ses_child_bg';
+  const e = (type, data) => srv.emit({ id: `evt_${Math.random()}`, type, data });
+  srv.state.onPrompt = async (sessionId, _body, inboxID) => {
+    const gap = () => new Promise((r) => setTimeout(r, 5));
+    e('session.inbox.delivered', { sessionID: sessionId, inboxID }); await gap();
+    e('session.step.started', { sessionID: sessionId, assistantMessageID: 'msg_a1', agent: 'build', model: { id: 'tidepool-alpha-free', providerID: 'opencode' } }); await gap();
+    e('session.tool.input.started', { sessionID: sessionId, assistantMessageID: 'msg_a1', id: 'call_sub', name: 'subagent' }); await gap();
+    e('session.tool.called', { sessionID: sessionId, assistantMessageID: 'msg_a1', id: 'call_sub', name: 'subagent', input: { agent: 'explore', description: 'look', prompt: 'look around' } }); await gap();
+    e('session.created', { sessionID: CHILD, parentID: sessionId, agent: 'explore', title: 'look' }); await gap();
+    e('session.tool.progress', { sessionID: sessionId, assistantMessageID: 'msg_a1', id: 'call_sub', metadata: { sessionID: CHILD, status: 'running' } }); await gap();
+    e('session.tool.success', { sessionID: sessionId, assistantMessageID: 'msg_a1', id: 'call_sub', content: [{ type: 'text', text: 'working in the background' }], metadata: { sessionID: CHILD } }); await gap();
+    e('session.step.started', { sessionID: CHILD, assistantMessageID: 'msg_c1', agent: 'explore' }); await gap();
+    e('session.tool.input.started', { sessionID: CHILD, assistantMessageID: 'msg_c1', id: 'call_c', name: 'shell' }); await gap();
+    e('session.execution.succeeded', { sessionID: CHILD }); await gap();
+    e('session.step.started', { sessionID: sessionId, assistantMessageID: 'msg_a2', agent: 'build' }); await gap();
+    e('session.text.delta', { sessionID: sessionId, assistantMessageID: 'msg_a2', ordinal: 0, delta: 'done' }); await gap();
+    e('session.execution.succeeded', { sessionID: sessionId });
+  };
+  await bg.send({ action: 'send-message', sessionId: sid, message: 'explore' });
+  await waitFor(() => complete(), 5000, 'message-complete');
+  assert.equal(complete().error, undefined);
+  assert.equal(complete().content, 'done');
+
+  const tool = parts('tool').filter((p) => p.id === 'call_sub');
+  assert.equal(tool.at(-1).status, 'completed');
+  assert.equal(tool.at(-1).tool, 'task');
+  const progress = parts('subagent');
+  assert.ok(progress.length >= 2, JSON.stringify(progress));
+  assert.ok(progress.every((p) => p.toolId === 'call_sub' && p.agent === 'explore'));
+  assert.ok(progress.some((p) => p.running === true && p.activity?.type === 'tool' && p.activity.tool === 'bash'), '도구가 끝난 뒤에도 진행 중');
+  assert.deepEqual([progress.at(-1).running, progress.at(-1).steps], [false, 1], '하위 세션 완료로 끝난다');
 });

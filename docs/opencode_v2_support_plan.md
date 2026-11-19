@@ -192,7 +192,7 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - `sidepanel/sidepanel.js`: `unsupported` form은 "확장에서 응답할 수 없습니다 — TUI에서 응답하거나 건너뛰세요" 안내와 건너뛰기만 보이는 카드(`buildUnsupportedFormCard`). i18n EN 추가.
 - 대기 메시지는 2단계에서 이미 동작한다(어댑터가 `inbox.delivered`의 `inboxID`로 user `message.updated`를 내고 `delivery:'queue'`로 보낸다, `v2-flow` 대기 메시지 테스트). 추가 변경 없음.
 - 테스트: `test/opencode-v2.test.mjs`(변환·응답 만들기·어댑터), `test/v2-flow.test.mjs`(실제 `background.js`: 카드 표시·다른 세션 form 거르기·세 가지 응답 엔드포인트·`interaction-resolved`·SW 재시작 후 목록 복원과 form 응답). mock에 목록·응답·DELETE 경로 추가. 전체 143개 통과.
-- **실제 2.x 서버로는 확인하지 못했다**: 이 환경에 2.3.2 바이너리가 없어 mock으로만 확인했다. 응답 엔드포인트·`permission.replied`·`form.replied`는 0단계 실측 형식을 따랐다. 건너뛰기(DELETE) 뒤 오는 이벤트 이름은 실측하지 못해 `form.cancelled`/`canceled`/`rejected`/`deleted`/`dismissed`를 모두 "닫힘"으로 본다. 목록 응답이 배열인지 `{data}`인지도 확인하지 못해 둘 다 받는다. 5단계 E2E에서 확인한다.
+- **실제 2.x 서버로는 확인하지 못했다**: 이 환경에 2.3.2 바이너리가 없어 mock으로만 확인했다. 응답 엔드포인트·이벤트·목록 형식은 OpenAPI 2.3.2(`packages/protocol/openapi.json`) 기준으로 확인했다(실서버 미확인): `form.replied {id, sessionID, answer}`, 건너뛰기(DELETE) 뒤에는 `form.cancelled {id, sessionID}`, 목록은 `{location, data}`(`v2List`는 배열도 받는다). 5단계 E2E에서 확인한다.
 
 원래 계획:
 - 권한 카드: `permission.asked`의 `action`/`resources`/`save` → 사이드패널이 쓰는 `permission`/`patterns`/`always`로 변환. 응답값은 1.x와 같은 `once`/`always`/`reject`(실측).
@@ -200,7 +200,19 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - 대기 메시지: `queue-message`는 `delivery:'queue'`로 보내고, `session.inbox.delivered`의 `inboxID`로 대기 말풍선을 찾아 `turn-start`를 보낸다(1.x의 "user 메시지 id 순서로 부모 찾기"보다 단순하다). 큐가 빈 뒤 완료가 한 번만 오는 점은 1.x와 같아서 `QUEUE_IDLE_GRACE_MS` 처리는 그대로 둔다.
 - `get-pending-interactions`(재오픈 시 카드 복원).
 
-### 4단계: 나머지 기능
+### 4단계: 나머지 기능 — 완료 (2026-11-20)
+
+구현한 것(형식은 OpenAPI 2.3.2 기준, 실서버 미확인 — 이 환경에 2.x 바이너리가 없다):
+- `lib/opencode-v2.mjs`: `v2ModelsToProviders`(`/api/model`을 `providerID`로 묶어 1.x `providers[]`, 모델 키는 세션 모델 지정에 쓰는 `id`. 꺼졌거나 대화용(`type:'chat'`)이 아닌 모델 제외, 제공자 이름은 `/api/provider`), `v2DefaultModel`, `v2AgentsToV1`(`id`→`name`, 표시 이름은 `displayName`), `v2CommandsToV1`(`/api/command` + `/api/skill`, 이름이 같으면 명령 우선), `v2McpToV1`(`[{name, status:{status, error}}]` → `{<name>: {status, error}}` — 그대로 두면 사이드패널이 연결 수를 0으로 센다), `v2SessionToV1`(`location.directory` → `directory`).
+- `background.js`: 모델 목록(`getAvailableModels`)·서버 기본 모델(`syncModelFromServer` → `/api/model/default`), `set-model`이 v2면 지금 세션에 바로 `POST /api/session/{id}/model`(사이드패널이 `sessionId`를 넘긴다, 새 세션은 기존처럼 `model`로 만든다), 에이전트 목록·`set-agent`(`POST /api/session/{id}/agent`), 명령 목록, `run-command`(`POST /api/session/{id}/command {name, text, delivery:'queue'}`), MCP(`fetchMcpServers`, 토글은 `/api/experimental/mcp/{n}/connect|disconnect`), 소프트 재시작(`/api/location/reload` — OpenAPI 설명상 열린 location을 모두 다시 만들고 대기 중 권한·form을 취소한다. 세션 폴더 헤더를 붙인다), 세션 목록(`fetchServerSessions`: 커서로 넘기며 root만 limit개까지(하위 세션은 세지 않는다, 페이지 상한 25), order는 보내지 않는다 — `get-folder-list`·`list-sessions`가 같이 쓴다. 대화 유무 확인도 `/api/session/{id}/message?limit=1`), `get-server-origin`의 응답 중 세션 수(`fetchStatusMap`), `get-runtime-info`·`server-runtime-updated`에 `apiVersion`.
+- 하위 에이전트(`lib/subagent-progress.mjs`): `createSubagentTracker({background})`가 참이면(v2) 진행 상황에 `running`을 싣고, 하위 세션 완료(`session.execution.succeeded` → 어댑터의 `session.idle`)에서 `onChildIdle`로 끝낸다. 도구 카드가 먼저 끝나도 진행 표시가 계속된다. 다음 라운드가 오면 다시 진행 중. 손자 세션의 완료는 무시한다. v1 출력은 그대로(`running` 없음). 사이드패널은 `running`이 boolean일 때만 그것을 따른다.
+- 사이드패널: 헤더 실행 환경 배지 옆에 v2일 때만 "v2" 배지(`#api-badge`), i18n EN.
+- 도구 이름 대응은 2단계 어댑터에서 이미 한다(`shell`→`bash`, `subagent`→`task`, `input.path`→`filePath`, `input.agent`→`subagent_type`).
+- 명령 실행: 사이드패널은 서버 명령도 `/이름 인자` 텍스트로 보내고(1.x도 같다 — `template`은 보이기만 한다) `run-command`는 부르지 않는다. 그래서 동작은 1.x와 같고, `run-command`의 v2 경로는 짝을 맞춰 둔 것이다. v2 프롬프트가 `/이름`을 명령으로 해석하는지는 실서버에서 확인한다.
+- 테스트: `test/opencode-v2.test.mjs`(변환), `test/subagent-progress.test.mjs`(v1 그대로·v2 background), `test/v2-flow.test.mjs`(모델·기본 모델·세션 모델 적용, 에이전트·명령·skill·명령 실행·MCP, 소프트 재시작 두 location, 세션 목록 페이지·root·대화 유무, 서버 정보, 백그라운드 하위 에이전트). mock에 해당 경로 추가.
+- 미확인: `/api/location/reload`가 전역 설정을 다시 읽는지, 이미지 등 대화용이 아닌 모델 분류(`type`), MCP 토글 뒤 상태 반영 시점, 하위 에이전트 안에서 뜬 권한 요청의 `sessionID`.
+
+원래 계획:
 - 모델: `/api/model` 목록 → 기존 `providers[]` 형식으로 변환. v2는 **세션별 모델**이므로 `setModel`은 현재 세션에 적용하고, 새 세션 생성 시 선택 모델을 `model`로 넘긴다(전역 기본값은 `chrome.storage.local`에 둠).
 - 에이전트(`/api/agent`의 `id`를 `name`으로)·명령·skill(`/api/skill`을 명령 목록에 합침)·MCP 목록/토글(experimental 경로)·소프트 재시작(`/api/location/reload`, 전역 설정 반영 여부 실측).
 - 폴더 목록(`get-folder-list` → `lib/folder-list.mjs`): 세션 목록 페이지네이션을 따라 최근 1000개까지 모음.

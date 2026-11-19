@@ -169,7 +169,35 @@ test('어댑터: permission.asked·form.created → 1.x 이벤트, form 세션 i
   assert.equal(q.type, 'question.asked');
   assert.equal(q.properties.sessionID, 'ses_a', 'data.form.sessionID');
   assert.equal(q.properties.questions.length, 2);
-  assert.deepEqual(a.translate({ type: 'form.replied', data: { sessionID: 'ses_a', formID: 'frm_1' } }),
+  assert.deepEqual(a.translate({ type: 'form.replied', data: { sessionID: 'ses_a', id: 'frm_1', answer: { q0: 'blue' } } }),
     [{ type: 'question.replied', properties: { sessionID: 'ses_a', requestID: 'frm_1' } }]);
-  assert.equal(a.translate({ type: 'form.cancelled', data: { sessionID: 'ses_a', formID: 'frm_1' } })[0].type, 'question.rejected');
+  assert.equal(a.translate({ type: 'form.cancelled', data: { sessionID: 'ses_a', id: 'frm_1' } })[0].type, 'question.rejected');
+});
+
+// 4단계: 목록 API 변환(형식은 OpenAPI 2.3.2 — 목록은 {location, data})
+import { v2ModelsToProviders, v2DefaultModel, v2AgentsToV1, v2CommandsToV1, v2McpToV1, v2SessionToV1 } from '../lib/opencode-v2.mjs';
+
+test('모델: providerID로 묶어 1.x providers[](models는 id 키), 꺼진·대화용이 아닌 모델은 뺀다', () => {
+  const models = { location: { directory: '/w' }, data: [
+    { id: 'tidepool-alpha-free', modelID: 'tp-alpha', providerID: 'opencode', name: 'Tidepool Alpha', type: 'chat', enabled: true, status: 'alpha' },
+    { id: 'gpt-image', providerID: 'openai', name: 'Image', type: 'image' },
+    { id: 'old', providerID: 'opencode', name: 'Old', enabled: false },
+    { id: 'gpt-5', providerID: 'openai', name: 'GPT-5' }
+  ] };
+  const providers = { data: [{ id: 'opencode', name: 'OpenCode Zen' }] };
+  const out = v2ModelsToProviders(models, providers);
+  assert.deepEqual(out.map((p) => [p.id, p.name, Object.keys(p.models)]), [['opencode', 'OpenCode Zen', ['tidepool-alpha-free']], ['openai', 'openai', ['gpt-5']]]);
+  assert.equal(out[0].models['tidepool-alpha-free'].name, 'Tidepool Alpha');
+  assert.deepEqual(v2DefaultModel({ data: { id: 'gpt-5', providerID: 'openai' } }), { providerID: 'openai', modelID: 'gpt-5' });
+  assert.equal(v2DefaultModel({ data: null }), null);
+});
+
+test('에이전트·명령·skill·MCP·세션을 1.x 모양으로', () => {
+  assert.deepEqual(v2AgentsToV1({ data: [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }] }).map((a) => [a.name, a.mode]), [['build', 'primary']]);
+  assert.deepEqual(v2CommandsToV1({ data: [{ name: 'init', description: 'Init' }] }, { data: [{ id: 'sk1', name: 'pdf', description: 'PDF', path: '/p', content: '' }, { id: 'sk2', name: 'init', path: '/p', content: '' }] }),
+    [{ name: 'init', description: 'Init' }, { name: 'pdf', description: 'PDF', source: 'skill' }]);
+  assert.deepEqual(v2McpToV1({ data: [{ name: 'gh', status: { status: 'connected' } }, { name: 'x', status: { status: 'failed', error: 'boom' } }] }),
+    { gh: { status: 'connected' }, x: { status: 'failed', error: 'boom' } });
+  assert.deepEqual(v2SessionToV1({ id: 'ses_1', title: 'T', location: { directory: '/w' }, time: { created: 1, updated: 2 } }),
+    { id: 'ses_1', parentID: undefined, title: 'T', directory: '/w', time: { created: 1, updated: 2 } });
 });

@@ -67,6 +67,8 @@ function setSubagentProgress(blocks, progress) {
     steps: progress.steps ?? 0,
     activity: progress.activity ?? null,
     startedAt: block.subagent?.startedAt ?? progress.startedAt,
+    // opencode 2.x: 하위 에이전트가 백그라운드로 돌아 도구 카드가 먼저 끝난다. background가 준 진행 여부를 따른다.
+    ...(typeof progress.running === 'boolean' && { running: progress.running }),
   };
   return blocks;
 }
@@ -76,6 +78,8 @@ function finalizeRunning(blocks, finalStatus) {
     if (b.type === 'tool' && (b.status === 'pending' || b.status === 'running')) {
       b.status = finalStatus;
     }
+    // 응답이 끝나면 구독도 끝나 하위 세션의 완료를 더 받지 못한다 — 진행 중 표시·경과 시간이 남지 않게 끈다.
+    if (b.type === 'tool' && b.subagent?.running === true) b.subagent.running = false;
   }
   return blocks;
 }

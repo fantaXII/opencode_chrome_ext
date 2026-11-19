@@ -309,6 +309,7 @@
     '재시작 후 서버를 찾을 수 없습니다': 'Could not find the server after restart',
     'OpenCode 서버 연결 실패': 'Failed to connect to the OpenCode server',
     '입력 요청': 'Input request',
+    'opencode 2.x 서버에 연결됨': 'Connected to an opencode 2.x server',
     '입력 요청: {title}': 'Input request: {title}',
     '이 요청은 확장에서 응답할 수 없습니다. 터미널(TUI)에서 응답하거나 건너뛰세요.': 'This request cannot be answered from the extension. Answer it in the terminal (TUI) or skip it.',
     '질문 정보를 찾지 못했습니다': 'Could not find the question details',

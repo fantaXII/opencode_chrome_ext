@@ -36,6 +36,20 @@ export async function startMockOpencodeV2({ password = null, version = '2.3.2', 
     permissionReplies: [], // [{ sessionId, requestId, body }]
     formReplies: [],     // [{ sessionId, formId, body }]
     formDeletes: [],     // [{ sessionId, formId }]
+    // 4단계 목록·설정(형식은 OpenAPI 2.3.2: 목록은 {location, data})
+    models: [],          // GET /api/model의 data
+    providers: [],       // GET /api/provider의 data
+    defaultModel: null,  // GET /api/model/default의 data
+    agents: [],          // GET /api/agent의 data
+    commands: [],        // GET /api/command의 data
+    skills: [],          // GET /api/skill의 data
+    mcp: [],             // GET /api/mcp의 data [{name, status:{status, error?}}]
+    mcpToggles: [],      // [{ name, action, directory }]
+    agentSets: [],       // [{ sessionId, agent }]
+    commandRuns: [],     // [{ sessionId, body }]
+    reloads: [],         // POST /api/location/reload의 x-opencode-directory(없으면 null)
+    sessionListRequests: [], // GET /api/session 쿼리
+    listHeaders: {},     // 경로 -> 마지막 x-opencode-directory
     // (sessionId, body) => void. 기본은 아무 일도 하지 않는다(테스트가 replay로 이벤트를 보낸다)
     onPrompt: () => {}
   };
@@ -79,7 +93,7 @@ export async function startMockOpencodeV2({ password = null, version = '2.3.2', 
       const body = await readBody(req);
       const id = `ses_v2mock${state.created.length + 1}`;
       state.created.push(body);
-      state.sessions[id] = { id, title: body?.title || '', location: body?.location || { directory: '/mockv2' } };
+      state.sessions[id] = { id, title: body?.title || '', location: body?.location || { directory: '/mockv2' }, time: { created: Date.now(), updated: Date.now() } };
       return json(res, 200, { data: { ...state.sessions[id], time: { created: Date.now(), updated: Date.now() } } });
     }
     if ((m = p.match(/^\/api\/session\/([^/]+)\/prompt$/))) {
@@ -89,6 +103,49 @@ export async function startMockOpencodeV2({ password = null, version = '2.3.2', 
       const id = `msg_user${state.prompts.length}`;
       json(res, 200, { data: { id, sessionID: sessionId, time: { created: Date.now() }, type: 'user', payload: { text: body?.text }, delivery: body?.delivery || 'steer' } });
       setTimeout(() => state.onPrompt(sessionId, body, id), 5);
+      return;
+    }
+    const loc = { directory: req.headers['x-opencode-directory'] || '/mockv2' };
+    const list = (data) => { state.listHeaders[p] = req.headers['x-opencode-directory'] || null; return json(res, 200, { location: loc, data }); };
+    if (p === '/api/model') return list(state.models);
+    if (p === '/api/provider') return list(state.providers);
+    if (p === '/api/model/default') return json(res, 200, { location: loc, data: state.defaultModel });
+    if (p === '/api/agent') return list(state.agents);
+    if (p === '/api/command') return list(state.commands);
+    if (p === '/api/skill') return list(state.skills);
+    if (p === '/api/mcp') return list(state.mcp);
+    if ((m = p.match(/^\/api\/experimental\/mcp\/([^/]+)\/(connect|disconnect)$/)) && req.method === 'POST') {
+      const name = decodeURIComponent(m[1]);
+      state.mcpToggles.push({ name, action: m[2], directory: req.headers['x-opencode-directory'] || null });
+      const item = state.mcp.find((x) => x.name === name);
+      if (item) item.status = { status: m[2] === 'connect' ? 'connected' : 'disabled' };
+      res.writeHead(204); res.end();
+      return;
+    }
+    if (p === '/api/location/reload' && req.method === 'POST') {
+      state.reloads.push(req.headers['x-opencode-directory'] || null);
+      res.writeHead(204); res.end();
+      return;
+    }
+    if (p === '/api/session' && req.method === 'GET') {
+      // 최신순 페이지. 실측처럼 cursor와 order를 함께 보내면 400, 마지막 페이지에도 next가 온다.
+      state.sessionListRequests.push(Object.fromEntries(url.searchParams));
+      const cursor = url.searchParams.get('cursor');
+      if (cursor && url.searchParams.has('order')) return json(res, 400, { _tag: 'InvalidCursorError' });
+      const all = Object.values(state.sessions).sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0));
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 50, pageSize);
+      const start = Number(cursor) || 0;
+      const page = all.slice(start, start + limit);
+      return json(res, 200, { data: page, cursor: { previous: null, next: page.length ? String(start + page.length) : null } });
+    }
+    if ((m = p.match(/^\/api\/session\/([^/]+)\/agent$/)) && req.method === 'POST') {
+      state.agentSets.push({ sessionId: decodeURIComponent(m[1]), agent: (await readBody(req))?.agent });
+      res.writeHead(204); res.end();
+      return;
+    }
+    if ((m = p.match(/^\/api\/session\/([^/]+)\/command$/)) && req.method === 'POST') {
+      state.commandRuns.push({ sessionId: decodeURIComponent(m[1]), body: await readBody(req) });
+      res.writeHead(204); res.end();
       return;
     }
     if (p === '/api/permission/request' || p === '/api/form') {

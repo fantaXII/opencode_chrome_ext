@@ -15,7 +15,7 @@ import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatu
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 import { QUICK_ACTION_LIMITS, normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
 import { createPasswordStore, createServerFetch, probeV2 } from './lib/opencode-api.mjs';
-import { createV2EventAdapter, v2ActiveToStatusMap, flattenV2History, v2FallbackFromMessages, v2PermissionToAsk, v2FormToAsk, v2FormAnswer, v2List } from './lib/opencode-v2.mjs';
+import { createV2EventAdapter, v2ActiveToStatusMap, flattenV2History, v2FallbackFromMessages, v2PermissionToAsk, v2FormToAsk, v2FormAnswer, v2List, v2ModelsToProviders, v2DefaultModel, v2AgentsToV1, v2CommandsToV1, v2McpToV1, v2SessionToV1 } from './lib/opencode-v2.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -894,7 +894,7 @@ async function resyncAfterRestart(port) {
 /**
  * (A) 소프트 재시작 - opencode Instance만 폐기해 설정을 다시 읽게 한다.
  */
-async function restartServerInstance() {
+async function restartServerInstance(sessionId = null) {
   const port = serverState.port;
   if (!port || !serverState.available) {
     return { success: false, error: '서버에 연결되어 있지 않습니다' };
@@ -906,9 +906,19 @@ async function restartServerInstance() {
   _restartInProgress = true;
   try {
     const interrupted = abortAllEventSources('restart-instance');
-    debugLog('INFO', `restart-instance: POST /global/dispose on port ${port}`);
-
-    const response = await ocFetch(`http://127.0.0.1:${port}/global/dispose`, { method: 'POST' });
+    let response;
+    if ((await apiFor(port)) === 'v2') {
+      // v2: POST /api/location/reload는 열려 있는 모든 location을 내리고 다시 만든다(OpenAPI 2.3.2 설명 — 1.x dispose와
+      // 같다). 대기 중인 권한·form은 취소된다(SW 쪽 보관분은 위 abortAllEventSources가 비운다). 세션 폴더 헤더를 붙여
+      // 그 location이 열려 있게 한다. 전역 설정까지 다시 읽는지는 실측하지 못했다(하드 재시작은 확실하다).
+      debugLog('INFO', `restart-instance: POST /api/location/reload on port ${port}`);
+      response = await ocFetch(`http://127.0.0.1:${port}/api/location/reload`, {
+        method: 'POST', headers: await sessionDirectoryHeaders(sessionId || currentSessionId, port)
+      });
+    } else {
+      debugLog('INFO', `restart-instance: POST /global/dispose on port ${port}`);
+      response = await ocFetch(`http://127.0.0.1:${port}/global/dispose`, { method: 'POST' });
+    }
     if (!response.ok) {
       debugLog('ERROR', `restart-instance: dispose returned ${response.status}`);
       return { success: false, error: `dispose 실패: ${response.status}`, interrupted: interrupted.length };
@@ -1338,7 +1348,7 @@ function detectRuntimeFromHost(port) {
       if (serverState.runtime || serverState.port !== port) return; // 그 사이 확정/변경됨
       serverState.runtime = runtime;
       chrome.storage.local.set({ serverIsWSL: runtime === 'wsl' }).catch(() => {});
-      chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime }).catch(() => {});
+      chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime, apiVersion: serverState.apiVersion || null }).catch(() => {});
       debugLog('INFO', `detectRuntimeFromHost: server runtime detected via host - ${runtime}`);
     } catch (e) {
       debugLog('WARN', `detectRuntimeFromHost: failed - ${e.message}`);
@@ -1361,7 +1371,7 @@ async function refreshServerCwd(port) {
   if (runtime && runtime !== serverState.runtime) {
     serverState.runtime = runtime;
     chrome.storage.local.set({ serverIsWSL: runtime === 'wsl' }).catch(() => {});
-    chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'server-runtime-updated', runtime, apiVersion: serverState.apiVersion || null }).catch(() => {});
     debugLog('INFO', `refreshServerCwd: server runtime detected - ${runtime}`);
   }
   const { serverCwd } = await chrome.storage.local.get('serverCwd');
@@ -1990,6 +2000,51 @@ async function fetchV2History(port, sessionId) {
   return { ok: true, messages };
 }
 
+// MCP 목록 → 1.x 모양 {<name>: {status, error?}}. v2는 [{name, status:{status, error?}}](OpenAPI 2.3.2).
+async function fetchMcpServers(port, headers) {
+  try {
+    const v2 = (await apiFor(port)) === 'v2';
+    const res = await ocFetch(`http://127.0.0.1:${port}${v2 ? '/api/mcp' : '/mcp'}`, { headers, signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { ok: false, servers: {} };
+    const body = await res.json();
+    return { ok: true, servers: v2 ? v2McpToV1(body) : (body || {}) };
+  } catch {
+    return { ok: false, servers: {} };
+  }
+}
+
+// 서버의 root 세션 목록(1.x 모양 {id, parentID, title, directory, time}). 모든 폴더의 세션이 온다.
+// v1: GET /session?roots=true&limit=N. v2: GET /api/session은 최신순 {data, cursor} 페이지이고 하위 세션도 섞여 온다 —
+// 커서로 넘기며 root만 limit개까지 모은다(하위 에이전트 세션이 많아도 root 수를 채우도록. 페이지 수는 상한을 둔다).
+// order를 같이 보내면 400이고 기본이 최신순이라 보내지 않는다. 마지막 페이지에도 next가 온다(실측).
+const V2_SESSION_PAGE = 200;
+const V2_SESSION_MAX_PAGES = 25;
+async function fetchServerSessions(port, { limit = 1000, headers = {} } = {}) {
+  if ((await apiFor(port)) !== 'v2') {
+    const r = await ocFetch(`http://127.0.0.1:${port}/session?roots=true&limit=${limit}`, { headers, signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw new Error(`세션 목록 조회 실패: ${r.status}`);
+    const raw = await r.json();
+    return Array.isArray(raw) ? raw : [];
+  }
+  const out = [];
+  let cursor = null;
+  for (let i = 0; i < V2_SESSION_MAX_PAGES && out.length < limit; i++) {
+    const q = new URLSearchParams({ limit: String(V2_SESSION_PAGE) });
+    if (cursor) q.set('cursor', cursor);
+    const r = await ocFetch(`http://127.0.0.1:${port}/api/session?${q}`, { headers, signal: AbortSignal.timeout(5000) });
+    if (!r.ok) {
+      if (i === 0) throw new Error(`세션 목록 조회 실패: ${r.status}`);
+      break;
+    }
+    const body = await r.json();
+    const page = v2List(body);
+    for (const s of page) if (s?.id && !s.parentID && out.length < limit) out.push(v2SessionToV1(s));
+    cursor = body?.cursor?.next || null;
+    if (!cursor || page.length === 0) break;
+  }
+  return out;
+}
+
 /**
  * 세션 실행 상태 맵(1.x /session/status 모양: {sid: {type:'busy'|'retry'|…}}, idle 세션은 없음).
  * v1은 폴더 instance별이라 프롬프트를 보낸 폴더(directory)로 묻는다. v2는 GET /api/session/active(전역, running → busy).
@@ -2095,7 +2150,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     // 하위 세션의 이벤트는 화면에 그리지 않지만, 진행 신호(타임아웃 리셋)와 권한/질문 요청은 처리해야 한다.
     const relatedSessions = new Set([sessionId]);
     // 하위 세션 진행 상황(단계 수·현재 활동)을 task 도구 카드에 붙여 보여 준다. 안 보이면 수 분간 멈춘 것처럼 보인다.
-    const subagents = createSubagentTracker({ rootSessionId: sessionId });
+    // v2는 하위 에이전트가 백그라운드로 돈다(도구가 먼저 끝남) — v2는 아래 connect()에서 정해진다.
+    const subagents = createSubagentTracker({ rootSessionId: sessionId, background: () => v2 });
     const emitSubagent = (progress) => { if (progress) onPart?.(progress); };
     // 사용자 응답을 기다리는 권한/질문 요청 id. 남아 있는 동안에는 무응답 타임아웃을 걸지 않는다.
     const pendingAsks = new Set();
@@ -2503,6 +2559,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                 if (childStatus?.type === 'busy' || evt.type === 'message.part.delta') clearRetry();
                 if (evt.type === 'message.updated') subagents.onChildMessage(evt.properties?.info);
                 if (evt.type === 'message.part.updated') emitSubagent(subagents.onChildPart(evt.properties?.part));
+                if (evt.type === 'session.idle') emitSubagent(subagents.onChildIdle(evtSession));
                 resetTimeout();
                 continue;
               }
@@ -2669,6 +2726,16 @@ async function getAvailableModels() {
   if (!port) return [];
 
   try {
+    // v2: 모델 목록(/api/model)을 제공자(/api/provider)별로 묶어 1.x providers[] 모양으로 바꾼다.
+    if ((await apiFor(port)) === 'v2') {
+      const [mr, pr] = await Promise.all([
+        ocFetch(`http://127.0.0.1:${port}/api/model`, { signal: AbortSignal.timeout(5000) }),
+        ocFetch(`http://127.0.0.1:${port}/api/provider`, { signal: AbortSignal.timeout(5000) }).catch(() => null)
+      ]);
+      if (mr.ok) return v2ModelsToProviders(await mr.json(), pr?.ok ? await pr.json().catch(() => null) : null);
+      debugLog('WARN', `REST /api/model failed - status=${mr.status}`);
+      return [];
+    }
     const response = await ocFetch(`http://127.0.0.1:${port}/config/providers`);
     if (response.ok) {
       const data = await response.json();
@@ -2710,6 +2777,16 @@ async function setModel(providerId, modelName) {
  */
 async function syncModelFromServer(port) {
   try {
+    // v2: 서버 기본 모델(/api/model/default, 없으면 data null). 모델은 세션별이라 새 세션 생성 때 이 값을 넘긴다.
+    if ((await apiFor(port)) === 'v2') {
+      const r = await ocFetch(`http://127.0.0.1:${port}/api/model/default`, { signal: AbortSignal.timeout(5000) });
+      const model = r.ok ? v2DefaultModel(await r.json()) : null;
+      if (model) {
+        selectedModel = model;
+        chrome.storage.local.set({ selectedModel });
+      }
+      return;
+    }
     const response = await ocFetch(`http://127.0.0.1:${port}/config`);
     if (response.ok) {
       const config = await response.json();
@@ -2784,10 +2861,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // 폴더를 지정하면(폴더 목록의 🕘) 그 폴더의 세션만 보여준다. 기본 목록은 최근 100개뿐이라
           // 오래 안 쓴 폴더의 세션이 빠지므로 넉넉히 받는다(roots: 하위 에이전트 세션은 서버에서 뺀다).
           const filterKey = message.directory ? folderKey(message.directory) : null;
-          const listUrl = `http://127.0.0.1:${port}/session` + (filterKey ? '?roots=true&limit=1000' : '');
-          const listRes = await ocFetch(listUrl, { headers, signal: AbortSignal.timeout(5000) });
-          if (!listRes.ok) { sendResponse({ success: false, error: `세션 목록 조회 실패: ${listRes.status}` }); break; }
-          const raw = await listRes.json();
+          const listV2 = (await apiFor(port)) === 'v2';
+          let raw;
+          try {
+            if (listV2 || filterKey) {
+              raw = await fetchServerSessions(port, { limit: filterKey ? 1000 : 100, headers });
+            } else {
+              const listRes = await ocFetch(`http://127.0.0.1:${port}/session`, { headers, signal: AbortSignal.timeout(5000) });
+              if (!listRes.ok) throw new Error(`세션 목록 조회 실패: ${listRes.status}`);
+              raw = await listRes.json();
+            }
+          } catch (e) {
+            sendResponse({ success: false, error: e.message });
+            break;
+          }
           // 패널을 열 때마다 빈 세션이 만들어지므로, 메시지가 하나라도 있는 세션만 보여준다.
           // (x-opencode-directory 헤더는 목록을 필터링하지 않아 모든 디렉터리의 세션이 온다.)
           const candidates = (Array.isArray(raw) ? raw : [])
@@ -2797,10 +2884,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             .slice(0, 60);
           const hasMsg = await Promise.all(candidates.map(async x => {
             try {
-              const r = await ocFetch(`http://127.0.0.1:${port}/session/${x.id}/message?limit=1`, { signal: AbortSignal.timeout(3000) });
+              const r = await ocFetch(listV2
+                ? `http://127.0.0.1:${port}/api/session/${encodeURIComponent(x.id)}/message?limit=1`
+                : `http://127.0.0.1:${port}/session/${x.id}/message?limit=1`, { signal: AbortSignal.timeout(3000) });
               if (!r.ok) return false;
-              const arr = await r.json();
-              return Array.isArray(arr) && arr.length > 0;
+              return v2List(await r.json()).length > 0;
             } catch { return false; }
           }));
           const list = candidates
@@ -2883,10 +2971,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const headers = { 'Content-Type': 'application/json' };
           const dirHeader = buildDirectoryHeader(await getSessionDirectory(message.sessionId, replyPort));
           if (dirHeader) headers['x-opencode-directory'] = dirHeader;
-          const send = (path, body, method = 'POST') => ocFetch(`http://127.0.0.1:${replyPort}${path}`, {
+          const post = (path, body, method = 'POST') => ocFetch(`http://127.0.0.1:${replyPort}${path}`, {
             method, headers, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(5000)
           });
-          const post = (path, body) => send(path, body);
           const v2 = (await apiFor(replyPort)) === 'v2';
 
           let res;
@@ -2906,7 +2993,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (!part?.fields?.length) throw new Error('질문 정보를 찾지 못했습니다');
               res = await post(`/api/session/${reqSession}/form/${requestId}/reply`, { answer: v2FormAnswer(part.fields, message.answers) });
             } else {
-              res = await send(`/api/session/${reqSession}/form/${requestId}`, undefined, 'DELETE');
+              res = await post(`/api/session/${reqSession}/form/${requestId}`, undefined, 'DELETE');
             }
           } else if (message.action === 'reply-permission') {
             const reply = ['once', 'always', 'reject'].includes(message.reply) ? message.reply : 'reject';
@@ -3241,8 +3328,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (port) {
             try {
               // 기본 목록은 최근 100개라 오래된 폴더가 빠진다. 하위 에이전트 세션은 서버에서 빼고(roots) 넉넉히 받는다.
-              const r = await ocFetch(`http://127.0.0.1:${port}/session?roots=true&limit=1000`, { signal: AbortSignal.timeout(5000) });
-              if (r.ok) serverSessions = await r.json();
+              serverSessions = await fetchServerSessions(port, { limit: 1000 });
             } catch (e) {
               debugLog('WARN', `get-folder-list: session list failed - ${e.message}`);
             }
@@ -3361,11 +3447,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ model: selectedModel });
           break;
 
-        case 'set-model':
+        case 'set-model': {
           selectedModel = { providerID: message.providerId, modelID: message.modelName };
           chrome.storage.local.set({ selectedModel }).catch(() => {});
+          // v2는 모델이 세션별이다. 지금 세션에도 바로 적용한다(보낼 때도 ensureV2SessionModel이 맞춘다).
+          // 새 세션은 createSession이 selectedModel을 model로 넘긴다.
+          const modelPort = (message.sessionId && sessions.get(message.sessionId)?.port) || serverState.port;
+          if (message.sessionId && modelPort && (await apiFor(modelPort)) === 'v2') await ensureV2SessionModel(modelPort, message.sessionId);
           sendResponse({ success: true });
           break;
+        }
 
         case 'get-server-state':
           sendResponse({
@@ -3389,7 +3480,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const cmdPort = serverState.port;
           if (!cmdPort) { sendResponse({ commands: [] }); break; }
           // skill도 이 목록에 들어 있다. 작업 폴더의 command/skill이 보이도록 세션 폴더로 묻는다.
-          const cmdRes = await ocFetch(`http://127.0.0.1:${cmdPort}/command`, { headers: await sessionDirectoryHeaders(message.sessionId, cmdPort) });
+          const cmdHeaders = await sessionDirectoryHeaders(message.sessionId, cmdPort);
+          // v2는 skill이 명령 목록과 따로 있다(/api/skill) — 1.x처럼 한 목록으로 합친다.
+          if ((await apiFor(cmdPort)) === 'v2') {
+            const get = (path) => ocFetch(`http://127.0.0.1:${cmdPort}${path}`, { headers: cmdHeaders, signal: AbortSignal.timeout(5000) })
+              .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+            const [cmds, skills] = await Promise.all([get('/api/command'), get('/api/skill')]);
+            sendResponse({ success: true, commands: v2CommandsToV1(cmds, skills) });
+            break;
+          }
+          const cmdRes = await ocFetch(`http://127.0.0.1:${cmdPort}/command`, { headers: cmdHeaders });
           if (!cmdRes.ok) { sendResponse({ commands: [] }); break; }
           const cmdData = await cmdRes.json();
           const commands = Array.isArray(cmdData) ? cmdData : (cmdData.commands || cmdData.items || []);
@@ -3400,9 +3500,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'get-agents': {
           const agentPort = serverState.port;
           if (!agentPort) { sendResponse({ agents: [] }); break; }
-          const agentRes = await ocFetch(`http://127.0.0.1:${agentPort}/agent`, { headers: await sessionDirectoryHeaders(message.sessionId, agentPort) });
+          const agentV2 = (await apiFor(agentPort)) === 'v2';
+          const agentRes = await ocFetch(`http://127.0.0.1:${agentPort}${agentV2 ? '/api/agent' : '/agent'}`, { headers: await sessionDirectoryHeaders(message.sessionId, agentPort) });
           if (!agentRes.ok) { sendResponse({ agents: [] }); break; }
-          const agentData = await agentRes.json();
+          const agentData = agentV2 ? v2AgentsToV1(await agentRes.json()) : await agentRes.json();
           const agents = Array.isArray(agentData)
             ? agentData.filter(a => (a.mode === 'primary' || a.mode === 'all') && !a.hidden)
             : [];
@@ -3415,6 +3516,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const agentName = message.agentName;
           const agentSetPort = serverState.port;
           if (!agentSetPort) { sendResponse({ error: 'Server not available' }); break; }
+          if ((await apiFor(agentSetPort)) === 'v2') {
+            // v2: POST /api/session/{id}/agent {agent} → 204
+            const r = await ocFetch(`http://127.0.0.1:${agentSetPort}/api/session/${encodeURIComponent(agentSessionId)}/agent`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: agentName }), signal: AbortSignal.timeout(5000)
+            });
+            sendResponse({ success: r.ok, agent: r.ok ? agentName : undefined });
+            break;
+          }
           const agentSetRes = await ocFetch(
             `http://127.0.0.1:${agentSetPort}/session/${agentSessionId}`,
             {
@@ -3432,6 +3541,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const runPort = serverState.port || await ensureOpenCodeServer();
           if (!runPort) { sendResponse({ error: 'Server not available' }); break; }
           if (!sessions.has(message.sessionId)) { sendResponse({ error: 'Invalid session' }); break; }
+          if ((await apiFor(runPort)) === 'v2') {
+            // v2: POST /api/session/{id}/command {name, text, delivery} → 204(비동기). 실행 중 턴에 끼워 넣지 않게 queue.
+            const r = await ocFetch(`http://127.0.0.1:${runPort}/api/session/${encodeURIComponent(message.sessionId)}/command`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(await sessionDirectoryHeaders(message.sessionId, runPort)) },
+              body: JSON.stringify({ name: message.commandId, text: typeof message.arguments === 'string' ? message.arguments : '', delivery: 'queue' })
+            });
+            sendResponse({ success: r.ok, status: r.status });
+            break;
+          }
           const runRes = await ocFetch(
             `http://127.0.0.1:${runPort}/session/${message.sessionId}/command`,
             {
@@ -3450,9 +3569,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const mcpPort = serverState.port;
           if (!mcpPort) { sendResponse({ success: false, servers: {} }); break; }
           const mcpHeaders = await sessionDirectoryHeaders(message.sessionId, mcpPort);
-          const mcpRes = await ocFetch(`http://127.0.0.1:${mcpPort}/mcp`, { headers: mcpHeaders });
-          if (!mcpRes.ok) { sendResponse({ success: false, servers: {} }); break; }
-          sendResponse({ success: true, servers: await mcpRes.json() });
+          const result = await fetchMcpServers(mcpPort, mcpHeaders);
+          sendResponse(result.ok ? { success: true, servers: result.servers } : { success: false, servers: {} });
           break;
         }
 
@@ -3461,12 +3579,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!togglePort) { sendResponse({ success: false }); break; }
           const toggleHeaders = await sessionDirectoryHeaders(message.sessionId, togglePort);
           const action = message.connect ? 'connect' : 'disconnect';
-          const toggleRes = await ocFetch(
-            `http://127.0.0.1:${togglePort}/mcp/${encodeURIComponent(message.name)}/${action}`,
-            { method: 'POST', headers: toggleHeaders }
-          );
-          const statusRes = await ocFetch(`http://127.0.0.1:${togglePort}/mcp`, { headers: toggleHeaders });
-          const servers = statusRes.ok ? await statusRes.json() : {};
+          // v2는 experimental 경로다(204). 마이너 버전에서 바뀔 수 있다(docs/opencode_v2_support_plan.md 위험).
+          const togglePath = (await apiFor(togglePort)) === 'v2'
+            ? `/api/experimental/mcp/${encodeURIComponent(message.name)}/${action}`
+            : `/mcp/${encodeURIComponent(message.name)}/${action}`;
+          const toggleRes = await ocFetch(`http://127.0.0.1:${togglePort}${togglePath}`, { method: 'POST', headers: toggleHeaders });
+          if (!toggleRes.ok) debugLog('WARN', `toggle-mcp: ${togglePath} status=${toggleRes.status}`);
+          const { servers } = await fetchMcpServers(togglePort, toggleHeaders);
           sendResponse({ success: toggleRes.ok, servers });
           break;
         }
@@ -3479,7 +3598,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // 소프트 재시작: MCP/skill/agent 등 config 변경을 반영 (프로세스 유지)
         case 'restart-instance': {
-          sendResponse(await restartServerInstance());
+          sendResponse(await restartServerInstance(message.sessionId || null));
           break;
         }
 
@@ -3500,7 +3619,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             serverIsWSL: serverState.runtime
               ? serverState.runtime === 'wsl'
               : (typeof serverIsWSL === 'boolean' ? serverIsWSL : null),
-            port: serverState.available ? serverState.port : null
+            port: serverState.available ? serverState.port : null,
+            apiVersion: serverState.available ? (serverState.apiVersion || null) : null
           });
           break;
         }
@@ -3585,11 +3705,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               result.proxyEnvReason = info.proxyEnvReason || null;
             }
           } catch {}
-          try {
-            // 응답 생성 중인 세션만 키로 들어오는 맵 (idle이면 {})
-            const res = await ocFetch(`http://127.0.0.1:${serverState.port}/session/status`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) result.busy = Object.keys(await res.json()).length;
-          } catch {}
+          // 응답 생성 중인 세션만 키로 들어오는 맵 (idle이면 {}). v2는 /api/session/active.
+          const status = await fetchStatusMap(serverState.port, null, 3000);
+          if (status.reachable) result.busy = Object.keys(status.map).length;
           sendResponse(result);
           break;
         }

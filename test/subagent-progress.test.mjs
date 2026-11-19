@@ -71,3 +71,53 @@ test('본 세션의 다른 도구나 다른 세션의 task 파트는 무시한�
   assert.equal(tr.onRootPart({ ...taskPart({ sessionId: CHILD }), sessionID: 'other' }), null);
   assert.equal(tr.onChildPart(childPart('text', {}, ROOT)), null, '본 세션 파트는 하위 진행이 아니다');
 });
+
+// opencode 2.x: 하위 에이전트가 백그라운드로 돈다(subagent 도구가 먼저 완료된다 — 2.3.2 실측).
+test('v1(기본): 진행 상황에 running을 싣지 않고, 하위 세션 idle을 무시한다', () => {
+  const { tr } = setup();
+  tr.onSessionInfo({ id: CHILD, parentID: ROOT, agent: 'explore' });
+  const linked = tr.onRootPart(taskPart({ sessionId: CHILD }));
+  assert.equal('running' in linked, false);
+  tr.onChildPart(childPart('step-start', { id: 'step1' }));
+  assert.equal(tr.onChildIdle(CHILD), null);
+});
+
+test('v2(background): 도구가 끝난 뒤에도 running:true, 하위 세션 idle에서 running:false, 다음 라운드에 다시 true', () => {
+  let t = 1000;
+  const tr = createSubagentTracker({ rootSessionId: ROOT, now: () => t, background: () => true });
+  tr.onSessionInfo({ id: CHILD, parentID: ROOT, agent: 'explore' });
+  const linked = tr.onRootPart({ ...taskPart({ sessionId: CHILD }), state: { status: 'completed', input: { subagent_type: 'explore' }, metadata: { sessionId: CHILD } } });
+  assert.equal(linked.running, true);
+  const s1 = tr.onChildPart(childPart('step-start', { id: 'step1' }));
+  assert.equal(s1.running, true);
+  assert.equal(s1.steps, 1);
+
+  // 손자 세션의 완료는 끝이 아니다
+  tr.onSessionInfo({ id: GRAND, parentID: CHILD, agent: 'general' });
+  assert.equal(tr.onChildIdle(GRAND), null);
+
+  const idle = tr.onChildIdle(CHILD);
+  assert.equal(idle.running, false);
+  assert.equal(idle.activity, null);
+  assert.equal(idle.steps, 1);
+  assert.equal(tr.onChildIdle(CHILD), null, '두 번 끝내지 않는다');
+
+  const again = tr.onChildPart(childPart('tool', { tool: 'bash', state: { status: 'running' } }));
+  assert.equal(again.running, true, '끝난 하위 세션이 다음 라운드를 시작하면 다시 진행 중');
+});
+
+// 사이드패널 블록 상태(sidepanel/block-state.js — 브라우저 스크립트이자 CommonJS 모듈)
+import { createRequire } from 'node:module';
+const { createBlocks, upsertToolPart, setSubagentProgress, finalizeRunning } = createRequire(import.meta.url)('../sidepanel/block-state.js');
+
+test('block-state: v2 running을 블록에 옮기고(v1은 싣지 않음), 응답이 끝나면(finalizeRunning) 끈다', () => {
+  const blocks = createBlocks();
+  upsertToolPart(blocks, { id: 'call_sub', tool: 'task', status: 'completed', input: {} });
+  setSubagentProgress(blocks, { toolId: 'call_sub', agent: 'explore', steps: 1, activity: { type: 'thinking' }, startedAt: 1 });
+  assert.equal('running' in blocks[0].subagent, false, 'v1은 그대로');
+  setSubagentProgress(blocks, { toolId: 'call_sub', agent: 'explore', steps: 2, activity: { type: 'tool', tool: 'bash' }, startedAt: 1, running: true });
+  assert.equal(blocks[0].subagent.running, true);
+  finalizeRunning(blocks, 'interrupted');
+  assert.equal(blocks[0].status, 'completed', '이미 끝난 도구 상태는 그대로');
+  assert.equal(blocks[0].subagent.running, false);
+});

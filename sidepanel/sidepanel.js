@@ -1517,7 +1517,7 @@ I18N.ready.then(function() {
 
   // 모델 선택 공통 처리: 서버 반영 + 상태/버튼/최근 목록 갱신
   async function applyModel(providerId, modelId) {
-    await sendMessageToBackground('set-model', { providerId, modelName: modelId });
+    await sendMessageToBackground('set-model', { providerId, modelName: modelId, sessionId: currentSessionId });
     selectedModel = { providerId, modelName: modelId };
     rememberRecentModel(providerId, modelId);
     updateModelButton();
@@ -2373,8 +2373,12 @@ I18N.ready.then(function() {
 
   const runtimeBadge = document.getElementById('runtime-badge');
 
+  const apiBadge = document.getElementById('api-badge');
+
   // runtime: 'wsl' | 'windows' | null(숨김). 서버가 연결돼 있을 때만 표시한다.
-  function setRuntimeBadge(runtime) {
+  // apiVersion: 'v2'면 옆에 "v2" 배지를 단다(opencode 2.x는 세션 DB가 1.x와 따로라 /sessions 목록이 다르다).
+  function setRuntimeBadge(runtime, apiVersion = null) {
+    apiBadge.classList.toggle('hidden', apiVersion !== 'v2');
     if (!runtime) {
       runtimeBadge.classList.add('hidden');
       return;
@@ -2386,7 +2390,7 @@ I18N.ready.then(function() {
   async function refreshRuntimeBadge() {
     try {
       const info = await sendMessageToBackground('get-runtime-info');
-      setRuntimeBadge(info.port && info.serverIsWSL !== null ? (info.serverIsWSL ? 'wsl' : 'windows') : null);
+      setRuntimeBadge(info.port && info.serverIsWSL !== null ? (info.serverIsWSL ? 'wsl' : 'windows') : null, info.port ? info.apiVersion : null);
     } catch {
       setRuntimeBadge(null);
     }
@@ -2729,7 +2733,7 @@ I18N.ready.then(function() {
     try {
       const res = await sendMessageToBackground(
         isHard ? 'restart-server' : 'restart-instance',
-        isHard && runtime ? { preferredRuntime: runtime } : {}
+        isHard ? (runtime ? { preferredRuntime: runtime } : {}) : { sessionId: currentSessionId }
       );
       if (!res?.success) {
         fail(res?.error);
@@ -4354,7 +4358,8 @@ I18N.ready.then(function() {
     const sub = block.subagent;
     if (!sub) { line.classList.add('hidden'); return; }
     line.classList.remove('hidden');
-    const running = block.status === 'running' || block.status === 'pending';
+    // opencode 2.x는 하위 에이전트가 백그라운드로 돌아 도구 카드가 먼저 끝난다 — 그때는 background가 준 running을 따른다.
+    const running = typeof sub.running === 'boolean' ? sub.running : (block.status === 'running' || block.status === 'pending');
     const parts = [sub.agent || t('하위 에이전트')];
     if (running && sub.activity) parts.push(subagentActivityLabel(sub.activity));
     if (sub.steps) parts.push(t('{n}단계', { n: sub.steps }));
@@ -4572,7 +4577,7 @@ I18N.ready.then(function() {
       }
       blockRenderScheduler.request();
     } else if (message.action === 'server-runtime-updated') {
-      setRuntimeBadge(message.runtime);
+      setRuntimeBadge(message.runtime, message.apiVersion);
     } else if (message.action === 'server-restart-state' && !restartBusy) {
       // 다른 창의 사이드패널이 하드 재시작을 시작했다. 이 패널도 입력을 막고 결과에 맞춰 복귀한다.
       // (재시작을 직접 시작한 패널은 runServerRestart가 처리한다)
