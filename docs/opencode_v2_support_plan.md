@@ -112,6 +112,7 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 
 **대화 기록 (`GET /api/session/{id}/message`)**
 - `{data:[…], cursor:{previous, next}}`, **기본 정렬이 최신순(desc)**. `?order=asc` 가능.
+- 페이지 넘김(2단계 실측): 커서에 정렬 방향이 들어 있어 **`cursor`와 `order`를 함께 보내면 400 `InvalidCursorError`**("Cursor cannot be combined with order"). 정렬은 첫 요청에만 준다. **마지막 페이지에도 `next`가 오고**, 그 커서로 물으면 빈 `data`가 온다.
 - 항목 종류: `user {id, text, time}`, `assistant {id, agent, model, content[], finish, rawFinish, cost, tokens, time, error?}`, `idle {id, outcome:'succeeded'|'interrupted'|…}`.
 - assistant `content[]`: `reasoning {text}`, `text {text}`, `tool {id, name, state:{status, input, content[], metadata}, time}`.
 - **`parentID`가 없다.** 턴은 순서로만 나뉜다: `user` → assistant 여러 개 → `idle`. 탭 전환 복원의 `turnParentId`는 "마지막 user 메시지 id"로 바꿔 계산해야 한다.
@@ -163,7 +164,18 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - **host 수정**: `checkOpenCodeServer`는 지금 `statusCode===200`만 "살아 있음"으로 본다. 비밀번호가 걸린 1.x 서버는 `/global/health`에 401을 주므로, 그대로 두면 host가 포트가 비었다고 보고 같은 포트에 서버를 또 띄우거나(`findAvailablePort`), 시작 대기·`stop` 확인(`waitForPortFree`)을 잘못 판단한다. **200·401 모두 "살아 있음"**으로 바꾼다(200 HTML인 v2도 계속 살아 있음). stdout 로그에서 비밀번호를 가린다(`maskProxyValue` 방식). 실측상 env로 준 비밀번호는 출력되지 않으므로 방어용이다. host가 바뀌므로 `MIN_HOST_VERSION`이 릴리스 때 자동으로 올라간다(`scripts/sync-host-version.js`). 구버전 host(비밀번호 미지원)로 v2 서버를 띄운 경우는 인증 실패 → "host 업데이트 필요" 안내.
 - `background.js`의 인라인 fetch를 모두 어댑터 호출로 바꾼다. v1 동작은 기존 테스트 전부 통과로 확인.
 
-### 2단계: 대화 흐름
+### 2단계: 대화 흐름 — 완료 (2026-11-20)
+
+구현한 것:
+- `lib/opencode-v2.mjs`(순수 함수): `createV2EventAdapter`가 v2 이벤트를 1.x 이벤트 모양으로 바꾼다 → `subscribeToEvents`의 타임아웃·quiet check·재시도·대기 메시지·스냅샷 로직을 v1/v2가 그대로 함께 쓴다. 대응: `inbox.delivered`(user 항목) → user `message.updated`, `step.started` → assistant `message.updated`(parentID = 현재 턴 user) + `step-start` 파트, `text/reasoning.*` → 파트 + delta, `tool.*` → 도구 파트(pending/running/completed/error, 이름 `shell`→`bash`·`subagent`→`task`, `input.path`→`filePath`, `metadata.sessionID`→`sessionId`), `retry.scheduled` → `session.status` retry, `execution.succeeded/interrupted` → `session.idle`, `execution.failed` → `session.error`. synthetic inbox 항목(하위 에이전트 결과)은 같은 턴으로 본다. 그 밖에 `flattenV2History`(parentID를 바로 앞 user로), `v2FallbackFromMessages`, `v2ActiveToStatusMap`.
+- `background.js`: 포트별 API 버전(`portApiVersions`, 모르면 `apiFor`가 health로 확인)으로 엔드포인트를 고른다 — 세션 생성(`location`·`model`), 세션 조회·폴더(`location.directory`)·존재 확인, 전송(`/api/session/{id}/prompt {text, delivery:'queue'}`), 중단(`/interrupt`), SSE(`/api/event` + 어댑터), 상태(`fetchStatusMap` = `/api/session/active`), 기록(`fetchV2History`, 페이지 넘김), 폴백 내용, 서버 cwd(`/api/location`). v2는 모델이 세션별이라 보내기 전에 `ensureV2SessionModel`이 다를 때만 `POST /api/session/{id}/model`.
+- `lib/sw-resilience.mjs`: `recoverPendingPrompt`에 `fetchStatus`(버전별 상태 조회)를 넘길 수 있다.
+- 테스트: `test/opencode-v2.test.mjs`(어댑터·기록·폴백), `test/v2-flow.test.mjs`(실제 `background.js` + `test/helpers/mock-opencode-v2.mjs`: 도구 턴·대기 메시지·중단·기록 페이지·quiet check·재연결·SW 재시작 복구·탭 전환 복원). 응답 턴은 실제 2.3.2 기록(`test/fixtures/v2-turn-*.jsonl`, 경로 익명화)을 재생한다. 하네스에 `session`(storage.session 초기값) 옵션 추가. 전체 135개 통과.
+- 실제 opencode 2.3.2(무료 모델)에 실제 `background.js`를 붙여 확인: 연결·세션 생성(작업 폴더)·도구 카드·대기 메시지(새 말풍선, 완료 내용 `QUEUED-OK`)·중단(`active` 비워짐)·기록·세션 전환. 이 확인에서 기록 페이지 넘김 버그(cursor+order 400)를 찾아 고쳤고 mock도 실제 규칙을 따르게 했다.
+
+남은 것(다음 단계): 권한·질문(form) 카드(3단계), 모델 목록·변경 UI(`set-model`은 아직 v1 `PATCH /config`)·에이전트·명령·MCP·폴더 목록(4단계). 사이드패널은 바꾸지 않았다.
+
+원래 계획:
 - 세션 생성/조회/폴더(`getSessionDirectory`, `createSession`, `set-working-directory`의 `resolve-directory` 유지)
 - 전송·중단·SSE: `subscribeToEvents`의 이벤트 해석을 버전별로 분리. **`lib/event-router-v2.mjs`(신규)**가 V2Event를 받아 기존 `onPart` kind와 완료/오류 신호로 바꾼다(`lib/part-router.mjs`와 같은 역할). 타임아웃 리셋·quiet check(`checkQuiet`)·재연결 후 idle 확인은 어댑터의 `status`로.
 - SW 재시작 복구: `lib/sw-resilience.mjs`의 `recoverPendingPrompt`가 `fetchFn` 대신 어댑터 `status`/`messages`를 받게.

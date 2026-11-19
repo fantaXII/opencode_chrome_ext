@@ -32,7 +32,7 @@ function noopApi() {
   return new Proxy(fn, { get: (t, k) => (k === 'then' ? undefined : noopApi()), apply: () => Promise.resolve(undefined) });
 }
 
-function createChromeStub({ local = {}, nativeMessage = null, tabsQuery = null, scripting = null } = {}) {
+function createChromeStub({ local = {}, session = {}, nativeMessage = null, tabsQuery = null, scripting = null } = {}) {
   const sent = [];       // background → 사이드패널로 보낸 메시지 (chrome.runtime.sendMessage)
   const sidePanelCalls = []; // chrome.sidePanel.setOptions 호출 인자
   const tabRemovedListeners = [];
@@ -54,7 +54,7 @@ function createChromeStub({ local = {}, nativeMessage = null, tabsQuery = null, 
   };
   const chrome = new Proxy({
     runtime,
-    storage: { local: createStorageArea(local), session: createStorageArea(), onChanged: noopApi() },
+    storage: { local: createStorageArea(local), session: createStorageArea(session), onChanged: noopApi() },
     ...(scripting && { scripting }),
     tabs: new Proxy({ query: tabsQuery || (async () => []), onRemoved: { addListener: (fn) => tabRemovedListeners.push(fn) } },
       { get: (t, k) => t[k] ?? noopApi() }),
@@ -71,8 +71,9 @@ function createChromeStub({ local = {}, nativeMessage = null, tabsQuery = null, 
  * @param {(msg: object) => any} [opts.nativeMessage]  native host 응답 (없으면 host 미설치처럼 동작)
  * @param {() => Promise<object[]>} [opts.tabsQuery]  chrome.tabs.query 대체 (기본: 탭 없음)
  * @param {object} [opts.scripting]  chrome.scripting 대체 (예: { executeScript }) — 페이지 본문 읽기 테스트용
+ * @param {object} [opts.session]  chrome.storage.session 초기값 — SW가 다시 뜬 상황(복구할 기록이 남아 있음)을 만든다
  */
-export async function loadBackground({ port, constants = {}, local = {}, nativeMessage = null, tabsQuery = null, scripting = null, sourcePath = path.join(ROOT, 'background.js') }) {
+export async function loadBackground({ port, constants = {}, local = {}, session = {}, nativeMessage = null, tabsQuery = null, scripting = null, sourcePath = path.join(ROOT, 'background.js') }) {
   let src = fs.readFileSync(sourcePath, 'utf8');
   const replace = (re, to, label) => {
     if (!re.test(src)) throw new Error(`harness: background.js에서 ${label}을(를) 찾지 못했다`);
@@ -90,7 +91,7 @@ export async function loadBackground({ port, constants = {}, local = {}, nativeM
   const file = path.join(dir, `background.${++loadSeq}.mjs`);
   fs.writeFileSync(file, src);
 
-  const stub = createChromeStub({ local, nativeMessage, tabsQuery, scripting });
+  const stub = createChromeStub({ local, session, nativeMessage, tabsQuery, scripting });
   globalThis.chrome = stub.chrome;
   // background.js는 console.log를 많이 남긴다. 테스트 출력이 묻히지 않게 끈다.
   const origLog = console.log;

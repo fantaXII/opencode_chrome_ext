@@ -15,6 +15,7 @@ import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatu
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 import { QUICK_ACTION_LIMITS, normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
 import { createPasswordStore, createServerFetch, probeV2 } from './lib/opencode-api.mjs';
+import { createV2EventAdapter, v2ActiveToStatusMap, flattenV2History, v2FallbackFromMessages } from './lib/opencode-v2.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
@@ -163,6 +164,8 @@ async function recoverInterruptedPrompts() {
       sessionId, port, startedAt, directory,
       maxAgeMs: timeoutMs,
       fetchFn: ocFetch,
+      // v1 /session/status(프롬프트 폴더 instance) 또는 v2 /api/session/active — 서버 버전에 맞춰 묻는다
+      fetchStatus: () => fetchStatusMap(port, directory),
       fetchContent: fetchFallbackContent,
       onBusy: () => {
         chrome.runtime.sendMessage({ action: 'message-part', sessionId, part: { kind: 'heartbeat', state: 'busy', at: Date.now() } }).catch(() => {});
@@ -264,6 +267,7 @@ async function checkServerHealth(port, { recover = true } = {}) {
       // 같은 포트를 쓰는 다른 프로그램을 opencode로 오인하지 않도록 응답 형태까지 확인한다.
       if (data?.healthy === true || typeof data?.version === 'string') {
         console.log(`[checkServerHealth] 포트 ${port} 성공 - version=${data.version}`);
+        portApiVersions.set(port, 'v1');
         return { available: true, version: data.version, apiVersion: 'v1' };
       }
       // opencode 2.x는 API를 /api/ 아래로 옮겼고, 예전 경로에는 웹 UI HTML을 200으로 준다.
@@ -273,7 +277,10 @@ async function checkServerHealth(port, { recover = true } = {}) {
           logOnce(`v2:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server (v2 API) - not supported yet`);
           return { available: false, version: null, unsupportedApi: 'v2' };
         }
-        if (v2.authorized) return { available: true, version: v2.version, apiVersion: 'v2' };
+        if (v2.authorized) {
+          portApiVersions.set(port, 'v2');
+          return { available: true, version: v2.version, apiVersion: 'v2' };
+        }
         if (recover && await recoverServerPassword(port)) return checkServerHealth(port, { recover: false });
         logOnce(`auth:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server with an unknown password - skipped`);
         return { available: false, version: null, authRequired: true, apiVersion: 'v2' };
@@ -290,6 +297,17 @@ async function checkServerHealth(port, { recover = true } = {}) {
     console.log(`[checkServerHealth] 포트 ${port} 실패:`, error.message);
   }
   return { available: false, version: null };
+}
+
+// 포트별 서버 API 버전('v1'|'v2'). checkServerHealth가 응답하는 서버를 볼 때 기록한다.
+// 엔드포인트가 버전마다 다른 요청은 apiFor(port)로 고른다(docs/opencode_v2_support_plan.md).
+const portApiVersions = new Map();
+
+/** 포트의 API 버전. 모르면(SW 재시작 직후 복구 등) health로 한 번 확인한다. 판단할 수 없으면 'v1'. */
+async function apiFor(port) {
+  if (!port) return 'v1';
+  if (!portApiVersions.has(port)) await checkServerHealth(port).catch(() => {});
+  return portApiVersions.get(port) || 'v1';
 }
 
 // 같은 포트에 host를 계속 부르지 않도록 실패한 복구는 잠시 기억한다(범위 검사는 포트 10개를 매번 훑는다).
@@ -1056,9 +1074,12 @@ async function getSessionDirectory(sessionId, port = null) {
   const p = port ?? sessions.get(sessionId)?.port ?? serverState.port;
   if (p) {
     try {
-      const res = await ocFetch(`http://127.0.0.1:${p}/session/${encodeURIComponent(sessionId)}`, { signal: AbortSignal.timeout(3000) });
+      const v2 = (await apiFor(p)) === 'v2';
+      const res = await ocFetch(`http://127.0.0.1:${p}${v2 ? '/api' : ''}/session/${encodeURIComponent(sessionId)}`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
-        const directory = (await res.json())?.directory;
+        const body = await res.json();
+        // v2: { data: { location: { directory } } }
+        const directory = v2 ? body?.data?.location?.directory : body?.directory;
         if (directory) {
           rememberSessionDirectory(sessionId, directory);
           return directory;
@@ -1246,6 +1267,15 @@ async function normalizeWorkingDirectory(rawPath) {
  * 어떤 경로 포맷을 쓰는지 알 수 있도록, 서버 연결이 확인되는 즉시 호출한다.
  */
 async function probeServerDirectory(port) {
+  if ((await apiFor(port)) === 'v2') {
+    // v2: location을 지정하지 않으면 서버 cwd다(2.3.2 실측). SSE에는 서버 cwd가 실리지 않는다.
+    try {
+      const res = await ocFetch(`http://127.0.0.1:${port}/api/location`, { signal: AbortSignal.timeout(2000) });
+      return res.ok ? (await res.json())?.directory || null : null;
+    } catch {
+      return null;
+    }
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
@@ -1356,6 +1386,28 @@ function generateUUID() {
   });
 }
 
+// v2는 모델이 세션별이다(POST /api/session/{id}/model). 세션에 마지막으로 적용한 모델을 기억해 바뀔 때만 보낸다.
+const v2SessionModels = new Map(); // sessionId -> 'providerID/modelID'
+const v2ModelRef = (m) => ({ id: m.modelID, providerID: m.providerID });
+const v2ModelKey = (m) => `${m.providerID}/${m.modelID}`;
+
+/** v2: 선택한 모델을 세션에 적용한다(다를 때만). 실패해도 전송은 서버 기본 모델로 진행한다. */
+async function ensureV2SessionModel(port, sessionId) {
+  if (!selectedModel || v2SessionModels.get(sessionId) === v2ModelKey(selectedModel)) return;
+  try {
+    const res = await ocFetch(`http://127.0.0.1:${port}/api/session/${encodeURIComponent(sessionId)}/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: v2ModelRef(selectedModel) }),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (res.ok) v2SessionModels.set(sessionId, v2ModelKey(selectedModel));
+    else debugLog('WARN', `ensureV2SessionModel: status=${res.status} - sessionId=${sessionId}, model=${v2ModelKey(selectedModel)}`);
+  } catch (e) {
+    debugLog('WARN', `ensureV2SessionModel: ${e.message} - sessionId=${sessionId}`);
+  }
+}
+
 /**
  * 새 세션 생성
  */
@@ -1374,18 +1426,25 @@ async function createSession(title = 'New Chat') {
       debugLog('INFO', `createSession: x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}`);
     }
 
-    const response = await ocFetch(`http://127.0.0.1:${port}/session`, {
+    // v2: 작업 폴더는 location으로 세션에 고정한다(헤더도 동작하지만 생성 시 명시한다). 모델은 세션별이다.
+    // 없는 폴더로도 200으로 만들어지므로 폴더 확인은 set-working-directory의 resolve-directory가 맡는다(2.3.2 실측).
+    const v2 = (await apiFor(port)) === 'v2';
+    const response = await ocFetch(`http://127.0.0.1:${port}${v2 ? '/api' : ''}/session`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ title })
+      body: JSON.stringify(v2
+        ? { title, ...(workingDir && { location: { directory: workingDir } }), ...(selectedModel && { model: v2ModelRef(selectedModel) }) }
+        : { title })
     });
 
     if (!response.ok) {
       throw new Error(`세션 생성 실패: ${response.status}`);
     }
 
-    const sessionData = await response.json();
+    const raw = await response.json();
+    const sessionData = v2 ? { id: raw?.data?.id, directory: raw?.data?.location?.directory } : raw;
     const sessionId = sessionData.id || sessionData.session?.id;
+    if (v2 && sessionId && selectedModel) v2SessionModels.set(sessionId, v2ModelKey(selectedModel));
 
     if (!sessionId) {
       throw new Error('세션 ID를 찾을 수 없음');
@@ -1693,22 +1752,27 @@ ${L.header}
     ...(selectedModel && { model: selectedModel }),
     parts: [{ type: 'text', text: fullMessage }]
   });
-  return { headers, body, dirHeader };
+  return { headers, body, text: fullMessage, dirHeader };
 }
 
 /**
  * POST /session/{id}/prompt_async. 서버는 세션이 응답 중이어도 204로 접수하고 큐에 넣는다(opencode 1.19.5 실측).
  * 실패·시간 초과면 throw한다. timedOut 오류에는 err.timedOut = true를 붙인다.
  */
-async function postPrompt(port, sessionId, { headers, body }) {
+async function postPrompt(port, sessionId, { headers, body, text }) {
+  // v2: POST /api/session/{id}/prompt {text, delivery}는 바로 200 + inbox 항목을 돌려준다(비동기, 2.3.2 실측).
+  // delivery 기본값 'steer'는 실행 중인 턴에 끼워 넣으므로, 1.x 대기 메시지와 같은 'queue'를 항상 명시한다.
+  // 모델은 세션에 둔다(ensureV2SessionModel).
+  const v2 = (await apiFor(port)) === 'v2';
+  const url = v2
+    ? `http://127.0.0.1:${port}/api/session/${encodeURIComponent(sessionId)}/prompt`
+    : `http://127.0.0.1:${port}/session/${sessionId}/prompt_async`;
+  const payload = v2 ? JSON.stringify({ text, delivery: 'queue' }) : body;
   const promptCtrl = new AbortController();
   const promptTimeout = setTimeout(() => promptCtrl.abort(), PROMPT_SEND_TIMEOUT_MS);
   let promptResponse;
   try {
-    promptResponse = await ocFetch(
-      `http://127.0.0.1:${port}/session/${sessionId}/prompt_async`,
-      { method: 'POST', headers, signal: promptCtrl.signal, body }
-    );
+    promptResponse = await ocFetch(url, { method: 'POST', headers, signal: promptCtrl.signal, body: payload });
   } catch (fetchErr) {
     const timedOut = fetchErr.name === 'AbortError';
     debugLog('ERROR', timedOut
@@ -1739,7 +1803,12 @@ async function sendMessage(sessionId, message, tabInfo, onChunk, onComplete, onP
   if (!port) {
     throw new Error('OpenCode 서버 연결 실패');
   }
-  await ensureSelectedModel(port);
+  if ((await apiFor(port)) === 'v2') {
+    // v2 모델 목록·기본 모델은 4단계에서 옮긴다. 고른 모델이 없으면 서버 기본 모델로 보낸다.
+    await ensureV2SessionModel(port, sessionId);
+  } else {
+    await ensureSelectedModel(port);
+  }
 
   const request = await buildPromptRequest(sessionId, message, tabInfo);
   const idleTimeoutMs = await getResponseTimeoutMs();
@@ -1798,7 +1867,12 @@ function stopPromptStream(sessionId) {
  */
 async function abortServerSession(port, sessionId) {
   try {
-    const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}/abort`, {
+    // v2: POST /api/session/{id}/interrupt → {interrupted:true}, 이벤트 session.execution.interrupted(실측)
+    const v2 = (await apiFor(port)) === 'v2';
+    const url = v2
+      ? `http://127.0.0.1:${port}/api/session/${encodeURIComponent(sessionId)}/interrupt`
+      : `http://127.0.0.1:${port}/session/${sessionId}/abort`;
+    const res = await ocFetch(url, {
       method: 'POST',
       signal: AbortSignal.timeout(3000)
     });
@@ -1816,6 +1890,12 @@ async function abortServerSession(port, sessionId) {
  */
 async function fetchFallbackContent(port, sessionId) {
   try {
+    if ((await apiFor(port)) === 'v2') {
+      // 기본 정렬이 최신순이다. 마지막 단계(assistant 메시지)만 보면 되므로 최근 몇 개만 읽는다.
+      const r = await ocFetch(`http://127.0.0.1:${port}/api/session/${encodeURIComponent(sessionId)}/message?limit=20`);
+      if (!r.ok) return { content: '', partTypes: [], lastMessageId: null };
+      return v2FallbackFromMessages((await r.json())?.data);
+    }
     const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}/message`);
     if (!res.ok) return { content: '', partTypes: [], lastMessageId: null };
 
@@ -1851,6 +1931,13 @@ async function getSessionHistory(sessionId) {
   if (!session) return { success: false, messages: [], error: 'unknown session' };
 
   try {
+    if ((await apiFor(session.port)) === 'v2') {
+      const v2 = await fetchV2History(session.port, sessionId);
+      if (!v2.ok) return { success: false, messages: [], error: v2.error };
+      const ctrl = eventSources.get(sessionId);
+      const stream = ctrl && !ctrl.signal.aborted && ctrl.snapshot ? ctrl.snapshot() : null;
+      return { success: true, messages: flattenV2History(v2.messages), notices: sessionNotices.get(sessionId) || [], stream };
+    }
     const res = await ocFetch(`http://127.0.0.1:${session.port}/session/${sessionId}/message`);
     if (!res.ok) return { success: false, messages: [], error: `status ${res.status}` };
 
@@ -1877,13 +1964,58 @@ async function getSessionHistory(sessionId) {
   }
 }
 
+// v2 대화 기록은 페이지 단위다({data, cursor:{next}}). 오래된 순으로 끝까지 읽는다(상한을 둬 무한 반복을 막는다).
+// 정렬은 첫 요청에만 준다: 커서에 정렬 방향이 들어 있어 cursor와 order를 함께 보내면 400 InvalidCursorError다.
+// 마지막 페이지에도 next가 오고, 그 커서로 물으면 빈 목록이 온다(2.3.2 실측).
+const V2_HISTORY_PAGE = 200;
+const V2_HISTORY_MAX_PAGES = 50;
+async function fetchV2History(port, sessionId) {
+  const messages = [];
+  let cursor = null;
+  for (let i = 0; i < V2_HISTORY_MAX_PAGES; i++) {
+    const q = new URLSearchParams(cursor ? { cursor, limit: String(V2_HISTORY_PAGE) } : { order: 'asc', limit: String(V2_HISTORY_PAGE) });
+    const res = await ocFetch(`http://127.0.0.1:${port}/api/session/${encodeURIComponent(sessionId)}/message?${q}`);
+    if (!res.ok) {
+      if (i === 0) return { ok: false, error: `status ${res.status}`, messages };
+      // 다음 페이지만 실패했으면 읽은 만큼이라도 보여 준다
+      debugLog('WARN', `fetchV2History: page ${i + 1} failed (status ${res.status}) - sessionId=${sessionId}, read=${messages.length}`);
+      break;
+    }
+    const body = await res.json();
+    const page = Array.isArray(body?.data) ? body.data : [];
+    messages.push(...page);
+    cursor = body?.cursor?.next || null;
+    if (!cursor || page.length === 0) break;
+  }
+  return { ok: true, messages };
+}
+
+/**
+ * 세션 실행 상태 맵(1.x /session/status 모양: {sid: {type:'busy'|'retry'|…}}, idle 세션은 없음).
+ * v1은 폴더 instance별이라 프롬프트를 보낸 폴더(directory)로 묻는다. v2는 GET /api/session/active(전역, running → busy).
+ */
+async function fetchStatusMap(port, directory, timeoutMs = 5000) {
+  try {
+    const v2 = (await apiFor(port)) === 'v2';
+    const res = v2
+      ? await ocFetch(`http://127.0.0.1:${port}/api/session/active`, { signal: AbortSignal.timeout(timeoutMs) })
+      : await ocFetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return { reachable: false };
+    const body = await res.json();
+    return { reachable: true, map: v2 ? v2ActiveToStatusMap(body?.data) : (body || {}) };
+  } catch {
+    return { reachable: false };
+  }
+}
+
 /**
  * 세션이 서버에 실제로 아직 존재하는지 가볍게 확인한다.
  * GET /session/{id}는 존재 시 200, 없으면 404를 반환한다(실측 확인).
  */
 async function checkSessionExists(port, sessionId) {
   try {
-    const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}`);
+    const v2 = (await apiFor(port)) === 'v2';
+    const res = await ocFetch(`http://127.0.0.1:${port}${v2 ? '/api' : ''}/session/${encodeURIComponent(sessionId)}`);
     return res.ok;
   } catch {
     return false;
@@ -2118,13 +2250,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     }
 
     async function fetchSessionStatus() {
-      try {
-        const res = await ocFetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(5000) });
-        if (!res.ok) return { reachable: false };
-        return { reachable: true, status: (await res.json())?.[sessionId] || null };
-      } catch {
-        return { reachable: false };
-      }
+      const r = await fetchStatusMap(port, directory, 5000);
+      return r.reachable ? { reachable: true, status: r.map?.[sessionId] || null } : { reachable: false };
     }
 
     // 이벤트가 STREAM_QUIET_CHECK_MS 이상 없으면 서버에 세션 상태를 묻는다(응답 제한 시간 설정과 무관하게 항상).
@@ -2237,6 +2364,8 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
       return false;
     }
 
+    let v2 = false;
+    let v2Adapter = null;
     async function connect(lastEventId = '', isReconnect = false) {
       if (completed || controller.signal.aborted) return;
       // catch(네트워크 오류) 경로에서도 마지막으로 받은 이벤트 id로 재연결해야 하므로 try 밖에 둔다.
@@ -2246,8 +2375,12 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
         const headers = { 'Accept': 'text/event-stream', 'Cache-Control': 'no-cache' };
         if (lastEventId) headers['Last-Event-ID'] = lastEventId;
 
+        // v2: GET /api/event. 세션 필터가 없고(모든 세션의 이벤트) Last-Event-ID로 재전송하지 않는다(2.3.2 실측).
+        // 이벤트는 v2Adapter가 1.x 모양으로 바꿔 아래 처리를 그대로 탄다. 재연결 후 놓친 완료는 checkIdleAfterReconnect가 본다.
+        v2 = (await apiFor(port)) === 'v2';
+        if (v2 && !v2Adapter) v2Adapter = createV2EventAdapter();
         const response = await ocFetch(
-          `http://127.0.0.1:${port}/global/event`,
+          `http://127.0.0.1:${port}${v2 ? '/api/event' : '/global/event'}`,
           { headers, signal: controller.signal }
         );
 
@@ -2294,12 +2427,12 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
 
             try {
               const raw = JSON.parse(sseData);
-              // /global/event 는 { directory, payload } 래퍼
-              const evt = raw.payload || raw;
+              // 1.x /global/event 는 { directory, payload } 래퍼. v2는 { id, type, location, data }를 1.x 이벤트 목록으로 바꾼다.
+              const evts = v2 ? v2Adapter.translate(raw) : [raw.payload || raw];
               // id 가 SSE id: 필드 없이 JSON 안에 있을 경우 fallback
               if (!currentId && raw.id) currentId = raw.id;
-              // 서버 cwd 를 storage 에 캐시하고 sidepanel 에 즉시 알림 (기본 폴더 표시용)
-              if (raw.directory) {
+              // 서버 cwd 를 storage 에 캐시하고 sidepanel 에 즉시 알림 (기본 폴더 표시용). v2 이벤트의 location은 세션 폴더라 쓰지 않는다.
+              if (!v2 && raw.directory) {
                 chrome.storage.local.get('serverCwd').then(({ serverCwd }) => {
                   if (serverCwd !== raw.directory) {
                     chrome.storage.local.set({ serverCwd: raw.directory }).catch(() => {});
@@ -2308,7 +2441,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                 }).catch(() => {});
               }
 
-
+              for (const evt of evts) {
               if (evt.type === 'server.connected') {
                 debugLog('INFO', `SSE connected - sessionId=${sessionId}${isReconnect ? ' (reconnect)' : ''}`);
                 resolveOnce();
@@ -2437,6 +2570,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
                   return;
                 }
               }
+              } // for (const evt of evts)
             } catch (e) {
               console.error('SSE 파싱 오류:', e, sseData);
               debugLog('ERROR', `SSE parse error - sessionId=${sessionId}, error=${e.message}`);
@@ -2465,11 +2599,10 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     // 사용자 응답 대기 중인 요청이 있으면 서버는 busy이므로 건드리지 않는다.
     async function checkIdleAfterReconnect() {
       try {
-        const res = await ocFetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(3000) });
+        const r = await fetchStatusMap(port, directory, 3000);
         // 어시스턴트 메시지를 아직 못 봤다면 프롬프트가 처리되기 전일 수 있다 → idle을 완료로 보지 않는다(타임아웃 폴백에 맡김).
-        if (!res.ok || completed || !assistantMessageId) return;
-        const statusMap = await res.json();
-        const st = statusMap?.[sessionId];
+        if (!r.reachable || completed || !assistantMessageId) return;
+        const st = r.map?.[sessionId];
         if (!st || st.type === 'idle') await completeAsIdle('reconnect-check');
       } catch (e) {
         debugLog('WARN', `Idle check after reconnect failed - sessionId=${sessionId}, error=${e.message}`);
