@@ -2,6 +2,7 @@ const { spawn, execSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 let opencodeProcess = null;
 let currentPort = 4096;
@@ -59,8 +60,12 @@ async function checkOpenCodeServer(port) {
   try {
     const http = require('http');
     return new Promise((resolve) => {
+      // 401도 "살아 있음"이다: 확장이 비밀번호를 걸고 띄운 서버(OPENCODE_SERVER_PASSWORD)는 인증 없는 요청에 401을 준다.
+      // 200만 보면 포트가 비었다고 보고 같은 포트에 서버를 또 띄우거나 종료 확인을 잘못한다.
+      // (opencode 2.x는 이 경로에 웹 UI HTML을 200으로 준다.)
       const req = http.get(`http://127.0.0.1:${port}/global/health`, (res) => {
-        resolve(res.statusCode === 200);
+        res.resume();
+        resolve(res.statusCode === 200 || res.statusCode === 401);
       });
       req.on('error', () => resolve(false));
       req.setTimeout(2000, () => { req.destroy(); resolve(false); });
@@ -400,13 +405,53 @@ function buildProxyEnv(baseEnv, proxy) {
 }
 
 // ============================================
+// 서버 비밀번호 (OPENCODE_SERVER_PASSWORD)
+// ============================================
+//
+// 확장이 start/restart에 auth:true를 보내면 실행마다 무작위 비밀번호를 만들어 서버 환경변수로 넘긴다.
+// opencode는 1.x·2.x 모두 이 변수로 모든 경로에 Basic Auth(사용자 'opencode')를 건다(1.19.6·2.3.2 실측).
+// auth를 보내지 않는 예전 확장은 인증 헤더를 붙이지 못하므로 비밀번호를 걸지 않는다(호환).
+// 비밀번호는 server.json에 남겨 server-info가 확장 서버(managed)일 때만 돌려준다 — 브라우저를 다시 켜
+// 확장의 storage.session이 비었을 때 다시 연결하기 위해서다.
+
+const SERVER_PASSWORD_ENV = 'OPENCODE_SERVER_PASSWORD';
+
+function generateServerPassword() {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
+/** spawn env에 비밀번호를 넣는다. Windows 이름은 대소문자를 구분하지 않으므로 같은 이름의 기존 항목을 지운다.
+ *  WSL은 wsl.exe가 WSLENV에 적힌 이름만 넘기므로 이름을 추가한다(값은 인자로 넘기지 않아 로그에 남지 않는다). */
+function withServerPassword(env, password) {
+  if (!password) return env;
+  const out = { ...env };
+  for (const k of Object.keys(out)) {
+    if (k.toUpperCase() === SERVER_PASSWORD_ENV) delete out[k];
+  }
+  out[SERVER_PASSWORD_ENV] = password;
+  const entries = (out.WSLENV || '').split(':').filter(Boolean)
+    .filter(e => e.split('/')[0].toUpperCase() !== SERVER_PASSWORD_ENV);
+  out.WSLENV = entries.concat(SERVER_PASSWORD_ENV).join(':');
+  return out;
+}
+
+/** 로그에 남기기 전에 비밀번호를 가린다. env로 준 비밀번호는 opencode가 출력하지 않지만(실측), 2.x는 비밀번호를
+ *  스스로 만들 때 `server password …`를 출력하므로 그 줄도 가린다. */
+function maskServerSecret(text, password) {
+  let out = String(text);
+  if (password) out = out.split(password).join('***');
+  return out.replace(/(server password\s*[:=]?\s*)\S+/gi, '$1***');
+}
+
+// ============================================
 // OpenCode 서버 기동
 // ============================================
 
-async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'auto', proxy = null) {
+/** 결과: { port, password } — password는 auth를 요청했을 때만 있다. */
+async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'auto', proxy = null, auth = false) {
   if (opencodeProcess) {
     fileLog('INFO', `startOpenCodeServer: Already running on port ${currentPort}`);
-    return currentPort;
+    return { port: currentPort, password: null };
   }
 
   fileLog('INFO', 'startOpenCodeServer: Starting...');
@@ -428,10 +473,11 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
 
     isWSL = found.isWSL;
 
-    const spawnEnv = buildProxyEnv(process.env, proxy);
+    const password = auth ? generateServerPassword() : null;
+    const spawnEnv = withServerPassword(buildProxyEnv(process.env, proxy), password);
     const p = normalizeProxy(proxy);
     // 값(계정 포함 가능)은 로그에 남기지 않고 어떤 항목이 설정됐는지만 기록한다.
-    fileLog('INFO', `startOpenCodeServer: proxy http=${!!p.http} https=${!!p.https} noProxy=${!!p.noProxy}`);
+    fileLog('INFO', `startOpenCodeServer: proxy http=${!!p.http} https=${!!p.https} noProxy=${!!p.noProxy}, auth=${!!password}`);
 
     if (isWSL) {
       const args = wslSpawnArgs(found, port);
@@ -459,11 +505,11 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
     const keepTail = (data) => { outputTail = (outputTail + data.toString()).slice(-2000); };
     opencodeProcess.stdout.on('data', (data) => {
       keepTail(data);
-      fileLog('INFO', `[opencode] ${data.toString().trimEnd()}`);
+      fileLog('INFO', `[opencode] ${maskServerSecret(data.toString().trimEnd(), password)}`);
     });
     opencodeProcess.stderr.on('data', (data) => {
       keepTail(data);
-      fileLog('INFO', `[opencode] ${data.toString().trimEnd()}`);
+      fileLog('INFO', `[opencode] ${maskServerSecret(data.toString().trimEnd(), password)}`);
     });
     opencodeProcess.on('exit', (code, signal) => {
       fileLog(code === 0 ? 'INFO' : 'ERROR', `OpenCode process exited: code=${code}, signal=${signal}`);
@@ -486,12 +532,12 @@ async function startOpenCodeServer(preferredPort = 4096, preferredRuntime = 'aut
         await new Promise(resolve => setTimeout(resolve, 200));
         throw new Error(exited.error
           ? `opencode 실행 실패: ${exited.error}`
-          : earlyExitMessage(exited.code, exited.signal, outputTail));
+          : earlyExitMessage(exited.code, exited.signal, maskServerSecret(outputTail, password)));
       }
       if (available) {
         fileLog('INFO', `startOpenCodeServer: Server ready on port ${port} after ${attempts + 1}s`);
-        recordServerListener(port, spawnEnv);
-        return port;
+        recordServerListener(port, spawnEnv, password);
+        return { port, password };
       }
       attempts++;
       if (attempts % 5 === 0) fileLog('DEBUG', `startOpenCodeServer: Waiting... ${attempts}/${maxAttempts}s`);
@@ -685,14 +731,15 @@ function getListener(port) {
  * Windows는 다른 프로세스의 환경변수를 읽을 수 없어 이 기록이 유일한 조회 수단이다.
  * 실패해도 서버 기동은 막지 않는다.
  */
-function recordServerListener(port, spawnEnv = null) {
+function recordServerListener(port, spawnEnv = null, password = null) {
   try {
     const l = getListener(port);
     if (!l) return;
     fs.mkdirSync(path.dirname(SERVER_RECORD_FILE), { recursive: true });
     const record = { port, side: l.side, pid: l.pid, startedAt: Date.now() };
     if (spawnEnv) record.proxyEnv = effectiveProxyEnv(spawnEnv);
-    fs.writeFileSync(SERVER_RECORD_FILE, JSON.stringify(record));
+    if (password) record.password = password;
+    fs.writeFileSync(SERVER_RECORD_FILE, JSON.stringify(record), { mode: 0o600 });
     fileLog('INFO', `recordServerListener: port=${port} side=${l.side} pid=${l.pid}`);
   } catch (error) {
     fileLog('DEBUG', `recordServerListener: ${error.message}`);
@@ -790,11 +837,13 @@ function getServerInfo(port) {
     managed,
     proxyEnv: applied.env,
     proxyEnvSource: applied.source,
-    proxyEnvReason: applied.reason
+    proxyEnvReason: applied.reason,
+    // 확장이 띄운 서버일 때만 비밀번호를 돌려준다(다른 프로그램이 같은 포트를 쓰면 기록과 pid가 다르다).
+    ...(managed && record?.password ? { password: record.password } : {})
   };
 }
 
-async function restartOpenCodeServer(port = currentPort, isWSLHint = false, preferredRuntime = 'auto', proxy = null) {
+async function restartOpenCodeServer(port = currentPort, isWSLHint = false, preferredRuntime = 'auto', proxy = null, auth = false) {
   fileLog('INFO', `restartOpenCodeServer: port=${port}, isWSLHint=${isWSLHint}, preferredRuntime=${preferredRuntime}`);
   const { stopped, attempts } = await stopOpenCodeServer(port, isWSLHint);
   if (!stopped) {
@@ -804,8 +853,8 @@ async function restartOpenCodeServer(port = currentPort, isWSLHint = false, pref
   }
 
   opencodeProcess = null;
-  const newPort = await startOpenCodeServer(port, preferredRuntime, proxy);
-  return { port: newPort, attempts };
+  const started = await startOpenCodeServer(port, preferredRuntime, proxy, auth);
+  return { port: started.port, password: started.password, attempts };
 }
 
 // 드라이브 문자가 네트워크 드라이브면 매핑 대상 UNC 경로를 반환, 로컬 고정 디스크면 null
@@ -960,14 +1009,15 @@ async function handleMessage(message) {
   const proxy = message.proxy || null;
   const targetPort = message.port || currentPort;
   const isWSLHint = message.isWSL === true;
+  const auth = message.auth === true;
   fileLog('INFO', `handleMessage: action=${action}`);
 
   switch (action) {
     case 'start':
       try {
-        const port = await startOpenCodeServer(preferredPort || 4096, preferredRuntime, proxy);
-        fileLog('INFO', `handleMessage: start success, port=${port}, isWSL=${isWSL}`);
-        return { status: 'success', port, isWSL };
+        const { port, password } = await startOpenCodeServer(preferredPort || 4096, preferredRuntime, proxy, auth);
+        fileLog('INFO', `handleMessage: start success, port=${port}, isWSL=${isWSL}, auth=${!!password}`);
+        return { status: 'success', port, isWSL, ...(password ? { password } : {}) };
       } catch (error) {
         fileLog('ERROR', `handleMessage: start failed - ${error.message}`);
         return { status: 'error', error: error.message, diagnostic: error.diagnostic || null };
@@ -982,9 +1032,9 @@ async function handleMessage(message) {
 
     case 'restart':
       try {
-        const result = await restartOpenCodeServer(targetPort, isWSLHint, preferredRuntime, proxy);
-        fileLog('INFO', `handleMessage: restart success, port=${result.port}, isWSL=${isWSL}`);
-        return { status: 'success', port: result.port, isWSL, attempts: result.attempts };
+        const result = await restartOpenCodeServer(targetPort, isWSLHint, preferredRuntime, proxy, auth);
+        fileLog('INFO', `handleMessage: restart success, port=${result.port}, isWSL=${isWSL}, auth=${!!result.password}`);
+        return { status: 'success', port: result.port, isWSL, attempts: result.attempts, ...(result.password ? { password: result.password } : {}) };
       } catch (error) {
         fileLog('ERROR', `handleMessage: restart failed - ${error.message}`);
         return {
@@ -1201,5 +1251,5 @@ if (require.main === module) {
   main();
 } else {
   // 검증용(require로 불러올 때는 main 루프를 돌리지 않는다)
-  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory, mergeWindowsPath, parseRegistryPathOutput, windowsKnownOpenCodeDirs, withWindowsPath, windowsSpawnCommand, interpretWslResult, wslStdout, buildWslPath, wslSpawnArgs, earlyExitMessage };
+  module.exports = { normalizeProxy, buildProxyEnv, parseSsListener, isManagedListener, parseProxyEnviron, maskProxyValue, mapMntToWslPath, resolveWorkingDirectory, mergeWindowsPath, parseRegistryPathOutput, windowsKnownOpenCodeDirs, withWindowsPath, windowsSpawnCommand, interpretWslResult, wslStdout, buildWslPath, wslSpawnArgs, earlyExitMessage, withServerPassword, maskServerSecret, generateServerPassword, getServerInfo };
 }

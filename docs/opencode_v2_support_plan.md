@@ -14,7 +14,7 @@ opencode 2.x(2.3.2 실측)는 서버 API를 통째로 바꿨다. 경로는 `/api
 
 1. **사이드패널은 바꾸지 않는다(최대한).** 사이드패널은 이미 background가 정규화한 `kind` 객체(`chunk`, `tool`, `reasoning-*`, `permission`, `question`, `subagent`, `retry`, `turn-start`, `heartbeat`)와 평탄화한 목록(세션·기록·모델·명령·에이전트·MCP)만 받는다. v2 차이는 background에서 흡수한다.
 2. **API 버전은 포트별로 판별한다.** 연결할 때 `checkServerHealth`가 `apiVersion: 'v1'|'v2'`를 정하고 `serverState.apiVersion`에 둔다. 기존 `isUnsupportedApiServer`를 판별 함수로 바꾼다(`/api/info`의 `version`).
-3. **어댑터 계층.** 인라인 `fetch` 약 31곳을 `lib/opencode-api.mjs`의 버전별 어댑터 메서드로 모은다. 1.x 어댑터는 지금 코드를 그대로 옮긴 것이다(동작 변화 없음).
+3. **어댑터 계층.** 서버 요청은 `lib/opencode-api.mjs`를 거친다. 1단계에서는 주소·인증 계층(`ocFetch`)으로 31곳을 모두 모았고, 엔드포인트별 v1/v2 메서드는 그 기능을 v2로 옮기는 단계(2~4단계)에서 기능별로 만든다. v2 구현 없이 v1만으로 인터페이스를 먼저 정하면 실측과 맞지 않는 모양이 될 수 있기 때문이다. 1.x 동작은 그대로 둔다.
 
 ## v1 → v2 대응표 (OpenAPI `packages/protocol/openapi.json@v2.3.2`)
 
@@ -146,7 +146,16 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 
 **확인하지 못한 것**: 제공자 재시도(`session.retry.scheduled`, 재현 어려움 — 스키마 `{attempt, at, error}`로만 구현), Windows native 2.x 서버의 경로 형식, MCP 항목 형식, `/api/location/reload`가 전역 설정을 다시 읽는지, 하위 에이전트 안에서 뜬 권한 요청의 `sessionID`.
 
-### 1단계: 기반 — 어댑터·판별·인증
+### 1단계: 기반 — 어댑터·판별·인증 — 완료 (2026-11-20)
+
+구현한 것:
+- `lib/opencode-api.mjs`: `createServerFetch`(127.0.0.1 포트별 비밀번호로 Basic 헤더), `createPasswordStore`(`storage.session.serverPasswords`), `probeV2`(`GET /api/info`), `withAuth`·`basicAuthHeader`·`portFromUrl`.
+- `background.js`: 서버 요청 31곳을 모두 `ocFetch`로 바꿈. `lib/sw-resilience.mjs`의 복구 폴링도 `fetchFn: ocFetch`. `checkServerHealth`가 `apiVersion`('v1'|'v2')을 돌려주고 `serverState.apiVersion`·`init-server` 응답에 담는다. `V2_ENABLED = false`(5단계에서 켠다) — 꺼져 있으면 지금처럼 2.x를 거부한다. 401이면 `recoverServerPassword`(host `server-info`)로 비밀번호를 받아 한 번 더 묻고, 그래도 401이면 건너뛴다.
+- `native-host/host.js`: `start`/`restart`의 `auth: true`일 때만 비밀번호를 만들어 env·`WSLENV`로 넘기고 응답·`server.json`·`server-info`(managed만)로 돌려준다. 출력 로그 마스킹. `checkOpenCodeServer`는 200·401을 모두 살아 있음으로 본다.
+- 테스트: `test/opencode-api.test.mjs`, `test/server-auth.test.mjs`(mock `password` 옵션 포함). 전체 119개 통과. 실제 opencode 1.19.6에 비밀번호를 걸고 실제 `background.js`(하네스)로 `init-server`·세션 생성·에이전트·세션 목록이 인증으로 동작하는 것을 확인했다.
+- 아래 계획 중 "인라인 fetch를 어댑터 메서드로"는 범위를 조정했다(설계 원칙 3). host가 바뀌었으므로 다음 릴리스에서 `MIN_HOST_VERSION`이 자동으로 올라간다.
+
+원래 계획:
 - **`lib/opencode-api.mjs`(신규)**: `createApi({port, apiVersion, password})` → `health`, `createSession`, `getSession`, `listSessions`, `prompt`, `interrupt`, `status`, `messages`, `events`, `replyPermission`, `replyQuestion`, `rejectQuestion`, `pending`, `models`, `setModel`, `agents`, `setAgent`, `commands`, `runCommand`, `mcp`, `toggleMcp`, `reload`. v1 구현은 `background.js`의 현재 요청을 그대로 옮긴다(`buildDirectoryHeader`·`sessionDirectoryHeaders` 재사용). v2는 `/api` + `Authorization: Basic base64("opencode:"+pw)`.
 - **판별**: `checkServerHealth`가 v1 health 실패 시 `/api/info`로 `apiVersion:'v2'`를 돌려준다(기존 `isUnsupportedApiServer` 대체). `serverState.apiVersion` 저장. 거부 로직(`unsupportedServer`, `UNSUPPORTED_RETRY_COOLDOWN_MS`, `opencode-unsupported`, 사이드패널 `showUnsupportedOpencodeGuide`)은 v2 지원이 완성되는 단계에서 제거한다. 그 전까지는 플래그(`V2_ENABLED`)로 막아 둔다.
 - **401 처리**: 지금 `checkServerHealth`는 401을 `authRequired`로 보고 그 서버를 건너뛴다. 비밀번호를 쓰면 확장이 띄운 1.x 서버도 401을 주므로, 알고 있는 비밀번호(`storage.session` 또는 `server-info`)로 Basic을 붙여 한 번 더 묻는다. 그래도 401이면 지금처럼 다른 프로그램의 서버로 보고 건너뛴다. `scanHealthyPorts`·`waitForServer`·`periodicServerCheck`가 모두 같은 경로를 탄다.

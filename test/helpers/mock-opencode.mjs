@@ -3,7 +3,9 @@
 // 테스트는 emit()으로 SSE 이벤트를 밀어 넣고, onPrompt로 prompt_async 응답 방식을 정한다.
 import http from 'node:http';
 
-export async function startMockOpencode() {
+// password를 주면 opencode 1.19.6에 OPENCODE_SERVER_PASSWORD를 준 것처럼 모든 경로에 Basic Auth(사용자 'opencode')를
+// 요구한다. 인증이 없거나 틀리면 빈 본문의 401(실측)을 주고 state.unauthorized에 경로를 남긴다.
+export async function startMockOpencode({ password = null } = {}) {
   const clients = new Set();
   let eventSeq = 0;
   const state = {
@@ -25,6 +27,7 @@ export async function startMockOpencode() {
     catalogRequests: [], // /command·/agent 요청의 [path, x-opencode-directory]
     sessionList: [],     // GET /session 응답
     sessionListQueries: [], // GET /session 요청의 query string
+    unauthorized: [],    // password가 있을 때 인증 없이(또는 틀리게) 들어온 요청 경로
     // (req, res, sessionId) => void. 기본은 즉시 204
     onPrompt: (req, res) => { res.writeHead(204); res.end(); }
   };
@@ -38,6 +41,12 @@ export async function startMockOpencode() {
     const url = new URL(req.url, 'http://127.0.0.1');
     const p = url.pathname;
     let m;
+    if (password && req.headers.authorization !== `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`) {
+      state.unauthorized.push(p);
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="Secure Area"' });
+      res.end();
+      return;
+    }
     if (p === '/global/health') return json(res, 200, { healthy: true, version: 'mock' });
     if (p === '/config') return json(res, 200, { model: 'mock/model' });
     if (p === '/global/event') {

@@ -14,11 +14,17 @@ import { buildFolderList, pushRecent, folderKey, mergeFavorites, parseFavoritesF
 import { createKeepAlive, createPendingStore, recoverPendingPrompt, sessionStatusInit } from './lib/sw-resilience.mjs';
 import { createSubagentTracker } from './lib/subagent-progress.mjs';
 import { QUICK_ACTION_LIMITS, normalizeQuickActions, upsertQuickAction, removeQuickAction, setQuickActionEnabled, enableAllBuiltins, moveQuickAction, isQuickActionVisible, hostnameOf, exportQuickActions, parseQuickActionsFile, mergeQuickActions } from './lib/quick-actions.mjs';
+import { createPasswordStore, createServerFetch, probeV2 } from './lib/opencode-api.mjs';
 
 // 응답 대기 중 SW가 30초 idle로 종료되면 SSE 스트림·타임아웃이 함께 사라져 UI가 멈춘다.
 // → 대기 중에는 주기적으로 확장 API를 호출해 종료를 막고, 그래도 죽으면 재시작 시 복구한다.
 const swKeepAlive = createKeepAlive({ ping: () => chrome.runtime.getPlatformInfo() });
 const pendingPrompts = createPendingStore(chrome.storage.session);
+
+// 확장이 띄운 서버의 비밀번호(포트별). host가 start/restart 응답과 server-info로 알려 준다.
+// 서버 요청은 모두 ocFetch를 거쳐, 비밀번호를 아는 포트에는 Basic Auth 헤더가 붙는다(lib/opencode-api.mjs).
+const serverPasswords = createPasswordStore(chrome.storage.session);
+const ocFetch = createServerFetch(serverPasswords);
 
 // ============================================
 // 상수 정의
@@ -78,7 +84,8 @@ let serverState = {
   available: false,
   version: null,
   checking: false,
-  runtime: null // 'wsl' | 'windows' | null(미확인) - 연결된 서버가 실제로 실행 중인 환경
+  runtime: null, // 'wsl' | 'windows' | null(미확인) - 연결된 서버가 실제로 실행 중인 환경
+  apiVersion: null // 'v1' | 'v2' | null(미연결) - 연결된 서버의 API 버전(checkServerHealth가 판별)
 };
 
 let nativeHostMissingFlag = false;
@@ -155,6 +162,7 @@ async function recoverInterruptedPrompts() {
     recoverPendingPrompt({
       sessionId, port, startedAt, directory,
       maxAgeMs: timeoutMs,
+      fetchFn: ocFetch,
       fetchContent: fetchFallbackContent,
       onBusy: () => {
         chrome.runtime.sendMessage({ action: 'message-part', sessionId, part: { kind: 'heartbeat', state: 'busy', at: Date.now() } }).catch(() => {});
@@ -234,14 +242,17 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
 // ============================================
 
 /**
- * OpenCode 서버 상태 확인
+ * OpenCode 서버 상태 확인.
+ * 결과: { available, version, apiVersion?: 'v1'|'v2', unsupportedApi?: 'v2', authRequired?: true }
+ * 비밀번호를 모르는 포트가 401을 주면 host의 server-info로 비밀번호를 받아 한 번 더 묻는다(recover).
+ * 그래도 401이면 다른 프로그램이 비밀번호를 걸고 띄운 서버로 보고 쓰지 않는다.
  */
-async function checkServerHealth(port) {
+async function checkServerHealth(port, { recover = true } = {}) {
   console.log(`[checkServerHealth] 포트 ${port} 상태 체크 중...`);
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 1500);
-    const response = await fetch(`http://127.0.0.1:${port}/global/health`, {
+    const response = await ocFetch(`http://127.0.0.1:${port}/global/health`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal
@@ -253,23 +264,67 @@ async function checkServerHealth(port) {
       // 같은 포트를 쓰는 다른 프로그램을 opencode로 오인하지 않도록 응답 형태까지 확인한다.
       if (data?.healthy === true || typeof data?.version === 'string') {
         console.log(`[checkServerHealth] 포트 ${port} 성공 - version=${data.version}`);
-        return { available: true, version: data.version };
+        return { available: true, version: data.version, apiVersion: 'v1' };
       }
       // opencode 2.x는 API를 /api/ 아래로 옮겼고, 예전 경로에는 웹 UI HTML을 200으로 준다.
-      if (await isUnsupportedApiServer(port)) {
-        logOnce(`v2:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server (v2 API) - not supported yet`);
-        return { available: false, version: null, unsupportedApi: 'v2' };
+      const v2 = await probeV2(ocFetch, port);
+      if (v2.v2) {
+        if (!V2_ENABLED) {
+          logOnce(`v2:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server (v2 API) - not supported yet`);
+          return { available: false, version: null, unsupportedApi: 'v2' };
+        }
+        if (v2.authorized) return { available: true, version: v2.version, apiVersion: 'v2' };
+        if (recover && await recoverServerPassword(port)) return checkServerHealth(port, { recover: false });
+        logOnce(`auth:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server with an unknown password - skipped`);
+        return { available: false, version: null, authRequired: true, apiVersion: 'v2' };
       }
       logOnce(`not-opencode:${port}`, 'WARN', `checkServerHealth: port ${port} answered 200 but is not an opencode server`);
     } else if (response.status === 401) {
-      // OPENCODE_SERVER_PASSWORD가 걸린 서버(터미널/TUI에서 직접 실행). 확장은 인증을 지원하지 않으므로 사용하지 않는다.
-      debugLog('WARN', `checkServerHealth: port ${port} requires authentication (OPENCODE_SERVER_PASSWORD) - skipped`);
+      // 비밀번호가 걸린 1.x 서버. 확장이 띄운 서버면 host가 비밀번호를 안다(브라우저를 다시 켜 storage.session이 비었을 때).
+      if (recover && await recoverServerPassword(port)) return checkServerHealth(port, { recover: false });
+      // 터미널/TUI에서 OPENCODE_SERVER_PASSWORD를 걸고 직접 띄운 서버 — 비밀번호를 모르므로 쓰지 않는다.
+      logOnce(`auth:${port}`, 'WARN', `checkServerHealth: port ${port} requires authentication (OPENCODE_SERVER_PASSWORD) with an unknown password - skipped`);
       return { available: false, version: null, authRequired: true };
     }
   } catch (error) {
     console.log(`[checkServerHealth] 포트 ${port} 실패:`, error.message);
   }
   return { available: false, version: null };
+}
+
+// 같은 포트에 host를 계속 부르지 않도록 실패한 복구는 잠시 기억한다(범위 검사는 포트 10개를 매번 훑는다).
+const PASSWORD_RECOVER_RETRY_MS = 30000;
+const _passwordRecoverFailedAt = new Map();
+
+/**
+ * 확장이 띄운 서버의 비밀번호를 host의 server-info로 받아 저장한다. 새로 알게 됐으면 true.
+ * host는 server.json의 리스너 pid가 지금 리스너와 같을 때(managed)만 비밀번호를 돌려준다.
+ */
+async function recoverServerPassword(port) {
+  const failedAt = _passwordRecoverFailedAt.get(port);
+  if (failedAt && Date.now() - failedAt < PASSWORD_RECOVER_RETRY_MS) return false;
+  try {
+    const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port });
+    const password = info?.status === 'success' && info.managed === true && typeof info.password === 'string' ? info.password : null;
+    if (password && password !== serverPasswords.get(port)) {
+      serverPasswords.set(port, password);
+      _passwordRecoverFailedAt.delete(port);
+      debugLog('INFO', `recoverServerPassword: got the password of the extension server on port ${port}`);
+      return true;
+    }
+  } catch (error) {
+    console.log(`[recoverServerPassword] ${error.message}`);
+  }
+  _passwordRecoverFailedAt.set(port, Date.now());
+  return false;
+}
+
+/** host의 start/restart/server-info 응답에 비밀번호가 있으면 저장한다. */
+function rememberServerPassword(port, response) {
+  if (port && typeof response?.password === 'string' && response.password) {
+    serverPasswords.set(port, response.password);
+    _passwordRecoverFailedAt.delete(port);
+  }
 }
 
 // ============================================
@@ -279,7 +334,8 @@ async function checkServerHealth(port) {
 // opencode 2.x는 API를 /api/ 아래로 옮기고 인증(실행마다 무작위 비밀번호)을 요구한다. 예전 경로(/global/health 등)에는
 // 웹 UI HTML을 200으로 주므로, 확장은 서버가 없다고 보고 새 서버를 계속 띄웠다(2.3.2 실측: 4096, 4097 …).
 // 감지하면 서버를 더 띄우지 않고 사이드패널에 1.x로 내리라는 안내를 띄운다(init-server의 reason).
-// 나중에 1.x·2.x를 모두 지원할 때 이 감지가 API 버전 판별의 출발점이 된다.
+// V2_ENABLED는 v2 지원이 완성될 때(docs/opencode_v2_support_plan.md 5단계) 켠다. 그 전에는 판별만 하고 막아 둔다.
+const V2_ENABLED = false;
 const UNSUPPORTED_RETRY_COOLDOWN_MS = 30000;
 // 마지막으로 2.x를 감지한 결과 { api, port, at }. 사용자가 시작한 연결(init-server)이 아니면 쿨다운 동안 서버를 다시 띄우지 않는다.
 let unsupportedServer = null;
@@ -292,22 +348,6 @@ function logOnce(key, level, msg) {
   if (_loggedOnce.has(key)) return;
   _loggedOnce.add(key);
   debugLog(level, msg);
-}
-
-/** 예전 경로가 HTML을 준 포트가 opencode 2.x인지: /api/session이 401(인증 필요) 또는 {data:[…]}이면 2.x다. */
-async function isUnsupportedApiServer(port) {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`http://127.0.0.1:${port}/api/session`, { signal: controller.signal });
-    clearTimeout(timeoutId);
-    if (!(res.headers.get('content-type') || '').includes('application/json')) return false;
-    const data = await res.json().catch(() => null);
-    if (res.status === 401) return data?._tag === 'UnauthorizedError' || !!data?.message;
-    return res.ok && Array.isArray(data?.data);
-  } catch {
-    return false;
-  }
 }
 
 /** host로 포트의 서버를 종료한다(확장이 띄운 2.x 서버 정리용). host의 stop은 /global/health 200 기준이라 2.x에도 동작한다. */
@@ -356,6 +396,7 @@ async function checkManagedServer(port) {
   try {
     const info = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'server-info', port });
     if (info?.status === 'success' && typeof info.managed === 'boolean') {
+      if (info.managed) rememberServerPassword(port, info);
       return info.managed ? 'managed' : 'unmanaged';
     }
     debugLog('WARN', `checkManagedServer: cannot decide - port=${port}, error=${info?.error || '?'}`);
@@ -567,12 +608,14 @@ async function startServerWithNativeMessaging(preferredPort = DEFAULT_PORT) {
         action: 'start',
         preferredPort: preferredPort,
         preferredRuntime,
-        proxy
+        proxy,
+        auth: true // 이 확장은 Basic Auth를 붙인다 → host가 실행마다 비밀번호를 건다(예전 확장에는 걸지 않는다)
       });
 
       console.log(`[startServerWithNativeMessaging] Native Messaging 응답:`, response);
       if (response.status === 'success') {
-        debugLog('INFO', `NativeMsg: success, port=${response.port}, isWSL=${response.isWSL}`);
+        debugLog('INFO', `NativeMsg: success, port=${response.port}, isWSL=${response.isWSL}, auth=${!!response.password}`);
+        rememberServerPassword(response.port, response);
         console.log(`[startServerWithNativeMessaging] 성공 - port=${response.port}`);
         if (typeof response.isWSL === 'boolean') {
           chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
@@ -677,6 +720,7 @@ async function ensureOpenCodeServer({ userInitiated = false } = {}) {
       serverState.available = true;
       const health = await checkServerHealth(existingPort);
       serverState.version = health.version;
+      serverState.apiVersion = health.apiVersion || null;
       debugLog('INFO', `Server: existing server found on port ${existingPort}, version=${health.version}`);
       console.log(`[ensureOpenCodeServer] 기존 OpenCode 서버 발견: 포트 ${existingPort}, version=${health.version}`);
       port = existingPort;
@@ -701,6 +745,7 @@ async function ensureOpenCodeServer({ userInitiated = false } = {}) {
           serverState.available = true;
           const health = await checkServerHealth(port);
           serverState.version = health.version;
+          serverState.apiVersion = health.apiVersion || null;
           console.log(`[ensureOpenCodeServer] OpenCode 서버 시작 완료: 포트 ${port}, version=${health.version}`);
         }
       }
@@ -819,6 +864,7 @@ async function resyncAfterRestart(port) {
   serverState.port = port;
   serverState.available = health.available;
   serverState.version = health.version;
+  serverState.apiVersion = health.apiVersion || null;
   if (!health.available) return health;
 
   await syncModelFromServer(port).catch(() => {});
@@ -844,7 +890,7 @@ async function restartServerInstance() {
     const interrupted = abortAllEventSources('restart-instance');
     debugLog('INFO', `restart-instance: POST /global/dispose on port ${port}`);
 
-    const response = await fetch(`http://127.0.0.1:${port}/global/dispose`, { method: 'POST' });
+    const response = await ocFetch(`http://127.0.0.1:${port}/global/dispose`, { method: 'POST' });
     if (!response.ok) {
       debugLog('ERROR', `restart-instance: dispose returned ${response.status}`);
       return { success: false, error: `dispose 실패: ${response.status}`, interrupted: interrupted.length };
@@ -913,13 +959,14 @@ async function runHardRestart(requestedRuntime) {
     let response;
     try {
       response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, replaceOnly
-        ? { action: 'start', preferredPort: DEFAULT_PORT, preferredRuntime, proxy: await getProxy() }
+        ? { action: 'start', preferredPort: DEFAULT_PORT, preferredRuntime, proxy: await getProxy(), auth: true }
         : {
           action: 'restart',
           port: oldPort,
           isWSL: serverIsWSL === true,
           preferredRuntime,
-          proxy: await getProxy()
+          proxy: await getProxy(),
+          auth: true
         });
     } catch (error) {
       debugLog('ERROR', `restart-server: native messaging error - ${error.message}`);
@@ -936,6 +983,7 @@ async function runHardRestart(requestedRuntime) {
       chrome.storage.local.set({ serverIsWSL: response.isWSL }).catch(() => {});
       serverState.runtime = response.isWSL ? 'wsl' : 'windows';
     }
+    rememberServerPassword(response.port, response);
     // 재시작이 성공한 뒤에만 선택을 저장한다(실패하면 이전 설정이 유지된다).
     if (RUNTIME_PREFERENCES.includes(requestedRuntime)) {
       chrome.storage.local.set({ preferredRuntime: requestedRuntime }).catch(() => {});
@@ -1008,7 +1056,7 @@ async function getSessionDirectory(sessionId, port = null) {
   const p = port ?? sessions.get(sessionId)?.port ?? serverState.port;
   if (p) {
     try {
-      const res = await fetch(`http://127.0.0.1:${p}/session/${encodeURIComponent(sessionId)}`, { signal: AbortSignal.timeout(3000) });
+      const res = await ocFetch(`http://127.0.0.1:${p}/session/${encodeURIComponent(sessionId)}`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
         const directory = (await res.json())?.directory;
         if (directory) {
@@ -1201,7 +1249,7 @@ async function probeServerDirectory(port) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/global/event`, { signal: controller.signal });
+    const response = await ocFetch(`http://127.0.0.1:${port}/global/event`, { signal: controller.signal });
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let pending = '';
@@ -1326,7 +1374,7 @@ async function createSession(title = 'New Chat') {
       debugLog('INFO', `createSession: x-opencode-directory set - dir=${workingDir}, encoded=${dirHeader !== workingDir}`);
     }
 
-    const response = await fetch(`http://127.0.0.1:${port}/session`, {
+    const response = await ocFetch(`http://127.0.0.1:${port}/session`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ title })
@@ -1657,7 +1705,7 @@ async function postPrompt(port, sessionId, { headers, body }) {
   const promptTimeout = setTimeout(() => promptCtrl.abort(), PROMPT_SEND_TIMEOUT_MS);
   let promptResponse;
   try {
-    promptResponse = await fetch(
+    promptResponse = await ocFetch(
       `http://127.0.0.1:${port}/session/${sessionId}/prompt_async`,
       { method: 'POST', headers, signal: promptCtrl.signal, body }
     );
@@ -1750,7 +1798,7 @@ function stopPromptStream(sessionId) {
  */
 async function abortServerSession(port, sessionId) {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}/abort`, {
+    const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}/abort`, {
       method: 'POST',
       signal: AbortSignal.timeout(3000)
     });
@@ -1768,7 +1816,7 @@ async function abortServerSession(port, sessionId) {
  */
 async function fetchFallbackContent(port, sessionId) {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}/message`);
+    const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}/message`);
     if (!res.ok) return { content: '', partTypes: [], lastMessageId: null };
 
     const messages = await res.json();
@@ -1803,7 +1851,7 @@ async function getSessionHistory(sessionId) {
   if (!session) return { success: false, messages: [], error: 'unknown session' };
 
   try {
-    const res = await fetch(`http://127.0.0.1:${session.port}/session/${sessionId}/message`);
+    const res = await ocFetch(`http://127.0.0.1:${session.port}/session/${sessionId}/message`);
     if (!res.ok) return { success: false, messages: [], error: `status ${res.status}` };
 
     const raw = await res.json();
@@ -1835,7 +1883,7 @@ async function getSessionHistory(sessionId) {
  */
 async function checkSessionExists(port, sessionId) {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`);
+    const res = await ocFetch(`http://127.0.0.1:${port}/session/${sessionId}`);
     return res.ok;
   } catch {
     return false;
@@ -2071,7 +2119,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
 
     async function fetchSessionStatus() {
       try {
-        const res = await fetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(5000) });
+        const res = await ocFetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(5000) });
         if (!res.ok) return { reachable: false };
         return { reachable: true, status: (await res.json())?.[sessionId] || null };
       } catch {
@@ -2198,7 +2246,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
         const headers = { 'Accept': 'text/event-stream', 'Cache-Control': 'no-cache' };
         if (lastEventId) headers['Last-Event-ID'] = lastEventId;
 
-        const response = await fetch(
+        const response = await ocFetch(
           `http://127.0.0.1:${port}/global/event`,
           { headers, signal: controller.signal }
         );
@@ -2417,7 +2465,7 @@ function subscribeToEvents(sessionId, port, onChunk, onComplete, onPart, { direc
     // 사용자 응답 대기 중인 요청이 있으면 서버는 busy이므로 건드리지 않는다.
     async function checkIdleAfterReconnect() {
       try {
-        const res = await fetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(3000) });
+        const res = await ocFetch(`http://127.0.0.1:${port}/session/status`, { ...sessionStatusInit(directory), signal: AbortSignal.timeout(3000) });
         // 어시스턴트 메시지를 아직 못 봤다면 프롬프트가 처리되기 전일 수 있다 → idle을 완료로 보지 않는다(타임아웃 폴백에 맡김).
         if (!res.ok || completed || !assistantMessageId) return;
         const statusMap = await res.json();
@@ -2442,7 +2490,7 @@ async function getCurrentServerConfig() {
   if (!port) return null;
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/config`);
+    const response = await ocFetch(`http://127.0.0.1:${port}/config`);
     if (response.ok) {
       return await response.json();
     }
@@ -2460,7 +2508,7 @@ async function getAvailableModels() {
   if (!port) return [];
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/config/providers`);
+    const response = await ocFetch(`http://127.0.0.1:${port}/config/providers`);
     if (response.ok) {
       const data = await response.json();
       return data.providers || [];
@@ -2481,7 +2529,7 @@ async function setModel(providerId, modelName) {
   if (!port) return false;
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/config`, {
+    const response = await ocFetch(`http://127.0.0.1:${port}/config`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2501,7 +2549,7 @@ async function setModel(providerId, modelName) {
  */
 async function syncModelFromServer(port) {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/config`);
+    const response = await ocFetch(`http://127.0.0.1:${port}/config`);
     if (response.ok) {
       const config = await response.json();
       // config.model은 "providerID/modelID" 형식의 문자열. config.provider는 선택된
@@ -2556,7 +2604,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             : unsupportedServer ? 'opencode-unsupported'
             : undefined;
           nativeHostMissingFlag = false;
-          sendResponse({ success: !!port, available: !!port, port, version: serverState.version, reason });
+          sendResponse({ success: !!port, available: !!port, port, version: serverState.version, apiVersion: port ? serverState.apiVersion : null, reason });
           break;
 
         case 'create-session':
@@ -2576,7 +2624,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // 오래 안 쓴 폴더의 세션이 빠지므로 넉넉히 받는다(roots: 하위 에이전트 세션은 서버에서 뺀다).
           const filterKey = message.directory ? folderKey(message.directory) : null;
           const listUrl = `http://127.0.0.1:${port}/session` + (filterKey ? '?roots=true&limit=1000' : '');
-          const listRes = await fetch(listUrl, { headers, signal: AbortSignal.timeout(5000) });
+          const listRes = await ocFetch(listUrl, { headers, signal: AbortSignal.timeout(5000) });
           if (!listRes.ok) { sendResponse({ success: false, error: `세션 목록 조회 실패: ${listRes.status}` }); break; }
           const raw = await listRes.json();
           // 패널을 열 때마다 빈 세션이 만들어지므로, 메시지가 하나라도 있는 세션만 보여준다.
@@ -2588,7 +2636,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             .slice(0, 60);
           const hasMsg = await Promise.all(candidates.map(async x => {
             try {
-              const r = await fetch(`http://127.0.0.1:${port}/session/${x.id}/message?limit=1`, { signal: AbortSignal.timeout(3000) });
+              const r = await ocFetch(`http://127.0.0.1:${port}/session/${x.id}/message?limit=1`, { signal: AbortSignal.timeout(3000) });
               if (!r.ok) return false;
               const arr = await r.json();
               return Array.isArray(arr) && arr.length > 0;
@@ -2653,7 +2701,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (dirHeader) headers['x-opencode-directory'] = dirHeader;
             const list = async (path) => {
               try {
-                const r = await fetch(`http://127.0.0.1:${listPort}${path}`, { headers, signal: AbortSignal.timeout(3000) });
+                const r = await ocFetch(`http://127.0.0.1:${listPort}${path}`, { headers, signal: AbortSignal.timeout(3000) });
                 return r.ok ? await r.json() : [];
               } catch { return []; }
             };
@@ -2681,7 +2729,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const headers = { 'Content-Type': 'application/json' };
           const dirHeader = buildDirectoryHeader(await getSessionDirectory(message.sessionId, replyPort));
           if (dirHeader) headers['x-opencode-directory'] = dirHeader;
-          const post = (path, body) => fetch(`http://127.0.0.1:${replyPort}${path}`, {
+          const post = (path, body) => ocFetch(`http://127.0.0.1:${replyPort}${path}`, {
             method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(5000)
           });
 
@@ -3019,7 +3067,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (port) {
             try {
               // 기본 목록은 최근 100개라 오래된 폴더가 빠진다. 하위 에이전트 세션은 서버에서 빼고(roots) 넉넉히 받는다.
-              const r = await fetch(`http://127.0.0.1:${port}/session?roots=true&limit=1000`, { signal: AbortSignal.timeout(5000) });
+              const r = await ocFetch(`http://127.0.0.1:${port}/session?roots=true&limit=1000`, { signal: AbortSignal.timeout(5000) });
               if (r.ok) serverSessions = await r.json();
             } catch (e) {
               debugLog('WARN', `get-folder-list: session list failed - ${e.message}`);
@@ -3167,7 +3215,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const cmdPort = serverState.port;
           if (!cmdPort) { sendResponse({ commands: [] }); break; }
           // skill도 이 목록에 들어 있다. 작업 폴더의 command/skill이 보이도록 세션 폴더로 묻는다.
-          const cmdRes = await fetch(`http://127.0.0.1:${cmdPort}/command`, { headers: await sessionDirectoryHeaders(message.sessionId, cmdPort) });
+          const cmdRes = await ocFetch(`http://127.0.0.1:${cmdPort}/command`, { headers: await sessionDirectoryHeaders(message.sessionId, cmdPort) });
           if (!cmdRes.ok) { sendResponse({ commands: [] }); break; }
           const cmdData = await cmdRes.json();
           const commands = Array.isArray(cmdData) ? cmdData : (cmdData.commands || cmdData.items || []);
@@ -3178,7 +3226,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'get-agents': {
           const agentPort = serverState.port;
           if (!agentPort) { sendResponse({ agents: [] }); break; }
-          const agentRes = await fetch(`http://127.0.0.1:${agentPort}/agent`, { headers: await sessionDirectoryHeaders(message.sessionId, agentPort) });
+          const agentRes = await ocFetch(`http://127.0.0.1:${agentPort}/agent`, { headers: await sessionDirectoryHeaders(message.sessionId, agentPort) });
           if (!agentRes.ok) { sendResponse({ agents: [] }); break; }
           const agentData = await agentRes.json();
           const agents = Array.isArray(agentData)
@@ -3193,7 +3241,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const agentName = message.agentName;
           const agentSetPort = serverState.port;
           if (!agentSetPort) { sendResponse({ error: 'Server not available' }); break; }
-          const agentSetRes = await fetch(
+          const agentSetRes = await ocFetch(
             `http://127.0.0.1:${agentSetPort}/session/${agentSessionId}`,
             {
               method: 'PATCH',
@@ -3210,7 +3258,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const runPort = serverState.port || await ensureOpenCodeServer();
           if (!runPort) { sendResponse({ error: 'Server not available' }); break; }
           if (!sessions.has(message.sessionId)) { sendResponse({ error: 'Invalid session' }); break; }
-          const runRes = await fetch(
+          const runRes = await ocFetch(
             `http://127.0.0.1:${runPort}/session/${message.sessionId}/command`,
             {
               method: 'POST',
@@ -3228,7 +3276,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const mcpPort = serverState.port;
           if (!mcpPort) { sendResponse({ success: false, servers: {} }); break; }
           const mcpHeaders = await sessionDirectoryHeaders(message.sessionId, mcpPort);
-          const mcpRes = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, { headers: mcpHeaders });
+          const mcpRes = await ocFetch(`http://127.0.0.1:${mcpPort}/mcp`, { headers: mcpHeaders });
           if (!mcpRes.ok) { sendResponse({ success: false, servers: {} }); break; }
           sendResponse({ success: true, servers: await mcpRes.json() });
           break;
@@ -3239,11 +3287,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!togglePort) { sendResponse({ success: false }); break; }
           const toggleHeaders = await sessionDirectoryHeaders(message.sessionId, togglePort);
           const action = message.connect ? 'connect' : 'disconnect';
-          const toggleRes = await fetch(
+          const toggleRes = await ocFetch(
             `http://127.0.0.1:${togglePort}/mcp/${encodeURIComponent(message.name)}/${action}`,
             { method: 'POST', headers: toggleHeaders }
           );
-          const statusRes = await fetch(`http://127.0.0.1:${togglePort}/mcp`, { headers: toggleHeaders });
+          const statusRes = await ocFetch(`http://127.0.0.1:${togglePort}/mcp`, { headers: toggleHeaders });
           const servers = statusRes.ok ? await statusRes.json() : {};
           sendResponse({ success: toggleRes.ok, servers });
           break;
@@ -3365,7 +3413,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } catch {}
           try {
             // 응답 생성 중인 세션만 키로 들어오는 맵 (idle이면 {})
-            const res = await fetch(`http://127.0.0.1:${serverState.port}/session/status`, { signal: AbortSignal.timeout(3000) });
+            const res = await ocFetch(`http://127.0.0.1:${serverState.port}/session/status`, { signal: AbortSignal.timeout(3000) });
             if (res.ok) result.busy = Object.keys(await res.json()).length;
           } catch {}
           sendResponse(result);
