@@ -1,5 +1,15 @@
 # Changelog
 
+# [2.26.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.25.1...v2.26.0) (2026-11-19)
+
+
+### Features
+
+* opencode 2.x 권한·질문(form) 카드 지원 ([34ba4b9](https://github.com/fantaXII/opencode_chrome_ext/commit/34ba4b98bba4d81ec182e2ae3e91b8b3cdb5034a))
+* opencode 2.x 대화 흐름 지원(세션·전송·스트리밍·기록) ([cfe127a](https://github.com/fantaXII/opencode_chrome_ext/commit/cfe127aa30c2d05bb45b1fdc70622be665fe389c))
+* opencode 2.x 모델·에이전트·명령·MCP·세션 목록·하위 에이전트 지원 ([e0e8513](https://github.com/fantaXII/opencode_chrome_ext/commit/e0e85133ea3ef1a4b437c6cd6c76ab910155b1eb))
+* 서버를 비밀번호(Basic Auth)로 보호하고 API 버전을 판별 ([8b81d45](https://github.com/fantaXII/opencode_chrome_ext/commit/8b81d45b1ba88bb4b04ccf9ff16db332f9a278ea))
+
 ## [2.25.1](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.25.0...v2.25.1) (2026-11-18)
 
 
