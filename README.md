@@ -69,16 +69,18 @@
 
 ### 사용하는 OpenCode REST API
 
-| 엔드포인트 | 용도 |
-|-----------|------|
-| `GET /global/health` | 서버 상태 확인 |
-| `POST /session`, `GET /session/{id}` | 세션 생성 / 세션 작업 폴더 확인 |
-| `POST /session/{id}/prompt` | 메시지 전송 |
-| `GET /event` | SSE 이벤트 스트림 |
-| `GET /session/status` | 세션 busy/idle 확인 (재연결·SW 재시작 복구) |
-| `GET /config/providers`, `PATCH /config` | 모델 목록 / 모델 변경 |
-| `POST /permission/{id}/reply`, `POST /question/{id}/reply` | 권한·질문 요청 응답 |
-| `POST /global/dispose` | 소프트 재시작 (config/MCP/skill/agent 다시 읽기) |
+서버의 API 버전(1.x = v1, 2.x = v2)에 따라 엔드포인트가 다릅니다. 두 버전 모두 확장이 서버를 띄울 때 건 비밀번호로 Basic 인증을 붙입니다.
+
+| 용도 | 1.x (v1) | 2.x (v2) |
+|------|----------|----------|
+| 서버 상태 확인 | `GET /global/health` | `GET /api/info` |
+| 세션 생성 / 작업 폴더 확인 | `POST /session`, `GET /session/{id}` | `POST /api/session`, `GET /api/session/{id}` |
+| 메시지 전송 / 중단 | `POST /session/{id}/prompt_async`, `/abort` | `POST /api/session/{id}/prompt`, `/interrupt` |
+| SSE 이벤트 스트림 | `GET /global/event` | `GET /api/event` |
+| 세션 busy/idle 확인 (재연결·SW 재시작 복구) | `GET /session/status` | `GET /api/session/active` |
+| 모델 목록 / 모델 변경 | `GET /config/providers`, `PATCH /config` | `GET /api/model`, `POST /api/session/{id}/model` |
+| 권한·질문 요청 응답 | `POST /permission/{id}/reply`, `POST /question/{id}/reply` | `POST /api/session/{sid}/permission/{id}/reply`, `POST /api/session/{sid}/form/{id}/reply` |
+| 소프트 재시작 (config/MCP/skill/agent 다시 읽기) | `POST /global/dispose` | `POST /api/location/reload` |
 
 ### 서버 재시작 (2단계)
 
@@ -101,9 +103,18 @@ OpenCode는 새로 등록한 MCP/skill/agent를 자동으로 반영하지 않습
 ### 사용 환경
 
 - Windows 10/11 + Google Chrome
-- [OpenCode CLI](https://opencode.ai) — Windows 또는 WSL 중 한 곳 이상에 설치
+- [OpenCode CLI](https://opencode.ai) — Windows 또는 WSL 중 한 곳 이상에 설치. 1.x와 2.x를 모두 지원합니다([OpenCode 1.x와 2.x](#opencode-1x와-2x) 참고)
 - Node.js 18+ (Native Host 실행용. 없으면 인스톨러가 winget으로 LTS 설치를 시도합니다)
 - WSL에서 OpenCode를 쓰는 경우: WSL2 + mirrored networking ([WSL 지원](#wsl-지원) 참고)
+
+### OpenCode 1.x와 2.x
+
+확장은 연결한 서버의 API 버전을 판별해 1.x와 2.x에 같은 기능을 제공합니다. 2.x 서버에 연결되면 헤더의 실행 환경 배지 옆에 **v2** 배지가 붙습니다.
+
+- **Native Host v2.26.0 이상이 필요합니다.** 확장은 서버를 띄울 때마다 무작위 비밀번호를 걸고(`OPENCODE_SERVER_PASSWORD`) 그 비밀번호로 접속합니다. 2.x는 비밀번호를 받지 못하면 스스로 정한 비밀번호를 걸기 때문에, 이전 Native Host가 띄운 2.x 서버에는 접속할 수 없습니다. 이때는 "Native Host 업데이트 필요" 안내가 나오며, 새 인스톨러를 기존 설치 위에 실행하면 됩니다.
+- **1.x와 2.x는 대화 기록을 공유하지 않습니다.** 2.x는 처음 실행할 때 그때까지의 1.x 세션을 한 번 복사할 뿐이라, 버전을 오가면 `/sessions` 목록과 최근 폴더가 서로 다르게 보입니다. 터미널 TUI(1.x)와 확장(2.x)을 함께 쓰면 서로의 세션이 보이지 않습니다.
+- oh-my-openagent 등 1.x용 플러그인은 2.x에서 동작하지 않습니다.
+- 2.x가 확장에서 응답할 수 없는 형식의 입력 요청(질문 외의 form)을 보내면 카드에 "TUI에서 응답하거나 건너뛰기"만 표시됩니다.
 
 ### 개발 환경
 
@@ -275,6 +286,8 @@ networkingMode=mirrored
 | `opencode를 찾을 수 없음 (Windows/WSL 모두 확인)` | Windows: `where opencode` / WSL: `which opencode`, `opencode --version`. WSL이면 [찾는 순서](#wsl에서-opencode-찾는-순서) 참고 |
 | 서버 연결 실패 (WSL) | `.wslconfig`의 `networkingMode=mirrored`, `wsl.exe --shutdown` 후 재시도, `wsl ss -ltnp \| grep 4096`으로 포트 확인 |
 | 서버를 직접 띄워 확인 | `opencode serve --port 4096` 실행 후 사이드패널의 **재연결** |
+| opencode 2.x에서 "Native Host 업데이트 필요" | Native Host v2.26.0 이상을 설치한 뒤 **다시 시도** ([OpenCode 1.x와 2.x](#opencode-1x와-2x) 참고) |
+| 2.x로 바꾼 뒤 `/sessions`에 예전 대화가 없음 | 1.x와 2.x는 대화 기록을 공유하지 않습니다. 이전 대화는 그 버전의 opencode에서 이어갈 수 있습니다 |
 | 응답이 비어 있음 | 작업 폴더가 서버 환경(Windows/WSL)에 실제로 있는지, 모델·API 키 설정 확인 |
 | 새 MCP/skill이 안 보임 | MCP 메뉴의 **↻ 설정 다시 읽기** |
 | 서버가 응답하지 않음 | ⚙ → **서버 강제 재시작** |
@@ -291,6 +304,8 @@ opencode_chrome_ext/
 ├── manifest.json               # Manifest V3 (service worker는 ES module)
 ├── background.js               # Service Worker: 서버·세션·REST·SSE·Native Messaging
 ├── lib/
+│   ├── opencode-api.mjs        # 서버 요청 계층(포트별 비밀번호로 Basic 인증), 2.x 판별
+│   ├── opencode-v2.mjs         # 2.x 이벤트·목록·기록을 1.x 모양으로 바꾸는 어댑터
 │   ├── part-router.mjs         # SSE 메시지 파트 라우팅
 │   └── sw-resilience.mjs       # SW 종료 대응(keepalive, 중단된 프롬프트 복구)
 ├── sidepanel/

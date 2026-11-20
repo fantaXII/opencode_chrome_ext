@@ -246,7 +246,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
 
 /**
  * OpenCode 서버 상태 확인.
- * 결과: { available, version, apiVersion?: 'v1'|'v2', unsupportedApi?: 'v2', authRequired?: true }
+ * 결과: { available, version, apiVersion?: 'v1'|'v2', authRequired?: true }
  * 비밀번호를 모르는 포트가 401을 주면 host의 server-info로 비밀번호를 받아 한 번 더 묻는다(recover).
  * 그래도 401이면 다른 프로그램이 비밀번호를 걸고 띄운 서버로 보고 쓰지 않는다.
  */
@@ -273,10 +273,6 @@ async function checkServerHealth(port, { recover = true } = {}) {
       // opencode 2.x는 API를 /api/ 아래로 옮겼고, 예전 경로에는 웹 UI HTML을 200으로 준다.
       const v2 = await probeV2(ocFetch, port);
       if (v2.v2) {
-        if (!V2_ENABLED) {
-          logOnce(`v2:${port}`, 'WARN', `checkServerHealth: port ${port} is an opencode 2.x server (v2 API) - not supported yet`);
-          return { available: false, version: null, unsupportedApi: 'v2' };
-        }
         if (v2.authorized) {
           portApiVersions.set(port, 'v2');
           return { available: true, version: v2.version, apiVersion: 'v2' };
@@ -346,19 +342,18 @@ function rememberServerPassword(port, response) {
 }
 
 // ============================================
-// opencode 2.x(v2 API) 감지 — 아직 지원하지 않는다
+// 비밀번호를 모르는 서버 — 구버전 host가 띄운 opencode 2.x
 // ============================================
 //
-// opencode 2.x는 API를 /api/ 아래로 옮기고 인증(실행마다 무작위 비밀번호)을 요구한다. 예전 경로(/global/health 등)에는
-// 웹 UI HTML을 200으로 주므로, 확장은 서버가 없다고 보고 새 서버를 계속 띄웠다(2.3.2 실측: 4096, 4097 …).
-// 감지하면 서버를 더 띄우지 않고 사이드패널에 1.x로 내리라는 안내를 띄운다(init-server의 reason).
-// V2_ENABLED는 v2 지원이 완성될 때(docs/opencode_v2_support_plan.md 5단계) 켠다. 그 전에는 판별만 하고 막아 둔다.
-const V2_ENABLED = false;
-const UNSUPPORTED_RETRY_COOLDOWN_MS = 30000;
-// 마지막으로 2.x를 감지한 결과 { api, port, at }. 사용자가 시작한 연결(init-server)이 아니면 쿨다운 동안 서버를 다시 띄우지 않는다.
-let unsupportedServer = null;
-// 마지막 범위 검사에서 2.x로 판별된 포트
-let lastScanUnsupportedPorts = [];
+// opencode 2.x는 비밀번호를 env(OPENCODE_SERVER_PASSWORD)로 받지 않으면 실행마다 무작위 비밀번호를 건다.
+// host 2.26.0 미만은 start의 auth를 몰라 비밀번호 없이 띄우므로, 확장은 그 서버에 붙을 수 없다(401).
+// 기다려도 소용없으므로 방금 띄운 서버를 바로 정리하고 사이드패널에 host 업데이트 안내를 띄운다(init-server의 reason).
+// 그대로 두면 다음 연결마다 서버를 새로 띄워 4096, 4097 …에 쌓였다.
+const START_FAILURE_COOLDOWN_MS = 30000;
+// 마지막 시작 실패 { reason: 'host-outdated', port, at }. 사용자가 시작한 연결(init-server)이 아니면 쿨다운 동안 서버를 다시 띄우지 않는다.
+let startFailure = null;
+// 마지막 범위 검사에서 비밀번호를 몰라 쓰지 못한 포트(확장이 띄운 것만 새로 띄우기 전에 정리한다)
+let lastScanAuthFailedPorts = [];
 
 const _loggedOnce = new Set();
 /** 1초마다 도는 대기 루프 등에서 같은 경고가 로그를 덮지 않게 SW 수명 동안 한 번만 남긴다. */
@@ -368,7 +363,7 @@ function logOnce(key, level, msg) {
   debugLog(level, msg);
 }
 
-/** host로 포트의 서버를 종료한다(확장이 띄운 2.x 서버 정리용). host의 stop은 /global/health 200 기준이라 2.x에도 동작한다. */
+/** host로 포트의 서버를 종료한다(쓸 수 없는 확장 서버 정리용). host의 stop은 /global/health 200 기준이라 2.x에도 동작한다. */
 async function stopServerOnPort(port, why) {
   try {
     const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'stop', port });
@@ -386,7 +381,7 @@ async function stopServerOnPort(port, why) {
 async function scanHealthyPorts() {
   const ports = Array.from({ length: MAX_PORT_CHECK }, (_, i) => DEFAULT_PORT + i);
   const states = await Promise.all(ports.map((port) => checkServerHealth(port)));
-  lastScanUnsupportedPorts = ports.filter((_, i) => states[i].unsupportedApi);
+  lastScanAuthFailedPorts = ports.filter((_, i) => states[i].authRequired);
   return ports.filter((_, i) => states[i].available);
 }
 
@@ -443,7 +438,7 @@ function forgetManagedVerification() {
  * 다른 프로그램이 띄운 서버는 건너뛴다. host가 판정하지 못할 때만 예전처럼 아무 서버나 고른다.
  */
 async function findAvailablePort() {
-  lastScanUnsupportedPorts = [];
+  lastScanAuthFailedPorts = [];
   let stored = null;
   let verified = null;
   try {
@@ -677,11 +672,12 @@ async function waitForServer(expectedPort, timeout = SERVER_START_TIMEOUT) {
   // host가 알려준 그 포트만 본다. 범위를 다시 훑으면 다른 프로그램(TUI 등)의 서버를 고를 수 있다.
   while (Date.now() - startTime < timeout) {
     const health = await checkServerHealth(expectedPort);
-    if (health.unsupportedApi) {
-      // 설치된 opencode가 2.x다. 기다려도 소용없고, 띄운 서버는 쓸 수 없으니 바로 정리한다.
-      unsupportedServer = { api: health.unsupportedApi, port: expectedPort, at: Date.now() };
-      debugLog('ERROR', `waitForServer: started server on port ${expectedPort} is opencode 2.x (v2 API) - stopping it`);
-      await stopServerOnPort(expectedPort, 'unsupported-api');
+    if (health.authRequired) {
+      // 방금 띄운 서버가 비밀번호를 요구하는데 host가 알려 주지 않았다 = 비밀번호를 모르는 구버전 host가 띄운 2.x.
+      // 기다려도 소용없고 쓸 수 없는 서버이므로 바로 정리한다.
+      startFailure = { reason: 'host-outdated', port: expectedPort, at: Date.now() };
+      debugLog('ERROR', `waitForServer: started server on port ${expectedPort} requires a password the host did not provide (native host older than ${MIN_HOST_VERSION}) - stopping it`);
+      await stopServerOnPort(expectedPort, 'auth-unknown');
       return null;
     }
     const port = health.available ? expectedPort : null;
@@ -703,8 +699,8 @@ let _ensureServerPromise = null;
 /**
  * OpenCode 서버 초기화
  */
-// userInitiated: 사이드패널을 열거나 "재연결"을 누른 경우(init-server). opencode 2.x를 감지한 직후에는
-// 이 경우에만 서버를 다시 띄워 본다(사용자가 1.x로 내렸을 수 있다). 그 밖의 호출은 쿨다운 동안 건너뛴다.
+// userInitiated: 사이드패널을 열거나 "재연결"을 누른 경우(init-server). 서버 시작이 실패한 직후(startFailure)에는
+// 이 경우에만 서버를 다시 띄워 본다(사용자가 host를 업데이트했을 수 있다). 그 밖의 호출은 쿨다운 동안 건너뛴다.
 async function ensureOpenCodeServer({ userInitiated = false } = {}) {
   // 하드 재시작 중에는 서버가 잠시 사라진다. 여기서 새 서버를 띄우면 재시작이 띄운 서버와
   // 겹쳐 두 개가 되므로, 재시작이 끝날 때까지 기다렸다가 그 결과를 쓴다.
@@ -742,14 +738,14 @@ async function ensureOpenCodeServer({ userInitiated = false } = {}) {
       debugLog('INFO', `Server: existing server found on port ${existingPort}, version=${health.version}`);
       console.log(`[ensureOpenCodeServer] 기존 OpenCode 서버 발견: 포트 ${existingPort}, version=${health.version}`);
       port = existingPort;
-    } else if (!userInitiated && unsupportedServer && Date.now() - unsupportedServer.at < UNSUPPORTED_RETRY_COOLDOWN_MS) {
-      console.log(`[ensureOpenCodeServer] opencode 2.x 감지 직후 - 서버를 다시 띄우지 않음`);
+    } else if (!userInitiated && startFailure && Date.now() - startFailure.at < START_FAILURE_COOLDOWN_MS) {
+      console.log(`[ensureOpenCodeServer] 서버 시작 실패 직후(${startFailure.reason}) - 서버를 다시 띄우지 않음`);
     } else {
-      // 확장이 예전에 띄운 2.x 서버가 남아 있으면 먼저 정리한다(다른 프로그램의 서버는 건드리지 않는다).
-      for (const v2Port of lastScanUnsupportedPorts) {
-        if ((await checkManagedServer(v2Port)) === 'managed') await stopServerOnPort(v2Port, 'stale-unsupported-api');
+      // 확장이 예전에 띄웠지만 비밀번호를 몰라 쓸 수 없는 서버가 남아 있으면 먼저 정리한다(다른 프로그램의 서버는 건드리지 않는다).
+      for (const stalePort of lastScanAuthFailedPorts) {
+        if ((await checkManagedServer(stalePort)) === 'managed') await stopServerOnPort(stalePort, 'stale-auth-unknown');
       }
-      unsupportedServer = null;
+      startFailure = null;
       debugLog('INFO', 'Server: no running server, requesting start via NativeMsg...');
       console.log(`[ensureOpenCodeServer] OpenCode 서버 없음, Native Messaging으로 시작 시도...`);
       const startedPort = await startServerWithNativeMessaging();
@@ -2839,10 +2835,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const reason = port ? undefined
             : nativeHostMissingFlag ? 'native-host-missing'
-            : unsupportedServer ? 'opencode-unsupported'
+            : startFailure ? startFailure.reason
             : undefined;
           nativeHostMissingFlag = false;
-          sendResponse({ success: !!port, available: !!port, port, version: serverState.version, apiVersion: port ? serverState.apiVersion : null, reason });
+          sendResponse({
+            success: !!port, available: !!port, port, version: serverState.version, apiVersion: port ? serverState.apiVersion : null, reason,
+            ...(reason === 'host-outdated' ? { required: MIN_HOST_VERSION } : {})
+          });
           break;
 
         case 'create-session':

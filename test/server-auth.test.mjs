@@ -117,7 +117,7 @@ test('host가 비밀번호를 주지 않으면(구버전 host) 예전처럼 인�
   assert.equal(bg.sessionStorage.serverPasswords, undefined);
 });
 
-test('API 버전을 판별한다: 1.x는 v1, (V2_ENABLED일 때) 비밀번호를 아는 2.x는 v2', async (t) => {
+test('API 버전을 판별한다: 1.x는 v1, 비밀번호를 아는 2.x는 v2', async (t) => {
   const PW = 'pw-v2';
   const { default: http } = await import('node:http');
   const v2 = http.createServer((req, res) => {
@@ -142,7 +142,6 @@ test('API 버전을 판별한다: 1.x는 v1, (V2_ENABLED일 때) 비밀번호를
   const bg2 = await loadBackground({
     port: await freePort(),
     local: MODEL,
-    constants: { V2_ENABLED: 'true' },
     nativeMessage: (msg) => (msg.action === 'start' ? { status: 'success', port: v2Port, isWSL: true, password: PW } : { status: 'success' })
   });
   t.after(() => bg2.cleanup());

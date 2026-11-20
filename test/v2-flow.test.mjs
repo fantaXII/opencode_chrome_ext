@@ -1,7 +1,7 @@
 // 실행: node --test test/v2-flow.test.mjs
 // opencode 2.x 서버에서의 대화 흐름(docs/opencode_v2_support_plan.md 2단계): 세션 생성(location)·전송(delivery:queue)·
 // 스트리밍(v2 이벤트 → 1.x 처리)·대기 메시지·중단(interrupt)·기록(페이지·parentID)·상태 확인(/api/session/active).
-// 실제 background.js를 V2_ENABLED=true로 불러오고, 응답은 실제 2.3.2에서 기록한 턴을 재생한다.
+// 실제 background.js를 불러오고, 응답은 실제 2.3.2에서 기록한 턴을 재생한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startMockOpencodeV2, loadFixture } from './helpers/mock-opencode-v2.mjs';
@@ -17,7 +17,7 @@ async function setup({ local = {}, constants = {}, server = {}, before } = {}) {
   before?.(srv);
   const bg = await loadBackground({
     port: srv.port,
-    constants: { V2_ENABLED: 'true', ...constants },
+    constants,
     local: { managedServerPort: srv.port, workingDirectory: '/work', selectedModel: { providerID: 'opencode', modelID: 'tidepool-alpha-free' }, ...local },
     nativeMessage: (msg) => (msg.action === 'server-info' ? { status: 'success', managed: true, password: PW } : { status: 'success' })
   });
@@ -160,7 +160,6 @@ test('SW가 응답 중에 다시 떴으면 /api/session/active로 끝나기를 �
   // SW가 죽기 전에 남긴 기록: 응답 중이던 세션(pendingPrompts)과 서버 비밀번호
   const bg = await loadBackground({
     port: srv.port,
-    constants: { V2_ENABLED: 'true' },
     local: { managedServerPort: srv.port },
     session: {
       serverPasswords: { [srv.port]: PW },

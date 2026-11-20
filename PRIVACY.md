@@ -1,6 +1,6 @@
 # Privacy Policy / 개인정보처리방침
 
-**Last updated / 최종 수정일: 2026-11-15**
+**Last updated / 최종 수정일: 2026-11-20**
 
 ---
 
@@ -16,6 +16,7 @@
 | Current tab's **title and URL** | When you send a message (default setting "Title & URL") | Same as above |
 | Current tab's **page content** (main text extracted from the page as shown in your browser, up to 50,000 characters) and **selected text** | Only when (a) you choose "Title, URL, content & selection" in ⚙ Settings, (b) you click a quick action button on the page bubble (e.g. "Summary") that is set to send page content, or (c) you choose "Read this time" / "Keep for this session" after the server failed to fetch the page — **and** you granted page access (for that site or all sites) | Same as above |
 | Settings (model, working folder, language, runtime, proxy, quick action buttons you created), debug log | Stored on your device | `chrome.storage` in your browser, and a local log file of the native host |
+| Local server password (a random value the native host generates each time it starts the OpenCode server, so that only this extension can connect to it) | Created when the server starts | Your browser's session storage (`chrome.storage.session`, cleared when the browser closes) and a file on your computer (`%LOCALAPPDATA%\OpenCodeChrome\server.json`). Sent only to the OpenCode server on your computer (`127.0.0.1`) |
 
 ### Data sent to third parties
 
@@ -31,7 +32,7 @@ You can turn off page information entirely by choosing "Do not send" for **Page 
 
 ### Native messaging host
 
-The optional Windows native host (installed separately) only starts/stops the local OpenCode server, opens folder/file pickers, and reads its own log file. It does not send any data to the internet. Its installer may download Node.js from the official site (nodejs.org) if Node.js is not already installed.
+The optional Windows native host (installed separately) only starts/stops the local OpenCode server (with a random password it generates), opens folder/file pickers, and reads its own log file. It does not send any data to the internet. Its installer may download Node.js from the official site (nodejs.org) if Node.js is not already installed.
 
 ---
 
@@ -47,6 +48,7 @@ The optional Windows native host (installed separately) only starts/stops the lo
 | 현재 탭의 **제목·URL** | 메시지를 보낼 때 (기본 설정 "제목·URL") | 위와 같음 |
 | 현재 탭의 **페이지 내용**(브라우저에 보이는 페이지에서 추출한 본문, 최대 50,000자)과 **선택한 텍스트** | (가) ⚙ 설정에서 "제목·URL·본문·선택 텍스트"를 골랐거나, (나) 페이지 말풍선의 빠른 실행 버튼(예: "요약") 중 본문을 함께 보내도록 된 버튼을 눌렀거나, (다) 서버가 페이지를 가져오지 못했을 때 "이번만 읽기"/"이 세션에서 계속"을 고른 경우로서, **페이지 읽기 권한(그 사이트 또는 모든 사이트)을 허용한 경우에만** | 위와 같음 |
 | 설정값(모델, 작업 폴더, 언어, 실행 환경, 프록시, 직접 만든 빠른 실행 버튼), 디버그 로그 | 기기에 저장 | 브라우저의 `chrome.storage`, Native Host의 로컬 로그 파일 |
+| 로컬 서버 비밀번호(이 확장만 서버에 접속할 수 있도록 Native Host가 OpenCode 서버를 띄울 때마다 새로 만드는 무작위 값) | 서버를 시작할 때 생성 | 브라우저의 세션 저장소(`chrome.storage.session`, 브라우저를 닫으면 지워짐)와 PC의 파일(`%LOCALAPPDATA%\OpenCodeChrome\server.json`). 사용자 PC의 OpenCode 서버(`127.0.0.1`)로만 전송 |
 
 ### 제3자에게 전달되는 데이터
 
@@ -62,7 +64,7 @@ OpenCode는 응답을 생성하기 위해 메시지(위와 같이 첨부된 페�
 
 ### Native Messaging Host
 
-별도로 설치하는 Windows용 Native Host는 로컬 OpenCode 서버 시작·종료, 폴더/파일 선택 창 열기, 자체 로그 파일 읽기만 수행하며 인터넷으로 데이터를 보내지 않습니다. 인스톨러는 Node.js가 설치되어 있지 않으면 공식 사이트(nodejs.org)에서 내려받을 수 있습니다.
+별도로 설치하는 Windows용 Native Host는 로컬 OpenCode 서버 시작(무작위 비밀번호 생성 포함)·종료, 폴더/파일 선택 창 열기, 자체 로그 파일 읽기만 수행하며 인터넷으로 데이터를 보내지 않습니다. 인스톨러는 Node.js가 설치되어 있지 않으면 공식 사이트(nodejs.org)에서 내려받을 수 있습니다.
 
 ---
 

@@ -221,7 +221,16 @@ session.inbox.enqueued → session.execution.started → session.instructions.up
 - `get-server-origin`(프록시 저장 시 재시작 안내)의 세션 수를 `/api/session/active`로.
 - 헤더에 서버 버전 배지(v1/v2) 표시 — `serverState.runtime` 배지 옆.
 
-### 5단계: 마무리·릴리스
+### 5단계: 마무리·릴리스 — 코드·문서 완료 (2026-11-20), 실서버 E2E 남음
+
+구현한 것:
+- `V2_ENABLED`와 2.x 거부(`unsupportedApi`, `opencode-unsupported`, 사이드패널 `showUnsupportedOpencodeGuide`·`opencode upgrade 1.19.5` 안내, i18n·CSS) 제거. 3.x 감지는 두지 않았다(3.x가 `/api/info`를 유지하면 v2로 시도된다).
+- 거부 로직이 막아 주던 회귀를 다른 이유로 다시 막았다: **구버전 host(2.26.0 미만)는 `auth`를 몰라 2.x를 비밀번호 없이 띄우고, 2.x는 스스로 비밀번호를 걸어** 확장이 접속하지 못한다(401). 그대로 두면 연결마다 서버가 4096, 4097 …에 쌓인다. `waitForServer`가 방금 띄운 포트의 `authRequired`를 보면 host `stop`으로 정리하고 `startFailure {reason:'host-outdated'}`를 남긴다. 쿨다운(`START_FAILURE_COOLDOWN_MS`)과 확장이 띄운 잠긴 서버 정리(`lastScanAuthFailedPorts` + `managed`)는 예전 2.x 거부의 구조를 그대로 옮겼다. `init-server`가 `reason:'host-outdated'`, `required: MIN_HOST_VERSION`을 돌려 사이드패널이 Native Host 업데이트 안내(`showNativeHostGuide('outdated')`)를 띄운다.
+- 테스트: `test/unsupported-opencode.test.mjs` → `test/v2-auth-unknown.test.mjs`(구버전 host가 띄운 2.x 정리·쿨다운, host 업데이트 뒤 잠긴 확장 서버 정리, 다른 프로그램의 서버는 건드리지 않음). 테스트의 `V2_ENABLED` 치환 제거. 전체 154개 통과.
+- 문서: `CLAUDE.md`(2.x 지원 구조, REST 표 v1/v2 열), `README.md`(요구사항·"OpenCode 1.x와 2.x" 절·REST 표·문제 해결·디렉터리 구조), `PRIVACY.md`(로컬 서버 비밀번호 저장 위치).
+- **남은 것**: 아래 "검증"의 실서버 E2E. 이 환경에 2.3.2 바이너리가 없어 3·4단계 경로(권한·form 응답/건너뛰기, `/api/model` 형식, MCP 목록·토글, `/api/location/reload`, `/이름` 명령 해석)는 mock·OpenAPI로만 확인했다.
+
+원래 계획:
 - 거부 로직·`showUnsupportedOpencodeGuide` 제거(또는 "지원하지 않는 3.x 이상" 감지로 전환).
 - `CLAUDE.md`: "opencode 2.x는 아직 지원하지 않는다" 절을 v1/v2 어댑터 구조 설명으로 교체, REST API 표에 v2 열 추가.
 - `README`/`PRIVACY.md` 확인(로컬 비밀번호 저장 언급).

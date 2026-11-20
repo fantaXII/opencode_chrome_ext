@@ -130,8 +130,14 @@ I18N.ready.then(function() {
         if (!currentWorkingDir) await loadWorkingDirectory();
       } else if (serverState.reason === 'native-host-missing') {
         showNativeHostGuide();
-      } else if (serverState.reason === 'opencode-unsupported') {
-        showUnsupportedOpencodeGuide();
+      } else if (serverState.reason === 'host-outdated') {
+        // 구버전 host가 비밀번호 없이 띄운 opencode 2.x에는 붙을 수 없다. 연결 실패이므로 닫은 안내(hostGuideDismissed)와 무관하게 보인다.
+        // 연결 화면(z-index가 더 높다)은 숨긴다. 안내의 "다시 연결"이 init()으로 재연결한다.
+        // 연결되지 않아 쓸 수 있는 화면이 없으므로 "나중에"는 보이지 않는다.
+        updateConnectionStatus('disconnected');
+        showNativeHostGuide('outdated', null, serverState.required);
+        guideDismissBtn.classList.add('hidden');
+        connectingIndicator.classList.add('hidden');
       } else {
         updateConnectionStatus('disconnected');
       }
@@ -2469,22 +2475,6 @@ I18N.ready.then(function() {
   retryBtn.addEventListener('click', () => {
     init();
   });
-
-  // opencode 2.x(v2 API)는 아직 지원하지 않는다. background가 서버를 더 띄우지 않고 reason으로 알려 준다.
-  // 동작을 확인한 1.x 버전으로 내리는 명령을 보여 주고, 내린 뒤 "재연결"로 다시 시도하게 한다.
-  const RECOMMENDED_OPENCODE_V1 = '1.19.5';
-  function showUnsupportedOpencodeGuide() {
-    updateConnectionStatus('disconnected');
-    const cmd = `opencode upgrade ${RECOMMENDED_OPENCODE_V1}`;
-    connectingMessage.innerHTML = `
-      <div>${escapeHtml(t('opencode 2.x는 아직 지원하지 않습니다'))}</div>
-      <div class="connecting-detail">${escapeHtml(t('opencode를 1.x로 내린 뒤 재연결을 눌러 주세요.'))}</div>
-      <code class="connecting-cmd" title="${escapeHtml(t('클릭하면 복사됩니다'))}">${escapeHtml(cmd)}</code>`;
-    const code = connectingMessage.querySelector('.connecting-cmd');
-    code.addEventListener('click', () => {
-      navigator.clipboard.writeText(cmd).then(() => showToast(t('✓ 복사됨'))).catch(() => {});
-    });
-  }
 
   // mode: 'missing'(host 미설치) | 'outdated'(설치됐지만 필요한 버전(required = MIN_HOST_VERSION)보다 낮음)
   // 안내하는 인스톨러는 항상 현재 확장 버전과 같은 릴리스의 파일이다(최신 host).

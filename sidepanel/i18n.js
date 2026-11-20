@@ -275,9 +275,6 @@
 
     // ---- 디버그 ----
     '✓ 복사됨': '✓ Copied',
-    'opencode 2.x는 아직 지원하지 않습니다': 'opencode 2.x is not supported yet',
-    'opencode를 1.x로 내린 뒤 재연결을 눌러 주세요.': 'Downgrade opencode to 1.x, then press Reconnect.',
-    '클릭하면 복사됩니다': 'Click to copy',
     '수동으로 복사하세요': 'Copy manually',
     '디버그 로그 수집 중...': 'Collecting debug logs...',
     '디버그 로그 수집 실패: {error}': 'Failed to collect debug logs: {error}',
