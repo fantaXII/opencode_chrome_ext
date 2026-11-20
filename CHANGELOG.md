@@ -1,5 +1,12 @@
 # Changelog
 
+# [2.27.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.26.0...v2.27.0) (2026-11-20)
+
+
+### Features
+
+* opencode 2.x 지원을 켜고, 구버전 host가 띄운 2.x는 host 업데이트를 안내 ([572b522](https://github.com/fantaXII/opencode_chrome_ext/commit/572b52228bf8df70db6f556852d3b36dce743e34))
+
 # [2.26.0](https://github.com/fantaXII/opencode_chrome_ext/compare/v2.25.1...v2.26.0) (2026-11-19)
 
 
